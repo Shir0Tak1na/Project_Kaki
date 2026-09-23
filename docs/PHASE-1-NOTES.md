@@ -486,7 +486,7 @@ Math.max(11, Math.min(26, 16 * scale)) * dpr     // scale 0.4467 → 11 CSS px
 | 测试总数 | 157 个单元测试 + 19 个冒烟场景 / 310 条断言（数字由 `smoke.mjs` 自己数出来并在末尾打印） |
 
 > 上表是 **Phase 1 结束时的快照**，之后又加了 Base 视图、SVG 导出、几何模式、地图面板等增量。
-> 当前基线请以 README §1 与 `docs/HANDOFF.md` 为准（两者都会随改动同步）。
+> 当前基线请以 `docs/HANDOFF.md` 与 `docs/ENGINEERING-NOTES.md` 为准（两者都会随改动同步）。
 
 ## 测试写法上的一条教训
 

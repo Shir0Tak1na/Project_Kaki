@@ -7,7 +7,8 @@
 
 > ⚠️ 但地图文档类型 `fictional-cartographer-map`、Base 视图 ID `fictional-map`、面板视图 ID
 > `fictional-cartographer-panel` **不要改**：它们写在用户的 `.map.md` frontmatter、`.base` 文件和
-> `.obsidian/workspace.json` 里，改了等于让用户已有的地图、Base 和侧栏布局失效（详见 README §5.8）。
+> `.obsidian/workspace.json` 里，改了等于让用户已有的地图、Base 和侧栏布局失效
+> （详见 [`ENGINEERING-NOTES.md`](./ENGINEERING-NOTES.md) §5.8）。
 > 一句话判断法：**标识出现在用户文件里 → 不动；只出现在插件自己的注册调用里 → 可以改。**
 
 ## 当前基线
@@ -151,6 +152,8 @@ node scripts/deploy.mjs
 
 ## 关键文件入口
 
+- [README.md](../README.md)：**面向使用者的门面**（安装、快捷键、Base 用法、FAQ）。改功能时同步改它。
+- [docs/ENGINEERING-NOTES.md](./ENGINEERING-NOTES.md)：工程笔记（踩过的坑、测试策略、未验证项）。
 - [src/main.ts](../src/main.ts)：命令注册、设置加载、插件入口。
 - [src/ui/MapPanel.ts](../src/ui/MapPanel.ts)：侧边栏地图面板（状态签名 + 逐帧合并，避免侧栏发卡）。
 - [src/ui/SettingsTab.ts](../src/ui/SettingsTab.ts)：字号、网格与开发者模式设置。

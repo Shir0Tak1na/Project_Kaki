@@ -2,7 +2,7 @@
 
 > 项目名为 Project Kaki（译名 Project 垣）。插件 ID 为 `project-kaki`；
 > 但地图文档类型 `fictional-cartographer-map` 与 Base 视图 ID `fictional-map` 是写在用户文件里的
-> 持久化标识，保持原样（README §5.8）。
+> 持久化标识，保持原样（见 `docs/ENGINEERING-NOTES.md` §5.8）。
 
 > 本文档在 v1 设计方案基础上重写。所有关于 Obsidian 平台行为的断言都给出了可核查的来源；
 > 凡是**没有**来源支持的推断，一律标 ⚠️ 并集中收录在 §11《待验证清单》，不得在实现中当作既定事实。
