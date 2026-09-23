@@ -23,7 +23,7 @@ import type {
   MarkerIcon,
   PathType,
   TerrainCell,
-  TerrainType,
+  TerrainId,
 } from '../data/mapDocument.ts'
 import { cellsAlongSegment } from './brushPath.ts'
 import { History, applyOp, opsFromPrevious, type MapOp } from './history.ts'
@@ -114,7 +114,8 @@ export interface MapEditorOptions {
 export interface EditorStatus {
   mode: EditorMode
   tool: EditorTool
-  terrainType: TerrainType
+  /** 当前地形 ID（内置 9 种之一，或用户自定义的 `custom:xxx`） */
+  terrainType: TerrainId
   markerIcon: MarkerIcon
   pathType: PathType
   regionColor: string
@@ -138,7 +139,7 @@ export class MapEditor {
 
   mode: EditorMode = 'select'
   tool: EditorTool = 'brush'
-  terrainType: TerrainType = 'forest'
+  terrainType: TerrainId = 'forest'
   markerIcon: MarkerIcon = 'town'
   pathType: PathType = 'river'
   /**
@@ -282,7 +283,14 @@ export class MapEditor {
     return this.mode
   }
 
-  setTerrainType(type: TerrainType): void {
+  /**
+   * 切换当前地形（内置或自定义都走这里 —— 编辑器只认 ID，不关心它是不是内置的）。
+   *
+   * 刻意**不校验** ID 是否在设置里存在：编辑器与设置层解耦，
+   * 而且用户删掉一个自定义地形之后，正在用的那个 ID 也只是"画上去会显示回退样式"，
+   * 不需要让编辑器在这里偷偷改掉他的选择。
+   */
+  setTerrainType(type: TerrainId): void {
     if (this.terrainType === type) return
     this.terrainType = type
     this.options.onStateChanged?.()

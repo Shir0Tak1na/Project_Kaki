@@ -43,6 +43,13 @@ import {
   normalizeRegionColors,
   type StylePalette,
 } from './render/stylePalette.ts'
+import {
+  MAX_CUSTOM_TERRAINS,
+  isBuiltinTerrain,
+  resolveTerrainStyle,
+  validateCustomTerrainInput,
+  type CustomTerrain,
+} from './render/terrainCatalog.ts'
 import type { PathType } from './data/mapDocument.ts'
 import { TextPromptModal, type TextPromptOptions } from './ui/TextPromptModal.ts'
 
@@ -89,6 +96,7 @@ export default class ProjectKakiPlugin extends Plugin {
       getShowGrid: () => this.pluginSettings.showGrid,
       // 样式（路径/区域颜色、名称字体族）：地图层每帧现读，改完设置立刻生效
       getStylePalette: () => this.getStylePalette(),
+      getCustomTerrains: () => this.getCustomTerrains(),
     })
 
     this.addSettingTab(new CartographerSettingTab(this.app, this))
@@ -383,7 +391,11 @@ export default class ProjectKakiPlugin extends Plugin {
       name: '地图',
       icon: 'map',
       factory: (controller, containerEl) =>
-        new MapBasesView(controller, containerEl, { app: this.app, store: this.store! }),
+        new MapBasesView(controller, containerEl, {
+          app: this.app,
+          store: this.store!,
+          getCustomTerrains: () => this.getCustomTerrains(),
+        }),
       options: () => [
         // 几何数据留在 .map.md 里，靠文件选项指过去 —— 不进 YAML
         {
@@ -477,7 +489,11 @@ export default class ProjectKakiPlugin extends Plugin {
     }
 
     try {
-      const created = await this.app.vault.create(exportPath, buildMapExportSvg(document))
+      // 现读一次设置：导出必须是"当前地图 + 当前自定义地形"的合成结果
+      const created = await this.app.vault.create(
+        exportPath,
+        buildMapExportSvg(document, 1600, 1000, this.getCustomTerrains()),
+      )
       new Notice(`已导出地图 SVG：${created.path}`, 8000)
       void this.app.workspace.openLinkText(created.path, '', false)
     } catch (error) {
@@ -518,6 +534,90 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 当前样式调色板（地图层每帧现读它，见 `MapLayerManagerDeps.getStylePalette`） */
   getStylePalette(): StylePalette {
     return paletteOf(this.pluginSettings)
+  }
+
+  /** 当前自定义地形（地图层、工具条、Base 缩略图、导出都现读它） */
+  getCustomTerrains(): readonly CustomTerrain[] {
+    return this.pluginSettings.customTerrains
+  }
+
+  /**
+   * 新增一个自定义地形。
+   *
+   * 全部校验在 `validateCustomTerrainInput` 里（纯函数），这里只负责落盘与通知渲染层。
+   * 重名（同一个 ID）会被拒绝并给出可读原因：**同一个 ID 两条定义**会让"画上去是哪个颜色"
+   * 变成一个说不清的问题（解析层按先出现的胜出，但用户看不出顺序）。
+   */
+  async addCustomTerrain(input: {
+    id: unknown
+    label?: unknown
+    color?: unknown
+    glyph?: unknown
+    imagePath?: unknown
+  }): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const result = validateCustomTerrainInput(input)
+    if (!result.ok) return result
+    if (this.pluginSettings.customTerrains.some((terrain) => terrain.id === result.terrain.id)) {
+      return { ok: false, problem: `已经有一个地形用了 ID ${result.terrain.id}` }
+    }
+    if (this.pluginSettings.customTerrains.length >= MAX_CUSTOM_TERRAINS) {
+      return { ok: false, problem: `最多 ${MAX_CUSTOM_TERRAINS} 个自定义地形` }
+    }
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      customTerrains: [...this.pluginSettings.customTerrains, result.terrain],
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+    return { ok: true }
+  }
+
+  /**
+   * 改一个自定义地形（按下标定位，因为 ID 不可改）。
+   *
+   * 只接受"补丁"：显示名、颜色、字形、图片路径。ID 不在补丁里 ——
+   * 改 ID 等于把地图文件里已有的格子指向另一个地形，那不是编辑而是数据迁移，
+   * 必须显式做成一个功能，不能顺手提供。
+   */
+  async updateCustomTerrain(
+    index: number,
+    patch: { label?: unknown; color?: unknown; glyph?: unknown; imagePath?: unknown },
+  ): Promise<void> {
+    const current = this.pluginSettings.customTerrains[index]
+    if (!current) return
+    const next = validateCustomTerrainInput({
+      id: current.id,
+      label: patch.label !== undefined ? patch.label : current.label,
+      color: patch.color !== undefined ? patch.color : current.color,
+      glyph: patch.glyph !== undefined ? patch.glyph : current.glyph,
+      imagePath: patch.imagePath !== undefined ? patch.imagePath : current.imagePath,
+    })
+    if (!next.ok) {
+      console.warn(`[project-kaki] 自定义地形 ${current.id} 的修改被拒绝：${next.problem}`)
+      return
+    }
+    const list = [...this.pluginSettings.customTerrains]
+    list[index] = next.terrain
+    this.pluginSettings = { ...this.pluginSettings, customTerrains: list }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
+  /**
+   * 删除一个自定义地形。
+   *
+   * **不动地图数据**：已经画了这个地形的格子仍然留在文件里，只是画成回退样式。
+   * 反过来做（顺手把格子删掉）是不可逆的，而且用户只是想改个颜色而已。
+   */
+  async removeCustomTerrain(index: number): Promise<void> {
+    const current = this.pluginSettings.customTerrains[index]
+    if (!current) return
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      customTerrains: this.pluginSettings.customTerrains.filter((_terrain, i) => i !== index),
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
   }
 
   private async loadSettings(): Promise<void> {
@@ -563,7 +663,7 @@ export default class ProjectKakiPlugin extends Plugin {
     this.layers?.setStylePalette()
   }
 
-  /** 样式恢复出厂（设置页的「恢复默认」） */
+  /** 样式恢复出厂（设置页的「恢复默认」）—— **不动自定义地形**：那是数据，不是样式偏好 */
   async resetStylePalette(): Promise<void> {
     this.pluginSettings = {
       ...this.pluginSettings,
@@ -746,7 +846,18 @@ export default class ProjectKakiPlugin extends Plugin {
     const summary = summarizeMapDocument(loaded.document)
     const warnings = loaded.issues.filter((issue) => issue.level === 'warning')
     const sizeKiB = (new TextEncoder().encode(loaded.rawText).length / 1024).toFixed(1)
-    const breakdown = summary.terrainBreakdown.map((item) => `${item.type}×${item.count}`).join(' ') || '无'
+    // 地形分类：内置保持原来的 `forest×2` 形式（既有报告格式不变 —— 用户不该为了新功能
+    // 重新适应一份报告）；自定义地形补上显示名与原始 ID，未知 ID 直接报出它是未知的。
+    const custom = this.getCustomTerrains()
+    const breakdown =
+      summary.terrainBreakdown
+        .map((item) => {
+          if (isBuiltinTerrain(item.type)) return `${item.type}×${item.count}`
+          const style = resolveTerrainStyle(item.type, custom)
+          const name = style.unknown ? style.label : `${style.label}(${item.type})`
+          return `${name}×${item.count}`
+        })
+        .join(' ') || '无'
 
     new Notice(
       [

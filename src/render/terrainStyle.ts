@@ -139,6 +139,33 @@ export const TERRAIN_STYLES: Record<TerrainType, TerrainStyle> = {
   },
 }
 
+/* ------------------------------------------------------ 自定义 / 未知地形的回退视觉 */
+
+/**
+ * 通用图元：自定义地形没指定"借用哪种内置字形"时用它。
+ *
+ * 为什么放在这里而不是 `terrainCatalog.ts`：字形是**数据**，本项目所有字形数据都在这一个文件里；
+ * 混进逻辑模块会让"将来换 SVG 符号库时只改这一个文件"这条承诺失效。
+ */
+export const GENERIC_TERRAIN_GLYPH: GlyphShape[] = [
+  { kind: 'circle', center: [0, 0], radius: 0.18, fill: INK },
+  { kind: 'circle', center: [-0.42, 0.4], radius: 0.09, fill: INK },
+  { kind: 'circle', center: [0.44, 0.38], radius: 0.09, fill: INK },
+]
+
+/**
+ * 未知地形（设置里没有这个 ID）的回退视觉。
+ *
+ * 刻意用中性灰 + 空心菱形，好让它在屏幕上**一眼可辨**：
+ * 用户看到这种格子时应当立刻意识到"这不是我定义的地形"，
+ * 而不是以为自己的颜色设置没生效。数据仍然完整保留在文件里（见 `parseTerrain`）。
+ */
+export const FALLBACK_TERRAIN_BASE = '#9aa5b1'
+export const FALLBACK_TERRAIN_OUTLINE = OUTLINE
+export const FALLBACK_TERRAIN_GLYPH: GlyphShape[] = [
+  { kind: 'polygon', points: [[0, -0.4], [0.38, 0], [0, 0.4], [-0.38, 0]], fill: 'rgba(255,255,255,0.45)', stroke: INK, width: 0.08 },
+]
+
 export function getTerrainStyle(type: TerrainType): TerrainStyle {
   return TERRAIN_STYLES[type]
 }

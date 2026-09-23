@@ -28,7 +28,22 @@ import { buildRenderPlan, worldToRaster, type MapRenderPlan } from './renderPlan
 import { MarkerLayer } from './MarkerLayer.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
 import { drawDraft, drawPath, drawRegion, labelCssPx } from './shapeDraw.ts'
-import { buildTerrainAtlas, drawTerrainCell, type TerrainAtlas } from './spriteAtlas.ts'
+import {
+  buildTerrainAtlas,
+  drawTerrainCell,
+  DEFAULT_SPRITE_RADIUS,
+  type BuildAtlasOptions,
+  type TerrainAtlas,
+} from './spriteAtlas.ts'
+import {
+  findCustomTerrain,
+  isBuiltinTerrain,
+  listResolvedTerrainStyles,
+  resolveTerrainStyle,
+  terrainCatalogSignature,
+  type CustomTerrain,
+  type ResolvedTerrainStyle,
+} from './terrainCatalog.ts'
 import type { ClientProjection } from '../core/projection.ts'
 import type { MapDraft } from '../editor/MapEditor.ts'
 
@@ -93,6 +108,18 @@ export interface MapOverlayOptions {
    * 设置层已经保证这里不会出现 `var()`：那种串会让整条 `ctx.font` 失效、字号静默退回默认值。
    */
   getLabelFontFamily?: () => string
+  /** 用户自定义地形（来自插件设置）；缺省即只有内置 9 种 */
+  getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 加载一格地形图片。
+   *
+   * **渲染层不允许自己碰 vault**（这条铁律让整个渲染层能在没有 Obsidian 的环境里测），
+   * 所以图片加载从这个口子注入，由 `MapLayerManager` 用 `app.vault` + 资源路径实现。
+   *
+   * 返回 `null` 表示"这张图用不了"（文件不存在 / 解码失败 / 没有可用的资源地址），
+   * 调用方会回退到颜色 + 字形，并把原因记在控制台。
+   */
+  loadTerrainImage?: (path: string) => Promise<CanvasImageSource | null>
 }
 
 function asElement(value: unknown): HTMLElement | null {
@@ -117,6 +144,16 @@ export class MapOverlay {
   private canvas: HTMLCanvasElement | null = null
   private ctx: CanvasRenderingContext2D | null = null
   private atlas: TerrainAtlas | null = null
+  /** 地形图集对应的"签名"（朝向 + 地形目录 + 已就绪的图片），变了才重建 */
+  private atlasSignature = ''
+  /** 已加载成功的图片（键 = **图片路径**，不是地形 ID） */
+  private readonly terrainImages = new Map<string, CanvasImageSource>()
+  /** 加载失败或正在加载的图片路径（避免每帧重复发起） */
+  private readonly terrainImageState = new Map<string, 'pending' | 'failed'>()
+  /** 已经为哪些未知地形 ID 告警过（每帧都会遇到，不能刷屏） */
+  private readonly warnedTerrainIds = new Set<string>()
+  /** 图集构建失败只告警一次（失败是持续状态，每帧都报会刷屏） */
+  private warnedAtlasFailure = false
   private markerLayer: MarkerLayer | null = null
   private uninstallPatch: (() => void) | null = null
 
@@ -482,13 +519,143 @@ export class MapOverlay {
     return this.markerLayer
   }
 
-  private atlasFor(document_: MapDocument): TerrainAtlas | null {    if (this.atlas && this.atlas.orientation === document_.grid.orientation) return this.atlas
-    this.atlas = buildTerrainAtlas(
-      this.canvasFactory
-        ? { orientation: document_.grid.orientation, factory: this.canvasFactory }
-        : { orientation: document_.grid.orientation },
-    )
+  /** 当前生效的自定义地形（每帧现读设置，改完设置不必重开画布） */
+  private customTerrains(): readonly CustomTerrain[] {
+    return this.options.getCustomTerrains?.() ?? []
+  }
+
+  /**
+   * 取（必要时重建）地形图集。
+   *
+   * 三件事必须在**同一个签名**下判断，否则会出现"设置改了但画布没变"或
+   * "图片加载好了却一直画回退色"这类只在特定时序下复现的问题：
+   * 1. 网格朝向（图集是按朝向光栅化的）；
+   * 2. 地形目录内容（用户增删改自定义地形）；
+   * 3. 哪些图片已经就绪（异步加载完成时要重建一次，把图贴进去）。
+   */
+  private atlasFor(document_: MapDocument): TerrainAtlas | null {
+    const custom = this.customTerrains()
+    this.warnUnknownTerrains(document_, custom)
+
+    // 图集必须覆盖**文档里出现的每一个 ID**，而不只是设置里定义的那些：
+    // 未知 ID（别人的库、被删掉的定义）也有回退视觉，漏掉它们的结果是
+    // `drawTerrainCell` 找不到精灵、那一格**直接不画** —— 用户看到的是"地图上有个洞"，
+    // 而不是"这一格颜色不对"。这正是"未知 t 必须接受并保留"这条承诺的另一半。
+    const byId = new Map<string, ResolvedTerrainStyle>()
+    for (const style of listResolvedTerrainStyles(custom)) byId.set(style.id, style)
+    for (const cell of Object.values(document_.terrain)) {
+      if (byId.has(cell.t)) continue
+      byId.set(cell.t, resolveTerrainStyle(cell.t, custom))
+    }
+    const styles = [...byId.values()]
+
+    // 先把"用到图片但这份文件还没加载过"的地形挑出来，异步加载；这一帧仍按颜色 + 字形画。
+    //
+    // 缓存键是**图片路径**而不是地形 ID：用户把 `custom:reef` 的图片从 A 换成 B 之后，
+    // 按 ID 缓存的写法会认为"它已经有图了"，于是永远画着旧的那张（要重开画布才更新）；
+    // 按路径缓存则天然正确，而且两个地形共用同一张图时只会加载一次。
+    for (const style of styles) {
+      if (style.imagePath.length === 0) continue
+      // ⚠️ 两个缓存的键必须分清：`terrainImages` 按**路径**存已加载的图（同一张图被两个地形
+      // 共用时只加载一次，换图后也能立刻生效），`terrainImageState` 按**路径**记"正在加载/加载失败"。
+      // 之前这里一处写成 `style.id`，结果是"图片明明加载好了，图集却永远拿不到它"——
+      // 画布上一直显示回退色，而日志里只有一句"图片不可用"。键写错的表现就是这种"静默不生效"。
+      if (this.terrainImages.has(style.imagePath)) continue
+      if (this.terrainImageState.has(style.imagePath)) continue
+      this.terrainImageState.set(style.imagePath, 'pending')
+      void this.loadTerrainImage(style.id, style.imagePath)
+    }
+
+    // 只把"这份路径已经就绪"的图片交给图集；其余那一格走颜色 + 字形回退。
+    // 交给图集时按 **style.id**（`spriteAtlas` 是按地形 ID 取图的），取源图时按 **path**。
+    const readyImages = new Map<string, CanvasImageSource>()
+    const readyIds: string[] = []
+    for (const style of styles) {
+      const image = style.imagePath.length > 0 ? this.terrainImages.get(style.imagePath) : undefined
+      if (image === undefined) continue
+      readyImages.set(style.id, image)
+      readyIds.push(style.id)
+    }
+    const signature = [
+      document_.grid.orientation,
+      `sprite:${DEFAULT_SPRITE_RADIUS}`,
+      terrainCatalogSignature(custom),
+      // 文档里出现过的 ID 也要进签名：否则"地图里新出现一个未知地形"时图集不会重建
+      `doc:${[...byId.keys()].sort().join(',')}`,
+      `images:${readyIds.join(',')}`,
+    ].join('|')
+    if (this.atlas !== null && this.atlasSignature === signature) return this.atlas
+
+    const options: BuildAtlasOptions = {
+      orientation: document_.grid.orientation,
+      spriteRadius: DEFAULT_SPRITE_RADIUS,
+      styles,
+      images: readyImages,
+      ...(this.canvasFactory ? { factory: this.canvasFactory } : {}),
+    }
+    this.atlas = buildTerrainAtlas(options)
+    this.atlasSignature = signature
+    if (this.atlas === null && !this.warnedAtlasFailure) {
+      // 图集建不出来（画布被拒、尺寸超限、没有 2d 上下文）时的表现是"地形全都不见了"，
+      // 而屏幕上不会有任何提示。这种静默失败必须留下痕迹，哪怕只有一次。
+      this.warnedAtlasFailure = true
+      console.warn(
+        `[project-kaki] 地形图集创建失败（${styles.length} 种地形）：当前环境可能不允许这么大的画布。` +
+          '地形将不会显示；可以试试减少自定义地形数量。',
+      )
+    }
     return this.atlas
+  }
+
+  /**
+   * 异步加载一张地形图片，成功后重建图集并请求重绘。
+   *
+   * 这里**只做调度**，具体怎么从库里取图由注入的加载器决定（渲染层不认识 vault）。
+   * 失败一律记在控制台：这个功能最容易坏的方式就是"图没了但界面不说话"。
+   */
+  private async loadTerrainImage(id: string, path: string): Promise<void> {
+    const loader = this.options.loadTerrainImage
+    if (!loader) {
+      this.terrainImageState.set(path, 'failed')
+      console.warn(`[project-kaki] 自定义地形「${id}」配置了图片 ${path}，但当前没有可用的图片加载器，按颜色 + 字形绘制`)
+      return
+    }
+    let image: CanvasImageSource | null = null
+    try {
+      image = await loader(path)
+    } catch (error) {
+      console.warn(`[project-kaki] 自定义地形「${id}」的图片加载出错：${path}`, error)
+    }
+    if (this.disposed) return
+    if (image === null || image === undefined) {
+      this.terrainImageState.set(path, 'failed')
+      console.warn(`[project-kaki] 自定义地形「${id}」的图片不可用：${path} —— 已回退到颜色 + 字形（地图数据不受影响）`)
+      return
+    }
+    this.terrainImageState.set(path, 'pending') // 保持占位，避免同一条路径被重复加载
+    this.terrainImages.set(path, image)
+    // 图集里这一格还画的是回退色：签名变了（多了一张就绪的图）→ 下一帧重建
+    this.atlasSignature = ''
+    this.requestRedraw()
+  }
+
+  /**
+   * 未知地形 ID 的一次性告警。
+   *
+   * 为什么必须告警而不是静默回退：用户的感受是"我地图上有一部分格子变灰了"，
+   * 不告诉他原因，他只会以为插件坏了（或以为自己的颜色设置没生效）。
+   * 为什么只报一次：绘制每帧都会遍历所有格，逐格告警会把控制台刷爆。
+   */
+  private warnUnknownTerrains(document_: MapDocument, custom: readonly CustomTerrain[]): void {
+    for (const cell of Object.values(document_.terrain)) {
+      if (isBuiltinTerrain(cell.t) || findCustomTerrain(cell.t, custom) !== null) continue
+      if (this.warnedTerrainIds.has(cell.t)) continue
+      this.warnedTerrainIds.add(cell.t)
+      console.warn(
+        `[project-kaki] 地图里有未知地形「${cell.t}」：设置里没有这个定义，已按回退样式绘制。` +
+          '数据仍保留在文件里；如果你想看到原样，请在设置里补一条同 ID 的自定义地形。',
+      )
+    }
   }
 
   private drawPlan(plan: MapRenderPlan, document_: MapDocument): void {

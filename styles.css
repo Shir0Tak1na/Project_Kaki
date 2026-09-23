@@ -171,6 +171,21 @@
   border-left: none;
 }
 
+/* 地形那一组可能很长（内置 9 种 + 最多 40 个自定义地形）。
+   不换行的话它会横着溢出工具条；不限高的话它会把地图整个盖住。
+   注意：整条工具条已经 flex-wrap，所以这里只是让**这一组内部**也有序地折行。 */
+.fc-toolbar-terrain-group {
+  flex-wrap: wrap;
+  max-width: 100%;
+  max-height: 32vh;
+  overflow-y: auto;
+}
+
+/* 自定义地形与内置地形在视觉上要能一眼区分（两者都存在时，色块本身不够说明问题） */
+.fc-toolbar-terrain.is-custom .fc-toolbar-swatch {
+  border: 1px dashed var(--text-faint);
+}
+
 .fc-toolbar-button {
   display: inline-flex;
   align-items: center;
@@ -227,6 +242,66 @@
 .fc-toolbar-icon-glyph svg {
   width: 15px;
   height: 15px;
+}
+
+/* ---- 画布上的图例（默认隐藏，由工具条按钮切换） ---- */
+
+.fc-legend {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 5;
+  max-width: 220px;
+  max-height: 45%;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+  /* 图例是"看"的东西，不该抢画布的手势：悬停/拖动照常落到画布上 */
+  pointer-events: none;
+  font-size: var(--font-ui-smaller);
+}
+
+.fc-legend-title {
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.fc-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.fc-legend-swatch {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  /* 背景色由脚本按条目写入（含虚线路径的 repeating-linear-gradient） */
+}
+
+.fc-legend-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-normal);
+}
+
+.fc-legend-count {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.fc-legend-empty {
+  color: var(--text-faint);
 }
 
 /* ---- 地图面板（右侧边栏视图） ---- */

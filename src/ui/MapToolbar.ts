@@ -9,10 +9,10 @@
  */
 
 import { setIcon } from 'obsidian'
-import { MARKER_ICONS, PATH_TYPES, type MarkerIcon, type PathType, type TerrainType } from '../data/mapDocument.ts'
+import { MARKER_ICONS, PATH_TYPES, type MarkerIcon, type PathType } from '../data/mapDocument.ts'
 import type { EditorStatus, EditorTool, MapEditor } from '../editor/MapEditor.ts'
 import type { GeometryMode } from '../core/hexEdges.ts'
-import { listTerrainStyles } from '../render/terrainStyle.ts'
+import { listResolvedTerrainStyles, terrainCatalogSignature, type CustomTerrain } from '../render/terrainCatalog.ts'
 import { lucideIconFor } from '../render/markerPlacement.ts'
 import { REGION_PRESETS } from '../render/shapeStyle.ts'
 import { defaultPathColors, defaultRegionColors, resolvePathStyle, type PathColorMap } from '../render/stylePalette.ts'
@@ -41,6 +41,14 @@ export interface MapToolbarOptions {
    * 又不需要重建 DOM（侧边栏那次"每帧重建"的教训）。
    */
   getPalette?: () => { pathColors: PathColorMap; regionColors: string[] }
+  /**
+   * 用户自定义地形（来自插件设置）。
+   *
+   * 与颜色不同，**按钮数量**会随设置变化，所以这里不能只"原地改样式"：
+   * 目录签名变了就得重建地形按钮那一组（见 `refresh()`）。重建的代价是一次 DOM 操作，
+   * 而它在用户改设置时才会发生，不会进入每帧路径。
+   */
+  getCustomTerrains?: () => readonly CustomTerrain[]
 }
 
 const TOOL_LABELS: Record<EditorTool, { label: string; hint: string }> = {
@@ -76,7 +84,10 @@ export class MapToolbar {
   private readonly modeButton: HTMLButtonElement
   private readonly layerButton: HTMLButtonElement
   private readonly toolButtons = new Map<EditorTool, HTMLButtonElement>()
-  private readonly terrainButtons = new Map<TerrainType, HTMLButtonElement>()
+  /** 地形按钮按**地形 ID**索引（内置 + 自定义共用一套） */
+  private readonly terrainButtons = new Map<string, HTMLButtonElement>()
+  /** 上一次构建地形按钮时的目录签名：变了才重建 DOM */
+  private terrainSignature = ''
   private readonly iconButtons = new Map<MarkerIcon, HTMLButtonElement>()
   private readonly pathButtons = new Map<PathType, HTMLButtonElement>()
   private readonly regionButtons = new Map<number, HTMLButtonElement>()
@@ -137,27 +148,10 @@ export class MapToolbar {
     }
     this.root.appendChild(toolGroup)
 
-    // 地形选择（仅笔刷工具下显示）
+    // 地形选择（仅笔刷工具下显示）：内置 9 种 + 用户自定义（排在后面）
     this.terrainGroup = doc.createElement('div')
     this.terrainGroup.className = 'fc-toolbar-group fc-toolbar-terrain-group'
-    for (const style of listTerrainStyles()) {
-      const button = doc.createElement('button')
-      button.className = 'fc-toolbar-button fc-toolbar-terrain'
-      button.title = `${style.label}（快捷键 ${listTerrainStyles().indexOf(style) + 1}）`
-      const swatch = doc.createElement('span')
-      swatch.className = 'fc-toolbar-swatch'
-      swatch.style.backgroundColor = style.base
-      button.appendChild(swatch)
-      const label = doc.createElement('span')
-      label.textContent = style.label
-      button.appendChild(label)
-      button.addEventListener('click', () => {
-        options.editor.setTerrainType(style.type)
-        this.refresh()
-      })
-      this.terrainButtons.set(style.type, button)
-      this.terrainGroup.appendChild(button)
-    }
+    this.rebuildTerrainButtons()
     this.root.appendChild(this.terrainGroup)
 
     // 标记图标选择（仅标记工具下显示）
@@ -319,8 +313,50 @@ export class MapToolbar {
     return this.options.getPalette?.() ?? { pathColors: defaultPathColors(), regionColors: defaultRegionColors() }
   }
 
+  /**
+   * 重建地形按钮组：内置 9 种在前（顺序即数字键 1–9），自定义排在后面。
+   *
+   * 为什么自定义地形**不占用数字键**：`1`–`9` 已经被内置的 9 种占满，而自定义的数量不确定
+   * （0 到 64 个），任何"再抢一个键位"的方案都会把已有的肌肉记忆搞乱；
+   * 用组合键（Alt+数字）又可能与 Obsidian 或系统快捷键冲突。所以自定义地形只用鼠标点选，
+   * 并在 title 里给出完整 ID，保证界面上不会有两个"看起来一样"的按钮分不清。
+   */
+  private rebuildTerrainButtons(): void {
+    const doc = this.root.ownerDocument ?? globalThis.document
+    const custom = this.options.getCustomTerrains?.() ?? []
+    const styles = listResolvedTerrainStyles(custom)
+    this.terrainSignature = terrainCatalogSignature(custom)
+    this.terrainGroup.empty()
+    this.terrainButtons.clear()
+
+    styles.forEach((style, index) => {
+      const button = doc.createElement('button')
+      button.className = style.builtin ? 'fc-toolbar-button fc-toolbar-terrain' : 'fc-toolbar-button fc-toolbar-terrain is-custom'
+      button.title = style.builtin
+        ? `${style.label}（快捷键 ${index + 1}）`
+        : `${style.label}（自定义地形 ${style.id}${style.imagePath.length > 0 ? ` · 图片 ${style.imagePath}` : ''}）`
+      const swatch = doc.createElement('span')
+      swatch.className = 'fc-toolbar-swatch'
+      swatch.style.backgroundColor = style.base
+      button.appendChild(swatch)
+      const label = doc.createElement('span')
+      label.textContent = style.label
+      button.appendChild(label)
+      button.addEventListener('click', () => {
+        this.options.editor.setTerrainType(style.id)
+        this.refresh()
+      })
+      this.terrainButtons.set(style.id, button)
+      this.terrainGroup.appendChild(button)
+    })
+  }
+
   /** 按编辑器当前状态刷新按钮文案与可用性 */
   refresh(): void {
+    // 地形目录变了（用户增删自定义地形）→ 按钮数量本身变了，只能重建这一组
+    if (terrainCatalogSignature(this.options.getCustomTerrains?.() ?? []) !== this.terrainSignature) {
+      this.rebuildTerrainButtons()
+    }
     const status: EditorStatus = this.options.editor.getStatus()
     const painting = status.mode === 'paint'
 

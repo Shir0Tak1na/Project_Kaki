@@ -25,6 +25,7 @@ import {
   type RowSortKey,
 } from './mapRows.ts'
 import { buildMapPreviewSvg } from './mapPreview.ts'
+import type { CustomTerrain } from '../render/terrainCatalog.ts'
 import { parseNoteMapProps } from './noteCoordinates.ts'
 import {
   BASES_VIEW_TYPE,
@@ -42,6 +43,13 @@ export interface BasesViewDeps {
     workspace: { openLinkText(link: string, source: string, newLeaf: boolean): void }
   }
   store: MapDocumentStore
+  /**
+   * 用户自定义地形（来自插件设置）。
+   *
+   * 缩略图与画布必须**同一套解析**：缩略图里出现一个和画布不同颜色的格子，
+   * 用户第一反应是"地图文件坏了"。传函数而不是值，理由同 `getStylePalette`（现读）。
+   */
+  getCustomTerrains?: () => readonly CustomTerrain[]
   /** 诊断与测试用：最近一次渲染的统计 */
   onRendered?: (info: { rows: number; notes: number; mapEntries: number; reason?: string }) => void
 }
@@ -210,7 +218,12 @@ export class MapBasesView extends BasesView {
     const redraw = () => {
       const width = preview.clientWidth > 0 ? Math.min(1200, Math.max(240, preview.clientWidth)) : 360
       const height = Math.round(width * 0.5)
-      preview.innerHTML = buildMapPreviewSvg(this.document, rows, { width, height, padding: 12 })
+      preview.innerHTML = buildMapPreviewSvg(this.document, rows, {
+        width,
+        height,
+        padding: 12,
+        customTerrains: this.deps.getCustomTerrains?.() ?? [],
+      })
     }
     redraw()
     preview.addEventListener('click', (event) => {

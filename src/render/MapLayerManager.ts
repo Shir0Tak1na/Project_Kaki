@@ -18,6 +18,7 @@ import { MapToolbar } from '../ui/MapToolbar.ts'
 import { MapOverlay, type OverlayStats } from './MapOverlay.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
 import { defaultStylePalette, type StylePalette } from './stylePalette.ts'
+import type { CustomTerrain } from './terrainCatalog.ts'
 
 export interface LayerStatus {
   canvasPath: string
@@ -51,6 +52,13 @@ export interface MapLayerManagerDeps {
    * 否则用户改完设置要重开画布才生效。
    */
   getStylePalette?: () => StylePalette
+  /**
+   * 用户自定义地形（来自插件设置）。
+   *
+   * 与 `getStylePalette` 同理传函数：地图层活得比设置页久，必须"每次现读"，
+   * 否则用户新增一个地形后要重开画布才看得到。
+   */
+  getCustomTerrains?: () => readonly CustomTerrain[]
   onToggleLayer?: (canvasPath: string) => void
 }
 
@@ -301,6 +309,9 @@ export class MapLayerManager {
       getLabelScale: () => this.deps.getLabelScale?.() ?? 1,
       // 名称字体族：来自插件设置（空串 = 跟随主题）
       getLabelFontFamily: () => this.deps.getStylePalette?.().fontFamily ?? '',
+      // 自定义地形：目录与图片加载都从这里注入（渲染层不认识 vault）
+      getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
+      loadTerrainImage: (path) => this.loadTerrainImage(path),
       onOpenLink: (link) => this.openNote(link, mapPath),
       onDeleteMarker: (placement) => this.deletePlacement(canvasPath, placement),
       // 拖动移动：客户端坐标 → 世界坐标的换算只在这里做（标记层不认识画布内部坐标系）
@@ -404,6 +415,7 @@ export class MapLayerManager {
             const palette = this.deps.getStylePalette?.() ?? defaultStylePalette()
             return { pathColors: palette.pathColors, regionColors: palette.regionColors }
           },
+          getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
           onModeChanged: (mode) => interaction.notifyModeChanged(mode),
           onToggleLayer: () => this.disable(canvasPath),
           onUndo: () => {
@@ -463,10 +475,70 @@ export class MapLayerManager {
   }
 
   /**
-   * 设置里改了样式（路径颜色/区域颜色/字体）之后调用：让所有已挂载的地图跟上。
+   * 地形图片加载器 —— **全项目唯一允许用 vault 取图片资源的地方**。
    *
-   * 颜色与字体都是**每帧现读**的（见各处 `getStylePalette`），所以这里不需要传值，
-   * 只需要：① 让工具条的色块与高亮刷新一次；② 请求重绘（字体变了，名称要重排）。
+   * 渲染层（`MapOverlay` / `spriteAtlas`）刻意不认识 vault，图片从这个口子注入，
+   * 于是渲染层仍然能在没有 Obsidian 的环境里跑测试（这个项目的立身之本）。
+   *
+   * 三种失败都返回 `null` 并给出**可读原因**，让绘制层回退到颜色 + 字形：
+   * 文件不在库里、拿不到资源地址（移动端/非文件系统适配器）、图片解码失败。
+   * 不抛异常：它是在绘制过程中被调起的，抛出去会变成每帧刷屏的错误。
+   */
+  private async loadTerrainImage(path: string): Promise<CanvasImageSource | null> {
+    const vault = this.deps.app?.vault as
+      | (typeof this.deps.app.vault & {
+          getResourcePath?: (file: TFile) => string
+          adapter?: { getResourcePath?: (path: string) => string }
+        })
+      | undefined
+    if (!vault) {
+      console.warn(`[project-kaki] 自定义地形图片 ${path}：当前没有可用的 vault，已回退到颜色 + 字形`)
+      return null
+    }
+
+    const file = vault.getAbstractFileByPath?.(path)
+    if (!file) {
+      console.warn(`[project-kaki] 自定义地形图片不存在：${path} —— 已回退到颜色 + 字形（检查设置里的路径）`)
+      return null
+    }
+
+    // 优先用 Vault.getResourcePath（官方 API），退回 adapter.getResourcePath（1.5 之前的老写法）
+    let url = ''
+    try {
+      if (typeof vault.getResourcePath === 'function') url = vault.getResourcePath(file as TFile)
+      else if (typeof vault.adapter?.getResourcePath === 'function') url = vault.adapter.getResourcePath(path)
+    } catch (error) {
+      console.warn(`[project-kaki] 无法取得 ${path} 的资源地址，已回退到颜色 + 字形`, error)
+      return null
+    }
+    if (typeof url !== 'string' || url.length === 0) {
+      console.warn(`[project-kaki] 资源地址为空（${path}）：当前平台可能不支持把库内文件当图片加载，已回退到颜色 + 字形`)
+      return null
+    }
+
+    // `Image` 在非浏览器环境不存在；这里不假设它一定可用
+    const ImageCtor = (globalThis as { Image?: new () => HTMLImageElement }).Image
+    if (typeof ImageCtor !== 'function') {
+      console.warn(`[project-kaki] 当前环境没有 Image 构造器，无法加载地形图片 ${path}，已回退到颜色 + 字形`)
+      return null
+    }
+    return await new Promise<CanvasImageSource | null>((resolve) => {
+      const image = new ImageCtor()
+      image.onload = () => resolve(image)
+      image.onerror = () => {
+        console.warn(`[project-kaki] 图片解码失败：${path} —— 已回退到颜色 + 字形`)
+        resolve(null)
+      }
+      image.src = url
+    })
+  }
+
+  /**
+   * 设置里改了样式（路径颜色/区域颜色/字体/自定义地形）之后调用：让所有已挂载的地图跟上。
+   *
+   * 颜色、字体、地形目录都是**每帧现读**的（见各处 `getStylePalette` / `getCustomTerrains`），
+   * 所以这里不需要传值，只需要：① 让工具条刷新（色块、地形按钮、高亮）；
+   * ② 请求重绘（字体变了名称要重排；地形目录变了图集要重建）。
    */
   setStylePalette(): void {
     for (const entry of this.entries.values()) {

@@ -65,8 +65,21 @@ export type PathType = 'river' | 'road' | 'trade-route' | 'border'
 export const PATH_TYPES: readonly PathType[] = ['river', 'road', 'trade-route', 'border']
 
 /** 位标志：1=旋转，2=镜像，4=变体（比独立字段省体积） */
+/**
+ * 地形标识。
+ *
+ * 刻意**不是** `TerrainType` 的字面量联合：文件里可能出现
+ * - 内置 9 种（`forest` …）；
+ * - 本插件的自定义地形（`custom:xxx`，由用户在设置里定义）；
+ * - 别的库/别的版本写下的、本机设置里没有的 ID。
+ *
+ * 第三种必须能**原样通读通写**：把不认识的格子丢掉，等于用户一保存就永久删掉自己的数据
+ * （而且没有任何报错）。所以这里放宽成字符串，由绘制层负责回退视觉（见 `terrainCatalog.ts`）。
+ */
+export type TerrainId = string
+
 export interface TerrainCell {
-  t: TerrainType
+  t: TerrainId
   f?: number
   c?: string
 }
@@ -233,6 +246,21 @@ function parseGrid(value: unknown, issues: MapDocumentIssue[]): GridSpec | null 
   return { kind: 'hex', orientation, size, origin }
 }
 
+/**
+ * 文件里的地形 ID 能长什么样 —— 比"用户能新建什么"**宽松得多**。
+ *
+ * 这里只挡住真正不可能当 ID 的东西（空串、空白、控制字符、超长），
+ * 因为解析的职责是**尽量别丢数据**：设置里删掉一个自定义地形之后，
+ * 旧地图里的 `custom:xxx` 仍然要能被读出来、原样写回去（只是画成回退视觉）。
+ * 严格规则（前缀 + `^[a-z][a-z0-9_-]{1,31}$`）只用于用户新建，见 `terrainCatalog.ts`。
+ */
+function isStorableTerrainId(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  if (value.length === 0 || value.length > 64) return false
+  // eslint-disable-next-line no-control-regex
+  return !/[\s\u0000-\u001f\u007f]/.test(value)
+}
+
 function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string, TerrainCell> {
   const out: Record<string, TerrainCell> = {}
   if (value === undefined) return out
@@ -250,15 +278,28 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
       continue
     }
     const type = raw.t
-    if (typeof type !== 'string' || !TERRAIN_TYPES.includes(type as TerrainType)) {
+    if (!isStorableTerrainId(type)) {
       issues.push({
         level: 'warning',
         path: `terrain.${key}.t`,
-        message: `未知地形类型 ${JSON.stringify(type)}，已跳过该格（可用类型：${TERRAIN_TYPES.join('/')}）`,
+        message: `地形标识 ${JSON.stringify(type)} 不是合法字符串，已跳过该格`,
       })
       continue
     }
-    const cell: TerrainCell = { t: type as TerrainType }
+    // 不认识的 ID **保留**（只告警）：丢掉它 = 用户一保存就永久删数据。
+    // 绘制层对未知 ID 有回退视觉，所以保留是安全的，而丢弃是不可逆的。
+    //
+    // 只对"既不是内置、也不是 custom: 命名空间"的 ID 告警：解析层读不到用户设置，
+    // 因此它**无权**判断某个 `custom:xxx` 是否已定义（那是设置的事），
+    // 而"自定义地形被用户删掉了"这种情况由绘制层一次性告警（见 MapOverlay）。
+    if (!TERRAIN_TYPES.includes(type as TerrainType) && !type.startsWith('custom:')) {
+      issues.push({
+        level: 'warning',
+        path: `terrain.${key}.t`,
+        message: `未知地形 ${JSON.stringify(type)}，已保留该格（按回退样式绘制；内置类型：${TERRAIN_TYPES.join('/')}）`,
+      })
+    }
+    const cell: TerrainCell = { t: type }
     if (isFiniteNumber(raw.f) && raw.f !== 0) cell.f = Math.trunc(raw.f)
     if (isNonEmptyString(raw.c)) cell.c = raw.c
     out[key] = cell
@@ -556,9 +597,9 @@ export function summarizeMapDocument(document: MapDocument): {
   paths: number
   regions: number
   labels: number
-  terrainBreakdown: Array<{ type: TerrainType; count: number }>
+  terrainBreakdown: Array<{ type: TerrainId; count: number }>
 } {
-  const breakdown = new Map<TerrainType, number>()
+  const breakdown = new Map<TerrainId, number>()
   for (const cell of Object.values(document.terrain)) {
     breakdown.set(cell.t, (breakdown.get(cell.t) ?? 0) + 1)
   }

@@ -57,6 +57,20 @@ console.log = (first, ...rest) => {
 }
 
 /**
+ * 捕获 `console.warn`。
+ *
+ * 「回退到颜色 + 字形」这类降级行为**必须**在控制台留下可读原因，否则用户的体验就是
+ * "某一格莫名其妙变灰了"。这条承诺只有把警告抓下来才断言得了，
+ * 所以这里既记录又照常转发（转发保留原样，以免掩盖真实问题）。
+ */
+const warnLog = []
+const realConsoleWarn = console.warn.bind(console)
+console.warn = (...args) => {
+  warnLog.push(args.map((value) => (value instanceof Error ? value.message : String(value))).join(' '))
+  realConsoleWarn(...args)
+}
+
+/**
  * 按 Obsidian 的方式加载产物：CommonJS 模块包装。
  * 不能直接 require()：本项目 package.json 是 "type": "module"，Node 会把 .js 当 ESM 加载，
  * 而 Obsidian 用的是自己的 CJS 加载器（插件目录里也不带 package.json）。
@@ -111,6 +125,52 @@ if (typeof globalThis.MouseEvent !== 'function') {
   }
 }
 
+/**
+ * 「库里存在的图片」资源地址登记表。
+ *
+ * 真实的 `Image` 由浏览器决定能不能解码：文件不存在 → `onerror`。假 vault 在写入文件时
+ * 把它的资源地址登记到这里，于是"文件存在 → 图片能加载"这条因果关系在桩里也是真的，
+ * 测试不必自己去维护"哪些图是好的"。
+ */
+const loadableImageUrls = new Set()
+
+/**
+ * 假 `Image`：**语义要与浏览器一致** ——
+ * 赋 `src` 之后异步触发 `onload` 或 `onerror`（同步触发会让"未加载完时画回退样式"这条路径永远测不到）。
+ */
+class FakeImage {
+  constructor() {
+    this.width = 64
+    this.height = 48
+    this.naturalWidth = 64
+    this.naturalHeight = 48
+    this.onload = null
+    this.onerror = null
+    this._src = ''
+    /** 供断言：这张图是"真的被画上去"还是只是被构造了 */
+    this.__isFakeImage = true
+    // 按创建顺序登记：测试用"最后被创建的那张图"来分辨"换图之后画的是不是新的那张"
+    FakeImage.instances.push(this)
+  }
+
+  get src() {
+    return this._src
+  }
+
+  set src(value) {
+    this._src = String(value)
+    globalThis.setTimeout(() => {
+      if (loadableImageUrls.has(this._src)) this.onload?.()
+      else this.onerror?.(new Error(`图片不存在：${this._src}`))
+    }, 0)
+  }
+}
+globalThis.Image = globalThis.Image ?? FakeImage
+FakeImage.instances = []
+
+/** 所有被创建过的画布上下文（按创建顺序）：用来在不暴露内部字段的前提下检查离屏图集 */
+const createdCanvasContexts = []
+
 // ---------------------------------------------------------------- 假 DOM
 
 /** 记录型 2D 上下文：只统计调用次数与关键属性，供断言使用 */
@@ -141,6 +201,15 @@ function makeRecordingContext() {
   const groups = []
   /** 每次 fillText / strokeText 记录文字内容、位置、旋转角与字号 */
   const texts = []
+  /**
+   * 每次 `fill()` 记录**用什么颜色填了哪条路径**。
+   *
+   * 只数"fill 被调了几次"是不够的：自定义地形这个功能的核心承诺就是"这一格用的是
+   * 用户设定的颜色 / 这张图片"，而颜色只出现在调用参数里。
+   */
+  const fills = []
+  /** 每次 `drawImage()` 的实参（source + 目标矩形）：用来断言"画的是这张图/这个图块" */
+  const images = []
   let current = null
   // 变换只累积平移与旋转（被测代码只用 translate + rotate，不做嵌套矩阵运算）
   let tx = 0
@@ -151,6 +220,8 @@ function makeRecordingContext() {
     calls,
     groups,
     texts,
+    fills,
+    images,
     fillStyle: '',
     strokeStyle: '',
     lineWidth: 1,
@@ -164,6 +235,8 @@ function makeRecordingContext() {
       for (const key of Object.keys(calls)) calls[key] = 0
       groups.length = 0
       texts.length = 0
+      fills.length = 0
+      images.length = 0
       current = null
       tx = 0
       ty = 0
@@ -218,6 +291,11 @@ function makeRecordingContext() {
     },
     fill() {
       calls.fill += 1
+      fills.push({
+        fillStyle: context.fillStyle,
+        alpha: context.globalAlpha,
+        points: current ? current.points.map((point) => ({ x: point.x, y: point.y })) : [],
+      })
     },
     stroke() {
       calls.stroke += 1
@@ -252,8 +330,11 @@ function makeRecordingContext() {
     clip() {
       calls.clip += 1
     },
-    drawImage() {
+    drawImage(source, ...args) {
       calls.drawImage += 1
+      // 记录来源与目标矩形：这样"画的是哪张图 / 哪个图块"可以被断言，
+      // 而不是只能断言"drawImage 被调了 N 次"（后者放过过真 bug）
+      images.push({ source, args: args.map((value) => (typeof value === 'number' ? value : value)) })
     },
   }
 
@@ -479,7 +560,12 @@ const fakeDocument = {
   createElement(tagName) {
     const el = makeEl({ tagName, className: '' })
     el.ownerDocument = fakeDocument
-    if (String(tagName).toLowerCase() === 'canvas') el._ctx = makeRecordingContext()
+    if (String(tagName).toLowerCase() === 'canvas') {
+      el._ctx = makeRecordingContext()
+      // 离屏画布（地形图集、导出用的位图）也要能被检查：它们是内部对象，
+      // 不从任何公开 API 暴露出来，但"图集里那一格到底画了什么"正是这个功能要验证的东西。
+      createdCanvasContexts.push(el._ctx)
+    }
     return el
   },
 }
@@ -571,6 +657,10 @@ class FakeSetting {
       },
     }
     callback?.(text)
+    // 一个 Setting 上可以挂多个输入框（例如"新增地形"的 ID + 显示名）：
+    // 桩如果只留最后一个，测试就没法分别驱动它们，只能看到一半的行为
+    setting.texts = setting.texts ?? []
+    setting.texts.push(text)
     setting.text = text
     return this
   }
@@ -595,6 +685,8 @@ class FakeSetting {
       },
     }
     callback?.(picker)
+    setting.colorPickers = setting.colorPickers ?? []
+    setting.colorPickers.push(picker)
     setting.colorPicker = picker
     return this
   }
@@ -618,7 +710,48 @@ class FakeSetting {
       },
     }
     callback?.(button)
+    // 一个 Setting 上可以挂多个按钮（例如"删除"+"复制"）；`button` 保留为最后一个，兼容既有断言
+    setting.buttons = setting.buttons ?? []
+    setting.buttons.push(button)
     setting.button = button
+    return this
+  }
+
+  /**
+   * 下拉框。真实语义：`addOption(value, label)` 先登记选项，`setValue` 选中，
+   * `onChange` 在用户改选时触发。桩必须保留选项表 —— 否则"字形下拉框里有没有内置地形"
+   * 这类断言就没法写。
+   */
+  addDropdown(callback) {
+    const setting = this
+    const dropdown = {
+      options: [],
+      value: null,
+      addOption(value, label) {
+        this.options.push({ value, label })
+        return this
+      },
+      addOptions(record) {
+        for (const [value, label] of Object.entries(record)) this.options.push({ value, label })
+        return this
+      },
+      setValue(value) {
+        this.value = value
+        return this
+      },
+      onChange(handler) {
+        this.handler = handler
+        return this
+      },
+      /** 模拟用户改选 */
+      async select(value) {
+        this.value = value
+        await this.handler?.(value)
+        return this
+      },
+    }
+    callback?.(dropdown)
+    setting.dropdown = dropdown
     return this
   }
 
@@ -1032,8 +1165,17 @@ function makeCanvas({
  *    （存储层用 mtime 区分自写与外部改动，桩必须如实模拟）；
  * 2. 事件**异步派发**（setTimeout 0），与 Obsidian 的事件总线一致。
  */
-function makeVault(initialFiles = new Map()) {
-  const files = new Map()
+/**
+ * 库内路径 → 资源地址。
+ *
+ * 真实 Obsidian 上 `vault.getResourcePath()` 给出的是 `app://…` 这类地址，
+ * 桩只需要保证"同一个路径每次得到同一个地址"，且文件存在与否能被假 `Image` 区分开。
+ */
+function resourceUrlFor(path) {
+  return `app://local/${String(path).replace(/\\/g, '/')}`
+}
+
+function makeVault(initialFiles = new Map()) {  const files = new Map()
   const fileObjects = new Map()
   const listeners = { modify: [], create: [], delete: [], rename: [] }
   let clock = 1
@@ -1052,6 +1194,8 @@ function makeVault(initialFiles = new Map()) {
     files.set(path, content)
     const file = fileFor(path)
     file.stat = { mtime: clock++, ctime: 1, size: content.length }
+    // 图片类文件：登记它的资源地址，于是"文件在库里 → 假 Image 能加载成功"成立
+    if (/\.(png|jpe?g|webp|svg|gif)$/i.test(path)) loadableImageUrls.add(resourceUrlFor(path))
     return file
   }
 
@@ -1089,6 +1233,15 @@ function makeVault(initialFiles = new Map()) {
     },
     getMarkdownFiles() {
       return [...files.keys()].filter((path) => path.endsWith('.md')).map((path) => fileFor(path))
+    },
+    /** 官方 API：把库内文件变成可以直接塞给 `img.src` 的地址 */
+    getResourcePath(file) {
+      const path = typeof file === 'string' ? file : (file?.path ?? '')
+      return resourceUrlFor(path)
+    },
+    /** 老写法（1.5 之前的适配器接口）；插件把它当回退路径使用 */
+    adapter: {
+      getResourcePath: (path) => resourceUrlFor(path),
     },
     on(event, callback) {
       listeners[event].push(callback)
@@ -3750,6 +3903,376 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     JSON.stringify({ river: restored.pathColors.river, font: restored.labelFontFamily, region2: restored.regionColors[2] }),
   )
   check('未改动的键没有被写进设置（normalize 会过滤未知键）', !('extra' in restored.pathColors))
+
+  plugin.onunload()
+}
+
+console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画布 → 文件 → 回退路径）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  // 一张真实存在的图片 + 一张不存在的图片 + 一张存在但解不开的"坏图"：三条路径都要走到
+  app.vault.files.set('Assets/marsh.png', '<png-bytes>')
+  loadableImageUrls.add(resourceUrlFor('Assets/marsh.png'))
+  // 注意：故意用 files.set 而不是 setContent —— 后者会登记资源地址（= 能加载成功），
+  // 而这里要的正是"文件在库里、但浏览器解不开"这条分支
+  app.vault.files.set('Assets/broken.png', 'this-is-not-an-image')
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  plugin.setPromptModalFactory((_app, options, onSubmit) => {
+    onSubmit('')
+    return { open() {} }
+  })
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const doc = () => layers.getDocument(canvasPath)
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const clickAt = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+  }
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  /** 设置页底部那一行"就地提示"（自定义地形区自己维护的那条） */
+  const noteText = () => collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').at(-1)?.textContent ?? ''
+  /** 画一笔地形（世界坐标） */
+  const paintAt = (x, y) => {
+    editor.setMode('paint')
+    editor.setTool('brush')
+    clickAt({ x, y })
+    flushFrames()
+  }
+
+  // ---------------------------------------------------------- 设置界面：新增
+  openSettings()
+  const addSetting = settingNamed('新增自定义地形')
+  check('设置页有「新增自定义地形」一节', addSetting !== undefined)
+  check(
+    '新增区有 ID、显示名、颜色三个控件（ID 与显示名必须分开，否则又会被耦合在一起）',
+    (addSetting?.texts?.length ?? 0) === 2 && addSetting?.colorPicker !== undefined,
+    `texts=${addSetting?.texts?.length} picker=${String(addSetting?.colorPicker !== undefined)}`,
+  )
+  check('新增区的说明里写清了 ID 规则与自动前缀', (addSetting?.info.desc ?? '').includes('custom:'), addSetting?.info.desc)
+
+  // 非法 ID：必须当场给出可读原因，且**不能**写进设置
+  await addSetting.texts[0].type('Bad Id!')
+  check('非法 ID 就地给出可读原因', noteText().includes('ID'), noteText())
+  await addSetting.button.click()
+  check('非法 ID 点「新增」不会写进设置', plugin.getSettings().customTerrains.length === 0, JSON.stringify(plugin.getSettings().customTerrains))
+
+  // 合法 ID：新增成功，ID 收敛成 custom: 前缀
+  await addSetting.texts[0].type('Marsh')
+  await addSetting.texts[1].type('沼泽地')
+  await addSetting.colorPicker.pick('#336655')
+  await addSetting.button.click()
+  const added = plugin.getSettings().customTerrains
+  check(
+    '新增的自定义地形 ID 收敛为 custom:marsh（小写 + 自动前缀）',
+    added.length === 1 && added[0].id === 'custom:marsh',
+    JSON.stringify(added),
+  )
+  check('显示名与 ID 分离存储', added[0]?.label === '沼泽地' && added[0]?.color === '#336655', JSON.stringify(added[0]))
+  check(
+    '自定义地形已落盘（真实 JSON 往返）',
+    JSON.parse(plugin._data ?? '{}')?.customTerrains?.[0]?.id === 'custom:marsh',
+    String(plugin._data).slice(0, 160),
+  )
+
+  // 重复 ID 必须被拒绝（同一个 ID 两条定义会让"画上去是哪个颜色"说不清）
+  openSettings()
+  const addDup = settingNamed('新增自定义地形')
+  await addDup.texts[0].type('MARSH')
+  await addDup.button.click()
+  check('重复 ID（大小写不同）被拒绝', plugin.getSettings().customTerrains.length === 1, JSON.stringify(plugin.getSettings().customTerrains))
+
+  // 再建两个：一个带存在的图片，一个带不存在的图片
+  openSettings()
+  const addReef = settingNamed('新增自定义地形')
+  await addReef.texts[0].type('reef')
+  await addReef.texts[1].type('礁石')
+  await addReef.button.click()
+  openSettings()
+  const addGhost = settingNamed('新增自定义地形')
+  await addGhost.texts[0].type('ghost')
+  await addGhost.texts[1].type('幽灵地')
+  await addGhost.button.click()
+  openSettings()
+  const addBroken = settingNamed('新增自定义地形')
+  await addBroken.texts[0].type('broken')
+  await addBroken.texts[1].type('破碎地')
+  await addBroken.button.click()
+  check(
+    '四个自定义地形都在设置里',
+    plugin.getSettings().customTerrains.length === 4,
+    JSON.stringify(plugin.getSettings().customTerrains.map((terrain) => terrain.id)),
+  )
+
+  // 图片路径：合法 → 存盘（反斜杠归一化）；非法 → 就地报错且不写盘
+  openSettings()
+  const reefRow = settingNamed('字形与图片 · 礁石')
+  await reefRow.texts[0].type('Assets\\marsh.png')
+  check(
+    '图片路径写进设置（Windows 反斜杠被统一为正斜杠）',
+    plugin.getSettings().customTerrains[1]?.imagePath === 'Assets/marsh.png',
+    JSON.stringify(plugin.getSettings().customTerrains[1]),
+  )
+  openSettings()
+  const ghostRow = settingNamed('字形与图片 · 幽灵地')
+  await ghostRow.texts[0].type('Assets/does-not-exist.png')
+  check(
+    '指向不存在文件的路径**合法**（存不存在只有加载器知道），照样写进设置 —— 回退由绘制层负责',
+    plugin.getSettings().customTerrains[2]?.imagePath === 'Assets/does-not-exist.png',
+    JSON.stringify(plugin.getSettings().customTerrains[2]),
+  )
+  openSettings()
+  const brokenRow = settingNamed('字形与图片 · 破碎地')
+  await brokenRow.texts[0].type('Assets/broken.png')
+  check(
+    '存在但解不开的图片路径也照样写进设置（解不开是运行期的事）',
+    plugin.getSettings().customTerrains[3]?.imagePath === 'Assets/broken.png',
+    JSON.stringify(plugin.getSettings().customTerrains[3]),
+  )
+  openSettings()
+  const reefRow2 = settingNamed('字形与图片 · 礁石')
+  await reefRow2.texts[0].type('http://example.com/a.png')
+  check(
+    '非法图片路径被拒绝并就地给出原因',
+    plugin.getSettings().customTerrains[1]?.imagePath === 'Assets/marsh.png' && noteText().includes('网址'),
+    `路径=${plugin.getSettings().customTerrains[1]?.imagePath} 提示=${noteText()}`,
+  )
+  check(
+    '字形下拉框列出「通用」+ 内置 9 种（借字形是个可选项，不是隐藏功能）',
+    (settingNamed('字形与图片 · 礁石')?.dropdown?.options?.length ?? 0) === 10,
+    JSON.stringify(settingNamed('字形与图片 · 礁石')?.dropdown?.options?.map((option) => option.value)),
+  )
+
+  // ---------------------------------------------------------- 工具条
+  const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
+  const terrainButtons = () => collectByClass(toolbarEl(), 'fc-toolbar-terrain')
+  /** 地形按钮的可见文字：结构是「色块 span + 名称 span」 */
+  const terrainLabels = () => terrainButtons().map((button) => button.children[1]?.textContent ?? button.textContent ?? '')
+  editor.setMode('paint')
+  editor.setTool('brush')
+  check('工具条出现内置 9 种 + 4 个自定义地形', terrainButtons().length === 13, terrainLabels().join(','))
+  const labels = terrainLabels()
+  check(
+    '自定义地形排在内置之后，且顺序与设置一致',
+    labels.slice(9).join(',') === '沼泽地,礁石,幽灵地,破碎地',
+    labels.join(','),
+  )
+  check(
+    '内置 9 种的中文名与顺序完全没变（这个功能不许动它们）',
+    // 这是**出厂顺序的快照**（与 TERRAIN_TYPES 一致）。写死在这里是有意的：
+    // 内置顺序就是数字键 1–9 的位置，改动它必须是有意识的行为 —— 改这条断言即为确认。
+    labels.slice(0, 9).join(',') === '山脉,森林,水域,沙漠,平原,沼泽,丘陵,冻原,火山',
+    labels.slice(0, 9).join(','),
+  )
+  check(
+    '自定义地形没有混进内置那一段（顺序错位会让数字键选到别的地形）',
+    labels.slice(9).every((label) => ['沼泽地', '礁石', '幽灵地', '破碎地'].includes(label)),
+    labels.join(','),
+  )
+  check(
+    '自定义地形的按钮带自己的颜色（不是内置色）',
+    collectByClass(terrainButtons()[9], 'fc-toolbar-swatch')[0]?.style.backgroundColor === '#336655',
+    String(collectByClass(terrainButtons()[9], 'fc-toolbar-swatch')[0]?.style.backgroundColor),
+  )
+  check(
+    '自定义地形的悬停提示里带着完整 ID（界面上要能分清哪个是哪个）',
+    (terrainButtons()[9]?.title ?? '').includes('custom:marsh'),
+    terrainButtons()[9]?.title,
+  )
+
+  // 点工具条上的自定义地形 → 编辑器切过去 → 画上去 → 文件里是自定义 ID
+  fireEvent(terrainButtons()[9], 'click')
+  check('点自定义地形按钮后编辑器切到该 ID', editor.getStatus().terrainType === 'custom:marsh', editor.getStatus().terrainType)
+  paintAt(-400, -200)
+  const paintedKeys = Object.keys(doc().terrain)
+  check('自定义地形被画上了画布（有格子）', paintedKeys.length > 0, JSON.stringify(doc().terrain))
+  check(
+    '文件里存的是自定义 ID 本身',
+    paintedKeys.every((key) => doc().terrain[key].t === 'custom:marsh'),
+    JSON.stringify(doc().terrain[paintedKeys[0]]),
+  )
+
+  // 内置地形不受影响：切回内置照样画内置 ID
+  editor.setTerrainType('forest')
+  paintAt(600, 600)
+  const forestKeys = Object.keys(doc().terrain).filter((key) => doc().terrain[key].t === 'forest')
+  check('内置地形仍然照旧（画出来就是内置 ID）', forestKeys.length > 0, JSON.stringify(Object.values(doc().terrain).map((cell) => cell.t)))
+
+  // 等待防抖落盘 → 重新解析文件 → 自定义 ID 仍然认得出
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  const reloaded = await store.load(app.vault.getAbstractFileByPath('Maps/World.map.md'))
+  check(
+    '重新解析后仍然认得自定义 ID（内置 9 种曾经是白名单，自定义必须也过得去）',
+    reloaded.document !== null && Object.values(reloaded.document.terrain).some((cell) => cell.t === 'custom:marsh'),
+    JSON.stringify(Object.values(reloaded.document?.terrain ?? {}).slice(0, 3)),
+  )
+  check(
+    '自定义 ID 不会产生任何告警（它不是"未知地形"）',
+    reloaded.issues.filter((issue) => issue.level === 'warning').length === 0,
+    JSON.stringify(reloaded.issues),
+  )
+
+  // ---------------------------------------------------------- 画布绘制：图片 vs 回退
+  frame()
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  flushFrames()
+  /** 贴了图片的那张离屏图集（图集不对外暴露，只能按"它画过这张图"来找） */
+  const atlas = createdCanvasContexts.filter((candidate) => candidate.images.some((entry) => entry.source?.__isFakeImage)).at(-1)
+  check(
+    '图片存在时图集里真的贴了这张图（drawImage 的 source 就是加载到的那幅图）',
+    atlas !== undefined,
+    `创建过的画布上下文数=${createdCanvasContexts.length}`,
+  )
+  check(
+    '同一张图集里：有图片的格子铺了底色，缺图片的格子回退到颜色 + 字形',
+    atlas !== undefined &&
+      atlas.fills.some((fill) => fill.fillStyle === '#336655') &&
+      atlas.fills.some((fill) => fill.fillStyle === '#8fa3b0') &&
+      atlas.calls.arc >= 3,
+    atlas ? `填充色=${JSON.stringify([...new Set(atlas.fills.map((fill) => fill.fillStyle))])} arc=${atlas.calls.arc}` : '',
+  )
+  /** 当时加载成功的那张图（换图之后它必须从图集里消失） */
+  const firstLoadedImage = atlas ? [...atlas.images].reverse().find((entry) => entry.source?.__isFakeImage)?.source : undefined
+  const missingWarnings = warnLog.filter((line) => line.includes('does-not-exist.png'))
+  check(
+    '图片缺失时给出可读原因（文件不存在）',
+    missingWarnings.some((line) => line.includes('不存在')),
+    JSON.stringify(missingWarnings.slice(0, 2)),
+  )
+  const brokenWarnings = warnLog.filter((line) => line.includes('broken.png'))
+  check(
+    '图片存在但解不开时也给出可读原因（走的是 onerror 这条分支，与"文件不存在"不同）',
+    brokenWarnings.some((line) => line.includes('解码失败')),
+    JSON.stringify(brokenWarnings.slice(0, 2)),
+  )
+
+  // ---- 换图：把 custom:reef 的图片换成另一张，画布上必须变成新的那张 ----
+  // （缓存按"地形 ID"存的话，这里会一直画旧图 —— 用户要重开画布才更新）
+  app.vault.files.set('Assets/reef2.png', '<png-bytes-2>')
+  loadableImageUrls.add(resourceUrlFor('Assets/reef2.png'))
+  openSettings()
+  await settingNamed('字形与图片 · 礁石').texts[0].type('Assets/reef2.png')
+  check(
+    '设置里换成了新路径',
+    plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:reef')?.imagePath === 'Assets/reef2.png',
+    JSON.stringify(plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:reef')),
+  )
+  frame()
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  flushFrames()
+  const newestImage = FakeImage.instances.at(-1)
+  const latestAtlas = createdCanvasContexts.filter((candidate) => candidate.images.some((entry) => entry.source?.__isFakeImage)).at(-1)
+  check(
+    '换成另一张图后，图集里画的是新的那张（缓存按路径而不是按地形 ID）',
+    latestAtlas !== undefined && latestAtlas.images.some((entry) => entry.source === newestImage),
+    latestAtlas ? `图集里 ${latestAtlas.images.length} 次 drawImage（含图片=${latestAtlas.images.filter((entry) => entry.source?.__isFakeImage).length}）` : '没有图集',
+  )
+  check(
+    '旧的那张图已经完全不再出现（这条断言在"按地形 ID 缓存"的旧写法上会失败）',
+    firstLoadedImage !== undefined && latestAtlas !== undefined && latestAtlas.images.every((entry) => entry.source !== firstLoadedImage),
+    `旧图=${String(firstLoadedImage?.src)} 仍在图集里=${latestAtlas?.images.some((entry) => entry.source === firstLoadedImage)}`,
+  )
+
+  // ---------------------------------------------------------- 未知 ID：必须仍然画出来
+  // 把一格已经画好的地形改成设置里没有的 ID：它必须照样被绘制（回退视觉），
+  // 而不是在画布上留一个洞 —— 图集是按 ID 取精灵的，漏进签名就会静默消失。
+  const warnBefore = warnLog.length
+  // 用**森林**那一格改成未知 ID（不是沼泽那一格 —— 后面还要用它验证"删定义不影响数据"）
+  const unknownKey = forestKeys[0]
+  doc().terrain[unknownKey] = { t: 'custom:never-defined' }
+  const before = Object.keys(doc().terrain).length
+  const redrawn = frame()
+  check(
+    '设置里没有的 ID 仍然被画出来（可见格数 = 绘制调用数，没有洞）',
+    redrawn.calls.drawImage === before,
+    `文档格数=${before} 本帧 drawImage=${redrawn.calls.drawImage}`,
+  )
+  const unknownWarnings = warnLog.slice(warnBefore).filter((line) => line.includes('未知地形'))
+  check('未知 ID 给出一条可读告警', unknownWarnings.length >= 1 && unknownWarnings.length <= 3, JSON.stringify(unknownWarnings))
+  frame()
+  check(
+    '第二次重绘不再重复告警（每帧都会遍历所有格，不能刷屏）',
+    warnLog.slice(warnBefore).filter((line) => line.includes('未知地形')).length === unknownWarnings.length,
+    String(warnLog.length - warnBefore),
+  )
+  check('未知 ID 的格子仍然留在文档里（不因为不认识就被丢掉）', doc().terrain[unknownKey]?.t === 'custom:never-defined')
+
+  // ---------------------------------------------------------- 旧文件：完全外来的 t
+  // 内存里改一格只能证明绘制层；这里走**文件级**：一份旧地图/别人库里的地图，
+  // 里面有两种本机设置里都没有的地形 ID，必须能加载、保留、并给出可读告警
+  const foreignDoc = {
+    version: 1,
+    grid: { kind: 'hex', orientation: 'pointy', size: 40, origin: [0, 0] },
+    terrain: { '0_0': { t: 'custom:gone' }, '1_0': { t: 'ancient-marsh' } },
+    paths: [],
+    regions: [],
+    markers: [],
+    labels: [],
+  }
+  app.vault.files.set(
+    'Maps/Old.map.md',
+    '---\ntype: fictional-cartographer-map\nfc-version: 1\nname: "Old"\ncanvases: []\n---\n\n```json\n' +
+      JSON.stringify(foreignDoc, null, 2) +
+      '\n```\n',
+  )
+  const oldLoaded = await store.load(app.vault.getAbstractFileByPath('Maps/Old.map.md'))
+  check('未知 t 的旧文件能被加载（不整体拒绝加载）', oldLoaded.document !== null, JSON.stringify(oldLoaded.issues.slice(0, 2)))
+  check(
+    '两种未知 ID 的格子都被保留下来',
+    oldLoaded.document !== null && Object.keys(oldLoaded.document.terrain).length === 2,
+    JSON.stringify(oldLoaded.document?.terrain),
+  )
+  check(
+    '外来 ID 有一条可读告警（说明它被保留了，而不是被丢弃）',
+    oldLoaded.issues.some((issue) => issue.level === 'warning' && issue.message.includes('已保留')),
+    JSON.stringify(oldLoaded.issues.map((issue) => issue.message)),
+  )
+
+  // ---------------------------------------------------------- 删除定义：数据不受影响
+  openSettings()
+  await settingNamed('地形 1 · 沼泽地').button.click()
+  check(
+    '删除后设置里没有它了',
+    plugin.getSettings().customTerrains.length === 3 && !plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:marsh'),
+    JSON.stringify(plugin.getSettings().customTerrains.map((terrain) => terrain.id)),
+  )
+  check(
+    '删除定义**不会**删掉已经画好的格子（不可逆的数据操作绝不能顺手做）',
+    Object.values(doc().terrain).some((cell) => cell.t === 'custom:marsh'),
+    String(Object.values(doc().terrain).filter((cell) => cell.t === 'custom:marsh').length),
+  )
+  check('工具条随之少一个按钮', terrainButtons().length === 12, String(terrainButtons().length))
+  const afterDelete = frame()
+  check(
+    '被删掉定义的那些格子仍在绘制（回退视觉，而不是消失）',
+    afterDelete.calls.drawImage === Object.keys(doc().terrain).length,
+    `文档格数=${Object.keys(doc().terrain).length} drawImage=${afterDelete.calls.drawImage}`,
+  )
 
   plugin.onunload()
 }

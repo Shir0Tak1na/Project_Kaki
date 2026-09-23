@@ -6,14 +6,19 @@
  */
 
 import { hexCorners, parseCellKey } from '../core/hex.ts'
-import type { MapDocument, MapPath, MapRegion, TerrainType } from '../data/mapDocument.ts'
-import { TERRAIN_STYLES } from '../render/terrainStyle.ts'
+import type { MapDocument, MapPath, MapRegion } from '../data/mapDocument.ts'
+import { resolveTerrainStyle, type CustomTerrain } from '../render/terrainCatalog.ts'
 import type { MapRow } from './mapRows.ts'
 
 export interface MapPreviewOptions {
   width: number
   height: number
   padding?: number
+  /**
+   * 用户自定义地形。缺省即只有内置 9 种 —— 于是"设置里新增/改色"会立刻反映到
+   * Base 缩略图与导出的 SVG 上，不需要重建 Base 或重新导出（导出是命令触发的，本来就现读）。
+   */
+  customTerrains?: readonly CustomTerrain[]
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -69,14 +74,18 @@ function makeBounds(rows: readonly MapRow[], document: MapDocument | null): { mi
 }
 
 /**
- * 地形底色**必须**取自 `terrainStyle`（画布用的同一份）。
+ * 地形底色**必须**取自与画布**同一份**解析结果（`resolveTerrainStyle`）。
  *
  * 这里曾经自己抄了一份调色板，结果 9 种颜色与画布上的**全部**不同 ——
  * 表现就是"Base 缩略图和导出 SVG 的颜色跟画布上不一样"，而且改一处不会同步另一处。
- * 唯一真相来源比"看起来差不多"重要。
+ * 现在连自定义地形与未知 ID 的回退色也走同一条路：唯一真相来源比"看起来差不多"重要。
+ *
+ * 注意：SVG 里**不嵌图片**（自定义地形配了图片时这里只画底色）。
+ * 原因是导出文件要能脱离库单独打开，而库内图片的资源地址（`app://…`）换个环境就失效；
+ * 想把图片一起带走需要把图片读成 base64 内联，那是 Phase 4「PNG 导出」要一起做的事。
  */
-function terrainFill(type: TerrainType): string {
-  return TERRAIN_STYLES[type]?.base ?? '#9dc06c'
+function terrainFill(type: string, customTerrains: readonly CustomTerrain[]): string {
+  return resolveTerrainStyle(type, customTerrains).base
 }
 
 /** 标记 / 笔记点的填充色（与区域、路径的专属图形区分开） */
@@ -98,6 +107,7 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
   const width = clamp(widthValue, 64, 2000)
   const height = clamp(heightValue, 48, 2000)
   const padding = clamp(paddingValue, 0, 40)
+  const customTerrains = options.customTerrains ?? []
   const bounds = makeBounds(rows, document)
   const content: string[] = []
   content.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Map preview">`)
@@ -109,7 +119,7 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
       const points = hexCorners(document.grid, axial.q, axial.r)
         .map((point) => pointToSvgPoint(point.x, point.y, bounds, width, height, padding))
         .join(' ')
-      content.push(`<polygon points="${points}" fill="${terrainFill(cell.t)}" stroke="rgba(17,24,39,0.28)" stroke-width="0.6" />`)
+      content.push(`<polygon points="${points}" fill="${terrainFill(cell.t, customTerrains)}" stroke="rgba(17,24,39,0.28)" stroke-width="0.6" />`)
     }
 
     for (const region of document.regions) {
@@ -158,7 +168,17 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
   return content.join('')
 }
 
-/** 生成地图导出 SVG。导出与缩略图共用同一套世界坐标和等比例投影，避免两套渲染产生偏差。 */
-export function buildMapExportSvg(document: MapDocument, width = 1600, height = 1000): string {
-  return buildMapPreviewSvg(document, [], { width, height, padding: 32 })
+/**
+ * 生成地图导出 SVG。导出与缩略图共用同一套世界坐标和等比例投影，避免两套渲染产生偏差。
+ *
+ * `customTerrains` 由调用方从插件设置里现读：导出必须是"当前设置 + 当前地图"的合成结果，
+ * 否则刚改完颜色导出出来的还是旧色。
+ */
+export function buildMapExportSvg(
+  document: MapDocument,
+  width = 1600,
+  height = 1000,
+  customTerrains: readonly CustomTerrain[] = [],
+): string {
+  return buildMapPreviewSvg(document, [], { width, height, padding: 32, customTerrains })
 }

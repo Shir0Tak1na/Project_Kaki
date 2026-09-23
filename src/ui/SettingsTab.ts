@@ -19,6 +19,16 @@ import type ProjectKakiPlugin from '../main.ts'
 import { PATH_TYPES, type PathType } from '../data/mapDocument.ts'
 import { PATH_STYLES, REGION_PRESETS } from '../render/shapeStyle.ts'
 import {
+  CUSTOM_TERRAIN_PREFIX,
+  DEFAULT_CUSTOM_TERRAIN_COLOR,
+  MAX_CUSTOM_TERRAINS,
+  checkTerrainImagePath,
+  normalizeCustomTerrains,
+  terrainIdProblem,
+  type CustomTerrain,
+} from '../render/terrainCatalog.ts'
+import { listTerrainStyles } from '../render/terrainStyle.ts'
+import {
   defaultPathColors,
   defaultRegionColors,
   isDefaultPathColors,
@@ -47,6 +57,14 @@ export interface CartographerSettings {
   regionColors: string[]
   /** 名称字体族；`''` = 跟随主题 */
   labelFontFamily: string
+  /**
+   * 用户自定义地形（内置 9 种之外的）。
+   *
+   * 这里的 `id`（形如 `custom:swamp2`）就是写进地图文件的 `terrain.<格键>.t` 的值，
+   * 与显示名完全解耦：改显示名不影响已存数据，删掉定义也不会删掉地图上的格子
+   * （它们会退化成回退视觉，数据仍在文件里）。
+   */
+  customTerrains: CustomTerrain[]
 }
 
 export const DEFAULT_SETTINGS: CartographerSettings = {
@@ -56,6 +74,7 @@ export const DEFAULT_SETTINGS: CartographerSettings = {
   pathColors: defaultPathColors(),
   regionColors: defaultRegionColors(),
   labelFontFamily: '',
+  customTerrains: [],
 }
 
 export const LABEL_SCALE_MIN = 0.5
@@ -84,6 +103,8 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     pathColors: normalizePathColors(source.pathColors),
     regionColors: normalizeRegionColors(source.regionColors),
     labelFontFamily: normalizeFontFamily(source.labelFontFamily),
+    // 自定义地形逐条独立校验：data.json 被手工改坏时只丢坏的那一条，其余照常可用
+    customTerrains: normalizeCustomTerrains(source.customTerrains),
   }
 }
 
@@ -98,6 +119,8 @@ export function paletteOf(settings: CartographerSettings): StylePalette {
 
 export class CartographerSettingTab extends PluginSettingTab {
   private readonly plugin: ProjectKakiPlugin
+  /** 自定义地形区底部那一行就地提示（错误原因等）；每次 `display()` 重新绑定 */
+  private noteEl: HTMLElement | null = null
 
   constructor(app: App, plugin: ProjectKakiPlugin) {
     super(app, plugin)
@@ -224,6 +247,8 @@ export class CartographerSettingTab extends PluginSettingTab {
         }),
       )
 
+    this.renderCustomTerrains(containerEl, settings)
+
     new Setting(containerEl)
       .setName('地图面板')
       .setDesc('常用命令都在右侧边栏的「地图面板」里，不必每次翻命令面板。')
@@ -232,5 +257,149 @@ export class CartographerSettingTab extends PluginSettingTab {
           void this.plugin.activatePanel()
         }),
       )
+  }
+
+  /**
+   * 自定义地形：列表 + 新建。
+   *
+   * 为什么每条都带"完整 ID"的只读展示：ID 才是写进地图文件的东西，
+   * 用户改显示名时如果看不到 ID，就会以为"改名字会把数据也改了"（这是最需要一眼看清的一件事）。
+   *
+   * 为什么错误信息就地显示而不是用 Notice：这一屏要同时看几个字段，
+   * 弹出去的通知会遮住输入框，而用户往往需要边改边看原因。
+   */
+  private renderCustomTerrains(containerEl: HTMLElement, settings: CartographerSettings): void {
+    containerEl.createEl('h3', { text: '自定义地形' })
+    containerEl.createEl('div', {
+      cls: 'fc-settings-note',
+      text:
+        '自定义地形会出现在画布工具条里（内置 9 种之后），可以只用一个颜色 + 字形，' +
+        '也可以关联库内的一张图片。ID 是写进地图文件的值（形如 custom:swamp2）——' +
+        '显示名随时可以改，不影响已经画好的格子；反过来，删掉某个地形也不会删掉地图上的格子，' +
+        '那些格子会变成回退样式（灰色菱形）并保留在文件里。',
+    })
+
+    settings.customTerrains.forEach((terrain, index) => {
+      new Setting(containerEl)
+        .setName(`地形 ${index + 1} · ${terrain.label}`)
+        .setDesc(
+          `写入地图文件的 ID：${terrain.id}（不可修改 —— 改它等于换一种地形）。` +
+            (terrain.imagePath.length > 0
+              ? `图片：${terrain.imagePath}（图片缺失时自动回退到颜色 + 字形）`
+              : '当前只用颜色 + 字形（未设置图片）。'),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('显示名（例如 沼泽地）')
+            .setValue(terrain.label)
+            .onChange((value) => {
+              void this.plugin.updateCustomTerrain(index, { label: value })
+            }),
+        )
+        .addColorPicker((picker) =>
+          picker.setValue(terrain.color).onChange((value) => {
+            void this.plugin.updateCustomTerrain(index, { color: value })
+          }),
+        )
+        .addButton((button) =>
+          button.setButtonText('删除').onClick(() => {
+            void this.plugin.removeCustomTerrain(index)
+            this.display()
+          }),
+        )
+
+      new Setting(containerEl)
+        .setName(`　└ 字形与图片 · ${terrain.label}`)
+        .setDesc('字形：借用某种内置地形的图元；「通用」= 三个点。图片：库内路径，例如 Assets/forest.png')
+        .addDropdown((dropdown) => {
+          dropdown.addOption('', '通用')
+          for (const style of listTerrainStyles()) dropdown.addOption(style.type, style.label)
+          dropdown.setValue(terrain.glyph)
+          dropdown.onChange((value) => {
+            void this.plugin.updateCustomTerrain(index, { glyph: value })
+          })
+        })
+        .addText((text) =>
+          text
+            .setPlaceholder('图片路径（留空 = 不用图片）')
+            .setValue(terrain.imagePath)
+            .onChange((value) => {
+              const check = checkTerrainImagePath(value)
+              if (check.problem.length > 0) {
+                // 路径不合法就地提示，并且**不写进设置**（否则绘制层每帧都要处理一个坏路径）
+                this.setNoteText(`图片路径不可用：${check.problem}`)
+                return
+              }
+              void this.plugin.updateCustomTerrain(index, { imagePath: check.path })
+              this.setNoteText('')
+            }),
+        )
+    })
+
+    // ---- 新建 ----
+    const atLimit = settings.customTerrains.length >= MAX_CUSTOM_TERRAINS
+    const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
+    this.noteEl = note
+    const pending: { id: string; label: string; color: string; glyph: string; imagePath: string } = {
+      id: '',
+      label: '',
+      color: DEFAULT_CUSTOM_TERRAIN_COLOR,
+      glyph: '',
+      imagePath: '',
+    }
+
+    new Setting(containerEl)
+      .setName('新增自定义地形')
+      .setDesc(
+        atLimit
+          ? `已达上限（${MAX_CUSTOM_TERRAINS} 个）`
+          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+              `前缀 ${CUSTOM_TERRAIN_PREFIX} 会自动补上，避免与内置 9 种重名。`,
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('ID（例如 swamp2）')
+          .setValue('')
+          .onChange((value) => {
+            pending.id = value
+            // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
+            this.setNoteText(value.trim().length === 0 ? '' : (terrainIdProblem(value) ?? ''))
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('显示名（留空 = 用 ID）')
+          .setValue('')
+          .onChange((value) => {
+            pending.label = value
+          }),
+      )
+      .addColorPicker((picker) =>
+        picker.setValue(DEFAULT_CUSTOM_TERRAIN_COLOR).onChange((value) => {
+          pending.color = value
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText('新增').onClick(() => {
+          const problem = terrainIdProblem(pending.id)
+          if (problem !== null) {
+            this.setNoteText(problem)
+            return
+          }
+          void this.plugin.addCustomTerrain(pending).then((result) => {
+            if (!result.ok) {
+              this.setNoteText(result.problem)
+              return
+            }
+            this.setNoteText('')
+            this.display()
+          })
+        }),
+      )
+  }
+
+  /** 设置页里那一行就地提示（错误原因、保存结果） */
+  private setNoteText(text: string): void {
+    if (this.noteEl) this.noteEl.textContent = text
   }
 }

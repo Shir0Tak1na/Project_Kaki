@@ -17,7 +17,7 @@
 import { axialToWorld, parseCellKey } from '../core/hex.ts'
 import { projectionWorldBBox, type ClientProjection } from '../core/projection.ts'
 import type { BBox } from '../core/viewport.ts'
-import type { MapDocument, PathType, TerrainType } from '../data/mapDocument.ts'
+import type { MapDocument, PathType } from '../data/mapDocument.ts'
 import { cellIntersectsBBox } from './hexGrid.ts'
 import { bboxOverlaps, shapeBounds } from './shapeGeometry.ts'
 
@@ -27,7 +27,14 @@ export interface RenderPlanCell {
   /** 格心的世界坐标 */
   x: number
   y: number
-  type: TerrainType
+  /**
+   * 地形 ID（内置 9 种之一或 `custom:xxx`，也可能是本机设置里没有的未知 ID）。
+   *
+   * 这里**不做**校验/回退：绘制层用 `resolveTerrainStyle(id)` 一次性决定画什么，
+   * 计划层只负责"这一格在哪里、是什么"。把校验散在两处，就会出现
+   * "计划里过滤掉了、绘制时又画出来"这类互相矛盾的行为。
+   */
+  type: string
   /** 位标志（旋转/镜像/变体） */
   flags: number
   /** 覆盖色（覆盖地形默认底色） */

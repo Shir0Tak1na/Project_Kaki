@@ -90,7 +90,12 @@ test('单条目错误只跳过该条目并告警，其余数据保持可用', ()
   raw.terrain = {
     '0_0': { t: 'mountain' },
     badKey: { t: 'forest' },
+    // 未知地形：**保留**（只告警）。丢掉它 = 用户一保存就永久删数据，见下一个测试
     '1_1': { t: 'nonexistent-terrain' },
+    // 完全不可能当 ID 的值（不是字符串、空串、带空白）才跳过
+    '3_3': { t: 42 },
+    '4_4': { t: '' },
+    '5_5': { t: 'has space' },
     '2_2': { t: 'water' },
   }
   raw.markers = [
@@ -108,7 +113,7 @@ test('单条目错误只跳过该条目并告警，其余数据保持可用', ()
   assert.equal(result.ok, true)
   const doc = result.document!
 
-  assert.deepEqual(Object.keys(doc.terrain).sort(), ['0_0', '2_2'])
+  assert.deepEqual(Object.keys(doc.terrain).sort(), ['0_0', '1_1', '2_2'])
   assert.deepEqual(doc.markers.map((m) => m.id), ['m1', 'm3'])
   assert.equal(doc.markers[1]!.icon, 'town', '未知图标应回退为 town')
   assert.deepEqual(doc.regions.map((r) => r.id), ['r2'], '顶点不足 3 个的区域应被跳过')
@@ -116,6 +121,38 @@ test('单条目错误只跳过该条目并告警，其余数据保持可用', ()
   const warnings = result.issues.filter((issue) => issue.level === 'warning')
   assert.ok(warnings.length >= 5, `应有多条告警，实际 ${warnings.length}`)
   assert.ok(warnings.every((issue) => issue.path.length > 0), '告警必须带字段路径')
+})
+
+test('未知地形必须被保留并告警（丢弃会在下次保存时永久删掉用户的数据）', () => {
+  const raw = validRaw()
+  raw.terrain = {
+    '0_0': { t: 'custom:dragon' }, // 本机设置里可能没有，但数据要活着
+    '1_0': { t: 'forest' },
+    '2_0': { t: '别人的地形' }, // 既不是内置也不是 custom: 命名空间 → 额外告警
+  }
+
+  const result = parseMapDocument(raw)
+  assert.equal(result.ok, true, '未知地形不能让整份文档加载失败')
+  const doc = result.document!
+
+  assert.deepEqual(
+    Object.keys(doc.terrain).sort(),
+    ['0_0', '1_0', '2_0'],
+    '三种都要在：内置、custom: 命名空间、完全外来的 ID',
+  )
+
+  // 往返：序列化再解析一次，ID 原样不动
+  const text = serializeMapDocument(doc, 2)
+  const again = parseMapDocument(JSON.parse(text) as unknown)
+  assert.equal(again.ok, true)
+  assert.equal(again.document!.terrain['0_0']!.t, 'custom:dragon')
+  assert.equal(again.document!.terrain['2_0']!.t, '别人的地形')
+
+  // 告警：`custom:` 命名空间的 ID 由绘制层负责判断"设置里有没有"（解析层读不到设置），
+  // 所以这里只有"完全外来"的那一个告警
+  const warnings = result.issues.filter((issue) => issue.level === 'warning' && issue.path.endsWith('.t'))
+  assert.equal(warnings.length, 1, `只应有一条地形告警，实际 ${JSON.stringify(warnings.map((w) => w.message))}`)
+  assert.ok(warnings[0]!.message.includes('已保留'), warnings[0]!.message)
 })
 
 test('opacity 会被收敛到 0..1', () => {
