@@ -1,0 +1,45 @@
+# 日常 CI：每次推送到 main 或开 PR 时，把三道闸跑一遍。
+#
+# 与 release.yml 的区别：这里**不**发布任何东西，只回答一个问题 ——
+# "这个提交在干净环境里还构建得出来、还测得过吗？"
+# （本地测得过 ≠ 干净 clone 测得过：node_modules 与 main.js 都不入库，
+#  最容易出问题的恰恰是"忘了把新文件加进构建/忘了提交"。）
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: 安装依赖（跳过生命周期脚本）
+        run: npm ci --ignore-scripts
+
+      # 顺序重要：冒烟测试加载的是打包产物 main.js，所有检查都必须在构建之后
+      - name: 构建
+        run: node scripts/build.mjs
+
+      - name: 类型检查（0 错是底线）
+        run: node node_modules/typescript/bin/tsc --noEmit
+
+      - name: 单元测试
+        run: node --test --test-isolation=none
+
+      - name: 冒烟测试（端到端，加载真实打包产物）
+        run: node scripts/smoke.mjs
+
+      # 预览图是 README 的门面，必须还能从当前代码生成出来（脚本自带断言）
+      - name: 预览图可重现
+        run: node scripts/make-preview.mjs

@@ -53,8 +53,8 @@ Project Kaki（译名 **Project 垣**）是一个 Obsidian 插件：把 `.canvas
 ```bash
 git clone https://github.com/Shir0Tak1na/Project_Kaki.git
 cd Project_Kaki
-npm install --ignore-scripts     # 只装 typescript 与 yaml，没有生命周期脚本
-node scripts/build.mjs           # 产出 main.js
+npm ci --ignore-scripts     # 只装开发依赖（typescript / obsidian 类型 / yaml / esbuild），没有生命周期脚本
+node scripts/build.mjs      # 产出 main.js
 ```
 
 把 `main.js`、`manifest.json`、`styles.css` **这三个文件**复制到你的库：

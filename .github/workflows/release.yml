@@ -1,0 +1,74 @@
+# 发布流程：推一个 tag 就自动构建并发布 Release。
+#
+# 为什么用 windows-latest 而不是 ubuntu：
+# 本项目只在 Windows 上开发与验证过（构建脚本、行尾、路径都按 Windows 调的），
+# 换平台跑 CI 会引入一批"和功能无关的失败"，那是给自己找麻烦。
+# 等哪天真的跨平台了再改。
+#
+# 为什么必须用 Node 24：
+# 单元测试直接 import TypeScript 源文件（`tests/*.test.ts` → `src/**/*.ts`），
+# 这依赖 Node 的类型剥离，Node 22.6+ 才有（24 默认开启）。用 Node 20 会直接 ERREXTENSION。
+#
+# Release 必须附上三个文件：main.js、manifest.json、styles.css。
+# main.js 是构建产物、**不入库**（见 .gitignore），所以只能在这里生成并作为附件上传 ——
+# BRAT 与 Obsidian 手动安装都从这里取。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: 安装依赖（跳过生命周期脚本）
+        run: npm ci --ignore-scripts
+
+      # 版本一致性：tag 必须与 manifest.json 的 version 相同。
+      # 不一致的话 Obsidian 与 BRAT 会认为"这个包里没有对应版本"，装了也不更新 ——
+      # 与其发布一个装不上的包，不如在这里直接失败。
+      - name: 校验 tag 与 manifest.json 版本一致
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $manifest = Get-Content manifest.json -Raw | ConvertFrom-Json
+          if ($manifest.version -ne $tag) {
+            throw "manifest.json 的版本是 $($manifest.version)，与 tag $tag 不一致"
+          }
+          Write-Host "版本一致：$tag · minAppVersion $($manifest.minAppVersion)"
+
+      - name: 构建 main.js
+        run: node scripts/build.mjs
+
+      # 发布前把三道闸跑一遍：类型、单测、冒烟（冒烟加载的正是刚构建出来的 main.js）
+      - name: 类型检查
+        run: node node_modules/typescript/bin/tsc --noEmit
+
+      - name: 单元测试
+        run: node --test --test-isolation=none
+
+      - name: 冒烟测试（端到端）
+        run: node scripts/smoke.mjs
+
+      - name: 发布 Release（附三个文件）
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            main.js
+            manifest.json
+            styles.css
+          generate_release_notes: true
+          draft: false
