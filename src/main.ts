@@ -44,6 +44,13 @@ import {
   type StylePalette,
 } from './render/stylePalette.ts'
 import {
+  allLayersHidden,
+  hiddenLayerLabels,
+  withLayerVisibility,
+  type LayerKey,
+} from './render/layerVisibility.ts'
+import { legendLines } from './render/legend.ts'
+import {
   MAX_CUSTOM_TERRAINS,
   isBuiltinTerrain,
   resolveTerrainStyle,
@@ -87,16 +94,23 @@ export default class ProjectKakiPlugin extends Plugin {
     this.layers = new MapLayerManager({
       app: this.app,
       store: this.store,
-      // 网格线默认打开：绘图与对齐校验都依赖它
-      showGrid: true,
       placeModalFactory: (app, options) => this.placeModalFactory(app, options),
       promptModalFactory: (app, options, onSubmit) => this.promptModalFactory(app, options, onSubmit),
       // 名称字号倍率：设置界面改完立即生效
       getLabelScale: () => this.pluginSettings.labelScale,
-      getShowGrid: () => this.pluginSettings.showGrid,
       // 样式（路径/区域颜色、名称字体族）：地图层每帧现读，改完设置立刻生效
       getStylePalette: () => this.getStylePalette(),
       getCustomTerrains: () => this.getCustomTerrains(),
+      // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
+      // 工具条上的按钮通过下面两个 setter 写回设置。
+      getLayers: () => this.pluginSettings.layers,
+      getShowLegend: () => this.pluginSettings.showLegend,
+      setLayerVisible: (key, value) => {
+        void this.setLayerVisible(key, value)
+      },
+      setShowLegend: (value) => {
+        void this.setShowLegend(value)
+      },
     })
 
     this.addSettingTab(new CartographerSettingTab(this.app, this))
@@ -688,12 +702,32 @@ export default class ProjectKakiPlugin extends Plugin {
     this.refreshPanel()
   }
 
-  async setShowGrid(value: boolean): Promise<void> {
+  /**
+   * 切换某个图层的显示。
+   *
+   * 顺序是刻意的：**改内存 → 立刻广播 → 再落盘**。
+   * 广播不能等 `await saveData(...)`：工具条上的「名称」按钮是同步点下去的，
+   * 等落盘再广播意味着"点了之后下一帧仍然画着名称"（而且测试里同步断言也拿不到新值）。
+   * 落盘是后台的事，它慢一点不影响画面。
+   *
+   * 这里**是网格、名称等开关的唯一入口**：老代码里那个独立的 `setShowGrid`
+   * 只是它的薄包装，现在已经删掉 —— 留着会让"网格状态"有两个写入口。
+   */
+  async setLayerVisible(key: LayerKey, value: boolean): Promise<void> {
     const next = value === true
-    if (next === this.pluginSettings.showGrid) return
-    this.pluginSettings = { ...this.pluginSettings, showGrid: next }
+    const layers = withLayerVisibility(this.pluginSettings.layers, key, next)
+    if (layers === this.pluginSettings.layers) return
+    this.pluginSettings = { ...this.pluginSettings, layers }
+    this.layers?.setLayers()
     await this.saveData(this.pluginSettings)
-    this.layers?.setShowGrid(next)
+  }
+
+  async setShowLegend(value: boolean): Promise<void> {
+    const next = value === true
+    if (next === this.pluginSettings.showLegend) return
+    this.pluginSettings = { ...this.pluginSettings, showLegend: next }
+    this.layers?.setLayers()
+    await this.saveData(this.pluginSettings)
   }
 
   /** 替换放置对话框（自动化测试用；不改动则为真实的输入对话框） */
@@ -868,6 +902,9 @@ export default class ProjectKakiPlugin extends Plugin {
         `标记 ${summary.markers} · 路径 ${summary.paths} · 区域 ${summary.regions} · 文字 ${summary.labels}`,
         `文件 ${sizeKiB} KiB · 告警 ${warnings.length} 条`,
         this.describeLabelSize(),
+        // 图层与图例：让"地图怎么少了东西"有一个可查的答案
+        this.describeLayers(),
+        ...this.describeLegend(canvasPath),
         warnings.length > 0 ? '告警详情见控制台。' : '',
       ]
         .filter((line) => line.length > 0)
@@ -877,8 +914,28 @@ export default class ProjectKakiPlugin extends Plugin {
     if (loaded.issues.length > 0) console.log('[project-kaki] 地图问题：', loaded.issues)
   }
 
-  // ------------------------------------------------------------ Phase 0 探针
+  /**
+   * 当前隐藏了哪些图层（状态命令用）。
+   *
+   * 为什么值得单独报一行：用户看不到某个东西时的第一反应是"我的数据是不是没了"，
+   * 而真相往往只是某个图层被关掉了。让它可查，比让人去猜便宜得多。
+   */
+  private describeLayers(): string {
+    const hidden = hiddenLayerLabels(this.pluginSettings.layers)
+    if (allLayersHidden(this.pluginSettings.layers)) {
+      return '图层：全部隐藏（地图上看不到任何东西，这是设置导致的，数据仍在）'
+    }
+    return hidden.length === 0 ? '图层：全部显示' : `图层：已隐藏 ${hidden.join(' / ')}`
+  }
 
+  /** 图例条目（从地图实际内容生成；受图层开关约束） */
+  private describeLegend(canvasPath: string): string[] {
+    const entries = this.layers?.buildLegendFor(canvasPath) ?? []
+    if (entries.length === 0) return ['图例：（地图还是空的，或相关图层被隐藏）']
+    return ['图例：', ...legendLines(entries).map((line) => `  ${line}`)]
+  }
+
+  // ------------------------------------------------------------ Phase 0 探针
   private async runDiagnostics(): Promise<void> {
     const { handles } = findCanvasHandles(this.app)
     if (handles.length === 0) {

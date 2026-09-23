@@ -27,7 +27,7 @@ Project Kaki（译名 **Project 垣**）是一个 Obsidian 插件：把 `.canvas
 - [特性](#特性) · [安装](#安装) · [快速上手](#快速上手) · [使用说明](#使用说明)
 - [Base 视图](#base-视图把地图和笔记连起来) · [导出](#导出) · [设置](#设置)
 - [数据与文件](#数据与文件) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题)
-- [开发](#开发) · [路线图](#路线图) · [许可证](#许可证) · [签名](#签名)
+- [开发](#开发) · [路线图](#路线图) · [更新日志](CHANGELOG.md) · [许可证](#许可证) · [签名](#签名)
 
 ## 特性
 
@@ -49,9 +49,20 @@ Project Kaki（译名 **Project 垣**）是一个 Obsidian 插件：把 `.canvas
 
 ## 安装
 
-> ⚠️ 当前**还没有发布 Release**。下面是从源码安装的方式；发布后会补上 Release 与 BRAT 安装说明。
+插件只有三个文件：`main.js`、`manifest.json`、`styles.css`。任选一种方式装进
+`<你的库>/.obsidian/plugins/project-kaki/`，然后在 Obsidian 里：设置 → 社区插件 → 打开「已安装插件」→ 启用 **Project Kaki**。
 
-### 从源码构建（开发版）
+### 方式一：从 Release 下载（推荐）
+
+到 [Releases](https://github.com/Shir0Tak1na/Project_Kaki/releases) 页面，在最新版本的 **Assets** 里
+下载那三个文件，放进上面的目录。不需要 Node.js，也不需要构建。
+
+### 方式二：用 BRAT 安装
+
+装好 [BRAT](https://github.com/TfTHacker/obsidian42-brat) 后，运行命令
+**BRAT: Add a beta plugin for testing**，填 `Shir0Tak1na/Project_Kaki`，回车即可（BRAT 会自动取 Release 里的文件）。
+
+### 方式三：从源码构建（开发版）
 
 需要 Node.js 18+。
 
@@ -67,8 +78,6 @@ node scripts/build.mjs      # 产出 main.js
 ```
 <你的库>/.obsidian/plugins/project-kaki/
 ```
-
-然后在 Obsidian 里：设置 → 社区插件 → 打开「已安装插件」→ 启用 **Project Kaki**。
 
 > 只复制这三个文件，**不要**复制 `package.json`（它带 `"type": "module"`，会让 Obsidian 的
 > CommonJS 加载混乱）。
@@ -132,6 +141,28 @@ node scripts/build.mjs      # 产出 main.js
 - 图片**不存在 / 解不开 / 路径不合法**时，那一格回退成"颜色 + 字形"，并在控制台给出一条可读原因 —— 不会静默变成空白。
 - **删掉设置里的定义不会删掉地图上的格子**：数据原样保留，只是视觉回退成"未知地形"的占位样式（这样你还能看到"这里有东西"，而不是地图上出现一个洞）。
 - 最多 40 条：图集是一行位图（每条占一列 260 px），再多会超过部分平台的画布宽度上限，届时地形会静默不显示。
+
+### 图层开关与图例
+
+设置 → Project Kaki → 「图层」里可以分别显示/隐藏六层。各层管什么：
+
+| 图层 | 管什么 |
+|---|---|
+| 地形 | 六边形地形的填色 / 图片 |
+| 网格 | 六边形网格线 |
+| 区域 | 半透明的领地范围 |
+| 路径 | 河流 / 道路 / 贸易路线 / 边界 |
+| 标记 | 地标标记**与文字标注** |
+| 名称 | 路径与区域的**名称文字** |
+
+- 图层只是**显示开关**，不会改动地图数据：隐藏路径后文件里的路径仍然在，重新打开就回来了。
+  想看"只剩地形"的干净底图、或者只想检查河流走向时，比删掉再画回来安全得多。
+- 图层状态存在**插件设置**里（唯一的真相），不写进地图文件 —— 换台机器打开同一张地图，
+  地图内容一样，显示偏好各随各的设置。
+- 「显示图例」打开后，画布右下角出现一块图例：**内容来自地图上实际有的东西**（不是写死的清单），
+  地形按格数、路径按类型（色块会体现虚线）、区域按颜色归并，并在右侧给出数量。
+  隐藏某一层时，图例里对应的条目也会消失。
+- 图例是"看"的东西，不抢画布手势（悬停、拖动、缩放照常）。
 
 ### 地图面板与开发者模式
 
@@ -254,8 +285,8 @@ canvases:
 ```bash
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
-node --test --test-isolation=none                 # 184 个单元测试
-node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，23 个场景 / 423 条断言
+node --test --test-isolation=none                 # 223 个单元测试
+node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，25 个场景 / 514 条断言
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```
 

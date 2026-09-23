@@ -16,9 +16,17 @@ import { PlaceMarkerModal, type PlaceMarkerOptions } from '../ui/PlaceMarkerModa
 import { TextPromptModal, type TextPromptOptions } from '../ui/TextPromptModal.ts'
 import { MapToolbar } from '../ui/MapToolbar.ts'
 import { MapOverlay, type OverlayStats } from './MapOverlay.ts'
+import { buildLegendEntries, type LegendDeps, type LegendEntry } from './legend.ts'
+import {
+  DEFAULT_LAYER_VISIBILITY,
+  isLayerVisible,
+  type LayerKey,
+  type LayerVisibility,
+} from './layerVisibility.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
-import { defaultStylePalette, type StylePalette } from './stylePalette.ts'
-import type { CustomTerrain } from './terrainCatalog.ts'
+import { canonicalColor, defaultStylePalette, resolvePathStyle, resolveRegionPresets, type StylePalette } from './stylePalette.ts'
+import { resolveTerrainStyle, type CustomTerrain } from './terrainCatalog.ts'
+import { MapLegend } from '../ui/MapLegend.ts'
 
 export interface LayerStatus {
   canvasPath: string
@@ -32,7 +40,6 @@ export interface LayerStatus {
 export interface MapLayerManagerDeps {
   app: App
   store: MapDocumentStore
-  showGrid?: boolean
   canvasFactory?: (width: number, height: number) => HTMLCanvasElement
   /** 注入放置对话框（测试用；默认用真实的 PlaceMarkerModal） */
   placeModalFactory?: (app: App, options: PlaceMarkerOptions) => { open(): void }
@@ -44,7 +51,6 @@ export interface MapLayerManagerDeps {
   ) => { open(): void }
   /** 名称字号倍率（用户设置；1 = 默认） */
   getLabelScale?: () => number
-  getShowGrid?: () => boolean
   /**
    * 样式调色板（路径颜色 / 区域颜色 / 名称字体族），来自插件设置。
    *
@@ -59,6 +65,24 @@ export interface MapLayerManagerDeps {
    * 否则用户新增一个地形后要重开画布才看得到。
    */
   getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 图层可见性（来自插件设置）。
+   *
+   * 同样传函数：图层开关会被用户在设置页或工具条上随手改，必须"每次现读"，
+   * 否则要让用户重开画布才生效。
+   */
+  getLayers?: () => LayerVisibility
+  /** 图例是否显示（来自插件设置；默认关着，图例不该默认占画布） */
+  getShowLegend?: () => boolean
+  /**
+   * 写回图层开关（由插件实现：同步改内存 + 落盘 + 广播）。
+   *
+   * 工具条上的「名称」按钮走这个口子 —— 图层是持久化设置，
+   * 工具条只是它的一个入口，不能让按钮自己留一份状态。
+   */
+  setLayerVisible?: (key: LayerKey, value: boolean) => void
+  /** 写回图例显示开关（同上） */
+  setShowLegend?: (value: boolean) => void
   onToggleLayer?: (canvasPath: string) => void
 }
 
@@ -74,6 +98,8 @@ interface LayerEntry {
   editor: MapEditor
   interaction: MapInteraction
   toolbar: MapToolbar | null
+  /** 画布上的图例面板（挂在同样的 wrapperEl 上）；创建失败为 null，不影响地图层 */
+  legend: MapLegend | null
 }
 
 function asElement(value: unknown): HTMLElement | null {
@@ -295,7 +321,6 @@ export class MapLayerManager {
     const overlay = new MapOverlay({
       handle,
       getDocument: () => this.entries.get(canvasPath)?.document ?? null,
-      showGrid: this.deps.getShowGrid?.() ?? this.deps.showGrid ?? true,
       ...(this.deps.canvasFactory ? { canvasFactory: this.deps.canvasFactory } : {}),
       // 标记层挂在未变换的 wrapperEl 上：屏幕坐标、字号恒定、可 hover/点击
       getMarkerHost: () => asElement((handle.canvas as { wrapperEl?: unknown }).wrapperEl),
@@ -303,10 +328,10 @@ export class MapLayerManager {
         buildPlacements({ document: document_, projection, viewportRect }),
       // 进行中的路径/区域草稿：与地形同帧绘制（橡皮筋要每帧跟随光标）
       getDraft: () => this.entries.get(canvasPath)?.editor.getDraft() ?? null,
-      // 名称显示开关：只影响绘制，不改数据
-      getShowShapeLabels: () => this.entries.get(canvasPath)?.editor.showShapeLabels ?? true,
       // 名称字号倍率：来自插件设置
       getLabelScale: () => this.deps.getLabelScale?.() ?? 1,
+      // 图层可见性（含 grid 与 labels）：六个层唯一的入口，每帧现读
+      getLayers: () => this.layersVisibility(),
       // 名称字体族：来自插件设置（空串 = 跟随主题）
       getLabelFontFamily: () => this.deps.getStylePalette?.().fontFamily ?? '',
       // 自定义地形：目录与图片加载都从这里注入（渲染层不认识 vault）
@@ -416,6 +441,16 @@ export class MapLayerManager {
             return { pathColors: palette.pathColors, regionColors: palette.regionColors }
           },
           getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
+          // 「名称」按钮写图层设置（同一个值）：编辑器里**没有**第二份名称开关，
+          // 所以不存在"设置里打开、按钮显示关闭"这种状态
+          getShowShapeLabels: () => isLayerVisible(this.layersVisibility(), 'labels'),
+          onToggleLabels: () => {
+            this.deps.setLayerVisible?.('labels', !isLayerVisible(this.layersVisibility(), 'labels'))
+          },
+          getShowLegend: () => this.deps.getShowLegend?.() ?? false,
+          onToggleLegend: () => {
+            this.deps.setShowLegend?.(!(this.deps.getShowLegend?.() ?? false))
+          },
           onModeChanged: (mode) => interaction.notifyModeChanged(mode),
           onToggleLayer: () => this.disable(canvasPath),
           onUndo: () => {
@@ -441,6 +476,7 @@ export class MapLayerManager {
       editor,
       interaction,
       toolbar,
+      legend: null,
     }
     // 先登记再挂载：getDocument 依赖 entries 里已有本条目
     this.entries.set(canvasPath, entry)
@@ -450,6 +486,19 @@ export class MapLayerManager {
       toolbar?.destroy()
       this.entries.delete(canvasPath)
       return { canvasPath, mapPath, attached: false, reason: result.reason }
+    }
+
+    // 图例挂在未变换的 wrapperEl 上（和工具条同一层）。
+    // 同样包一层 try：图例是锦上添花，失败了不该连带整个地图层失败。
+    if (toolbarHost) {
+      try {
+        entry.legend = new MapLegend(toolbarHost, { getVisible: () => this.deps.getShowLegend?.() ?? false })
+        entry.legend.syncVisibility()
+        this.refreshLegend(entry)
+      } catch (error) {
+        console.warn('[project-kaki] 图例创建失败，地图层继续但不带图例', error)
+        entry.legend = null
+      }
     }
 
     interaction.attach()
@@ -470,8 +519,28 @@ export class MapLayerManager {
     this.enabled.delete(canvasPath)
   }
 
-  setShowGrid(showGrid: boolean): void {
-    for (const entry of this.entries.values()) entry.overlay.setShowGrid(showGrid)
+  /** 当前图层设置（每帧现读；缺省即全部显示） */
+  private layersVisibility(): LayerVisibility {
+    return this.deps.getLayers?.() ?? DEFAULT_LAYER_VISIBILITY
+  }
+
+  /**
+   * 图层开关变化后的统一广播（设置页、工具条都走这里）。
+   *
+   * 为什么值不从这里传进去：图层由插件设置持有、绘制层每帧现读（`getLayers`），
+   * 所以这里只需要"把每帧都会重新读的东西推一把"：
+   * 工具条刷新（按钮高亮读设置）、图例同步显隐、重算条目、再请求一帧重绘。
+   *
+   * 刻意**没有**"把图层值写进编辑器/覆盖层"这一步 —— 那会造出第二份状态，
+   * 而"同一件事存两份"必然出现互相矛盾的状态（本项目最怕的那类缺陷）。
+   */
+  setLayers(): void {
+    for (const entry of this.entries.values()) {
+      entry.toolbar?.refresh()
+      entry.legend?.syncVisibility()
+      this.refreshLegend(entry)
+      entry.overlay.requestRedraw()
+    }
   }
 
   /**
@@ -543,7 +612,60 @@ export class MapLayerManager {
   setStylePalette(): void {
     for (const entry of this.entries.values()) {
       entry.toolbar?.refresh()
+      // 颜色/名称/地形目录都会改变图例显示的文字与色块，所以顺带刷新一次
+      this.refreshLegend(entry)
       entry.overlay.requestRedraw()
+    }
+  }
+
+  /** 某个 canvas 当前的图例条目（状态命令与测试用；受图层开关约束） */
+  buildLegendFor(canvasPath: string): LegendEntry[] {
+    const entry = this.entries.get(canvasPath)
+    if (!entry) return []
+    return buildLegendEntries(entry.document, this.legendDeps(), this.layersVisibility())
+  }
+
+  /**
+   * 刷新一块地图的图例。
+   *
+   * **只在"文档变了 / 设置变了 / 图层变了"时调用，绝不放进每帧重绘**：
+   * 图例内容与视口无关（平移缩放不会改变地图上有什么），
+   * 而 `buildLegendEntries` 要遍历地形格 —— 跟着每帧跑就是白烧 CPU
+   * （侧边栏面板曾经每帧重建 DOM，表现就是发卡）。
+   */
+  private refreshLegend(entry: LayerEntry): void {
+    if (!entry.legend) return
+    try {
+      entry.legend.refresh(buildLegendEntries(entry.document, this.legendDeps(), this.layersVisibility()))
+    } catch (error) {
+      console.warn('[project-kaki] 图例刷新失败', error)
+    }
+  }
+
+  /**
+   * 图例用的三个样式解析器。
+   *
+   * 全部从**当前设置**现取：内置地形、自定义地形、未知 ID 三种情况由 `resolveTerrainStyle`
+   * 统一抹平，图例只负责显示 —— 于是"图例与画布配色不一致"这种老问题不会因为新功能复活。
+   */
+  private legendDeps(): LegendDeps {
+    const palette = this.deps.getStylePalette?.() ?? defaultStylePalette()
+    const custom = this.deps.getCustomTerrains?.() ?? []
+    const presets = resolveRegionPresets(palette.regionColors)
+    return {
+      resolveTerrain: (id) => {
+        const style = resolveTerrainStyle(id, custom)
+        return { label: style.label, color: style.base }
+      },
+      resolvePath: (type) => {
+        const style = resolvePathStyle(type, palette.pathColors)
+        return { label: style.label, color: style.color, ...(style.dash ? { dash: style.dash } : {}) }
+      },
+      // 区域没有"类型"，颜色就是它的身份：能对上预设就报预设名，否则给一个通用名
+      resolveRegion: (color) => {
+        const preset = presets.find((item) => canonicalColor(item.color) === canonicalColor(color))
+        return { label: preset ? preset.label : '区域' }
+      },
     }
   }
 
@@ -556,6 +678,7 @@ export class MapLayerManager {
     if (!entry) return
     entry.interaction.detach()
     entry.toolbar?.destroy()
+    entry.legend?.destroy()
     entry.overlay.detach()
     this.entries.delete(canvasPath)
   }
@@ -577,6 +700,9 @@ export class MapLayerManager {
   private scheduleSave(canvasPath: string): void {
     const entry = this.entries.get(canvasPath)
     if (!entry) return
+    // 编辑结束（一次笔画 / 一条 op 完成）才会走到这里 —— 正是"文档变了"的时刻，
+    // 也是刷新图例的合适时机（图例跟着每帧跑是白烧 CPU，见 refreshLegend）
+    this.refreshLegend(entry)
     const abstract = this.deps.app.vault.getAbstractFileByPath(entry.mapPath)
     if (abstract === null) return
     this.deps.store.scheduleSave(abstract as TFile, entry.document, entry.name, entry.canvases)
@@ -621,6 +747,8 @@ export class MapLayerManager {
       // 刻意**不**清空撤销历史：历史 op 记录的是"格 + 新旧状态"，
       // 对替换后的文档依然成立。清空它会让用户在保存后丢失撤销能力。
       entry.overlay.requestRedraw()
+      // 外部改动换掉了文档，图例也必须跟着换（否则图例会停留在旧内容上）
+      this.refreshLegend(entry)
       updated += 1
     }
     return updated

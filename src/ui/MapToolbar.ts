@@ -49,6 +49,20 @@ export interface MapToolbarOptions {
    * 而它在用户改设置时才会发生，不会进入每帧路径。
    */
   getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 切换"名称"图层（路径与区域的名称标注）。
+   *
+   * 为什么**必需**而不是可选：图层开关是持久化设置，工具条按钮只是它的一个入口。
+   * 做成可选就会留下"某个调用方没接这个回调 → 按钮点了没反应"的可能，
+   * 而这正是本项目最怕的一类缺陷（改了没反应）。必需即编译期保证按钮能写进设置。
+   */
+  onToggleLabels: () => void
+  /** 名称图层当前是否显示（按钮高亮读它 —— 唯一真相是设置，不是工具条自己的状态） */
+  getShowShapeLabels: () => boolean
+  /** 图例当前是否显示（来自插件设置） */
+  getShowLegend: () => boolean
+  /** 切换图例显示（写设置） */
+  onToggleLegend: () => void
 }
 
 const TOOL_LABELS: Record<EditorTool, { label: string; hint: string }> = {
@@ -105,6 +119,7 @@ export class MapToolbar {
   private readonly undoButton: HTMLButtonElement
   private readonly redoButton: HTMLButtonElement
   private readonly nameButton: HTMLButtonElement
+  private readonly legendButton: HTMLButtonElement
   private readonly hintEl: HTMLElement
 
   constructor(container: HTMLElement, options: MapToolbarOptions) {
@@ -288,12 +303,24 @@ export class MapToolbar {
     this.nameButton = doc.createElement('button')
     this.nameButton.className = 'fc-toolbar-button fc-toolbar-names'
     this.nameButton.textContent = '名称'
-    this.nameButton.title = '显示/隐藏路径与区域名称'
+    this.nameButton.title = '显示/隐藏路径与区域名称（图层设置，会记住）'
     this.nameButton.addEventListener('click', () => {
-      options.editor.setShowShapeLabels(!options.editor.showShapeLabels)
+      // 只写设置：编辑器里**没有**第二份名称开关（见 MapEditor 的说明）
+      options.onToggleLabels()
       this.refresh()
     })
     viewGroup.appendChild(this.nameButton)
+
+    // 图例开关：图例是"要看的时候才看"的东西，所以默认关着，这里给它一个入口
+    this.legendButton = doc.createElement('button')
+    this.legendButton.className = 'fc-toolbar-button fc-toolbar-legend'
+    this.legendButton.textContent = '图例'
+    this.legendButton.title = '显示/隐藏图例（从地图上实际有的内容生成）'
+    this.legendButton.addEventListener('click', () => {
+      options.onToggleLegend()
+      this.refresh()
+    })
+    viewGroup.appendChild(this.legendButton)
     this.root.appendChild(viewGroup)
 
     this.hintEl = doc.createElement('div')
@@ -405,8 +432,13 @@ export class MapToolbar {
     }
 
     this.brushLabel.textContent = `${status.brushRadius}`
-    this.nameButton.classList.toggle('is-active', status.showShapeLabels)
-    this.nameButton.textContent = status.showShapeLabels ? '名称 ✓' : '名称'
+    // 这两个高亮读的是**设置**（唯一真相），不是工具条或编辑器里的副本
+    const showNames = this.options.getShowShapeLabels()
+    this.nameButton.classList.toggle('is-active', showNames)
+    this.nameButton.textContent = showNames ? '名称 ✓' : '名称'
+    const showLegend = this.options.getShowLegend()
+    this.legendButton.classList.toggle('is-active', showLegend)
+    this.legendButton.textContent = showLegend ? '图例 ✓' : '图例'
     this.undoButton.disabled = status.undo === 0
     this.redoButton.disabled = status.redo === 0
     this.undoButton.textContent = `撤销${status.undo > 0 ? ` (${status.undo})` : ''}`

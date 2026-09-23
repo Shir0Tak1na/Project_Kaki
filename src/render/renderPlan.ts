@@ -19,6 +19,7 @@ import { projectionWorldBBox, type ClientProjection } from '../core/projection.t
 import type { BBox } from '../core/viewport.ts'
 import type { MapDocument, PathType } from '../data/mapDocument.ts'
 import { cellIntersectsBBox } from './hexGrid.ts'
+import { isLayerVisible, type LayerVisibility } from './layerVisibility.ts'
 import { bboxOverlaps, shapeBounds } from './shapeGeometry.ts'
 
 export interface RenderPlanCell {
@@ -118,6 +119,14 @@ export interface BuildRenderPlanOptions {
   labelScale?: number
   /** 已解析的字体族（不可含 var()） */
   fontFamily?: string
+  /**
+   * 图层可见性（用户设置；缺省 = 全部显示）。
+   *
+   * 只影响**这一帧产出什么**，绝不改动 `document` —— 图层是"看不看"，不是"有没有"。
+   * 被隐藏的层产出空数组，并且**不计入裁剪计数**（`culled*` 记的是"视口外被裁掉"，
+   * 把隐藏算进去会让诊断报告里出现一个解释不通的数字）。
+   */
+  layers?: LayerVisibility
   /** 视口参数异常时用于拒绝生成计划 */
   maxCells?: number
 }
@@ -148,10 +157,17 @@ export function buildRenderPlan(options: BuildRenderPlanOptions): MapRenderPlan 
   // 代价是位图被 CSS 拉伸不到 1 px，肉眼不可见。
   const deviceScale = projection.scale * dpr
 
+  // 图层开关：隐藏的层直接不产出条目（而不是产出后再过滤 —— 白算一遍没有意义，
+  // 而且"隐藏"必须与"视口外被裁掉"区分开，见 BuildRenderPlanOptions.layers）
+  const layers = options.layers
+  const showTerrain = layers === undefined || isLayerVisible(layers, 'terrain')
+  const showPaths = layers === undefined || isLayerVisible(layers, 'paths')
+  const showRegions = layers === undefined || isLayerVisible(layers, 'regions')
+
   const cells: RenderPlanCell[] = []
   let culledCells = 0
 
-  for (const [key, cell] of Object.entries(document.terrain)) {
+  for (const [key, cell] of showTerrain ? Object.entries(document.terrain) : []) {
     const axial = parseCellKey(key)
     if (axial === null) continue
     if (!cellIntersectsBBox(document.grid, axial.q, axial.r, visibleWorld)) {
@@ -178,7 +194,7 @@ export function buildRenderPlan(options: BuildRenderPlanOptions): MapRenderPlan 
   // 路径与区域：按包围盒裁剪（矢量图形，不与格索引挂钩）
   const paths: RenderPlanPath[] = []
   let culledPaths = 0
-  for (const path of document.paths) {
+  for (const path of showPaths ? document.paths : []) {
     const points = path.pts.map(([x, y]) => ({ x, y }))
     const bounds = shapeBounds(points, path.width / 2)
     if (bounds.empty || !bboxOverlaps(bounds, visibleWorld)) {
@@ -190,7 +206,7 @@ export function buildRenderPlan(options: BuildRenderPlanOptions): MapRenderPlan 
 
   const regions: RenderPlanRegion[] = []
   let culledRegions = 0
-  for (const region of document.regions) {
+  for (const region of showRegions ? document.regions : []) {
     const points = region.pts.map(([x, y]) => ({ x, y }))
     const bounds = shapeBounds(points, region.borderWidth ?? 0)
     if (bounds.empty || !bboxOverlaps(bounds, visibleWorld)) {

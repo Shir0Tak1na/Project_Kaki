@@ -30,7 +30,7 @@ Project Kaki（译名 Project 垣）是一个 Obsidian 六边形客制化地图�
 | Phase 5 · 自定义地形图标与图块 | ⏳ 规划中 | 允许替换地形视觉资源、注册自定义地形类型 |
 | Phase 6 · 移动端 / 触控笔 | ⏳ 未开始 | — |
 
-**验证强度**：`tsc` 0 错 · **184 个单元测试** · **23 个冒烟场景 / 423 条断言**
+**验证强度**：`tsc` 0 错 · **223 个单元测试** · **25 个冒烟场景 / 514 条断言**
 （端到端加载真实打包产物；断言总数由 `scripts/smoke.mjs` 自己数出来并在末尾打印）。
 但单元测试全绿 ≠ 功能可用：这个项目有**三次**"测试全绿、用户一眼看出是坏的"的经历（§5.3、§5.5）。
 请把 §7 的未验证项当作真正的待办，而不是"大概没问题"。
@@ -155,7 +155,7 @@ src/
   dev/
     diagnostics.ts        Phase 0 探针报告（挂载点、矩阵、量化校准）
     viewport-watch.ts     markViewportChanged 采样
-tests/                    184 个单元测试（node:test，纯函数优先）
+tests/                    223 个单元测试（node:test，纯函数优先）
 scripts/
   build.mjs               自研构建（无 esbuild 的替代方案）
   smoke.mjs               假 Obsidian 环境 + 22 个端到端场景 / 401 条断言（**最值钱的资产**）
@@ -394,6 +394,32 @@ canvas 的 `font` 是 CSS `font` 简写，`var()` 没有元素上下文可供替
 64 条时宽度≈1.9 万 px，超过部分平台 16384 的画布上限，超了会**静默不显示**），
 以及**不占用数字键 1–9**（键位已被内置占满，再抢会破坏既有肌肉记忆）。
 
+### 5.12 同一件事只能有一个真相（③ 图层开关时付的代价）
+
+做图层开关时，名称可见性一度有**两份状态**：`MapEditor.showShapeLabels`（每张画布的运行时状态）
+与设置里的 `layers.labels`（持久化）。两份状态必然出现无法解释的组合：
+"设置里开着、工具条显示关着""重开画布后按钮与设置不一致"。
+
+落点（已按此清理，**不要再加回来**）：
+
+- **可见性状态只放插件设置**（`CartographerSettings.layers`）；画布侧一律**每帧现读**
+  （`isLayerVisible(this.layers(), 'grid' | 'labels')`），不存副本；
+- 已删除：`MapEditor.showShapeLabels` 字段与其 setter、`EditorStatus.showShapeLabels`、
+  `MapOverlay.showGrid` 与其 setter、`MapLayerManager` 里"镜像给编辑器"的两步、
+  `main.ts` 的 `setShowGrid`、`CartographerSettings.showGrid` 字段
+  （`data.json` 里的旧 `showGrid` 只作为**迁移输入**读一次，新写入不再包含它）；
+- 工具条的回调（`onToggleLabels` / `getShowShapeLabels` / `getShowLegend` / `onToggleLegend`）
+  改成**必填**：之前它们可选、还留了一条"没回调就改编辑器字段"的兜底 ——
+  那正是"点了没反应 / 改了别处"的温床。**让错误在编译期出现，而不是在用户手里**。
+
+**鉴别力实测**：把 `getShowShapeLabels` 临时改成 `() => true`（模拟"按钮读另一份状态"）→
+恰好 3 条相关断言失败、其余 511 条保持绿；改回去后全绿。新增的两条回归断言专门盯这件事：
+`layers.disable()` 之后再挂载（换出全新工具条）时，按钮必须显示**设置里的**状态。
+
+顺带一条通用教训：用 `pwsh` 跑内联脚本时，**双引号与反引号都是元字符**，
+含它们的字符串会被静默改写（我因此两次写出"看起来跑了、其实模式没匹配上"的命令，
+一次让 git 提交失败、一次让文档替换静默失效）。复杂文本一律用编辑工具改。
+
 ---
 
 ## 6. 测试策略（照这个做，不要退化）
@@ -401,7 +427,7 @@ canvas 的 `font` 是 CSS `font` 简写，`var()` 没有元素上下文可供替
 | 层 | 位置 | 适合测什么 |
 |---|---|---|
 | 单元测试 | `tests/*.test.ts` | 纯函数：几何、布局、文档解析/序列化、op 往返、行模型、YAML 生成 |
-| 冒烟测试 | `scripts/smoke.mjs` | **端到端**：加载真实打包产物 + 假 Obsidian，23 个场景 / 423 条断言 |
+| 冒烟测试 | `scripts/smoke.mjs` | **端到端**：加载真实打包产物 + 假 Obsidian，25 个场景 / 514 条断言 |
 | 真实库验证 | 用户手动 | 视觉与手感（对齐全不全、名称够不够大、交互顺不顺手） |
 
 冒烟桩刻意**复刻真实环境**，这是它能抓到真 bug 的原因：

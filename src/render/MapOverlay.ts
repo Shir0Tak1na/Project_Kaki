@@ -45,6 +45,7 @@ import {
   type ResolvedTerrainStyle,
 } from './terrainCatalog.ts'
 import type { ClientProjection } from '../core/projection.ts'
+import { DEFAULT_LAYER_VISIBILITY, isLayerVisible, type LayerVisibility } from './layerVisibility.ts'
 import type { MapDraft } from '../editor/MapEditor.ts'
 
 /** 超过这个可见格数就不画网格线（缩小到很远时逐格描边会拖垮帧率） */
@@ -73,7 +74,6 @@ export interface OverlayStats {
 export interface MapOverlayOptions {
   handle: CanvasHandle
   getDocument: () => MapDocument | null
-  showGrid?: boolean
   /** 注入画布工厂（测试用；默认用宿主 document 创建） */
   canvasFactory?: (width: number, height: number) => HTMLCanvasElement
   /** 标记层宿主（未变换的 wrapperEl）；不提供则不渲染标记 */
@@ -97,8 +97,6 @@ export interface MapOverlayOptions {
   hasIcon?: (name: string) => boolean
   /** 进行中的路径/区域草稿（预览用；由编辑器提供） */
   getDraft?: () => MapDraft | null
-  /** 是否显示路径/区域的名称标签 */
-  getShowShapeLabels?: () => boolean
   /** 名称字号倍率（用户设置；1 = 默认） */
   getLabelScale?: () => number
   /**
@@ -120,6 +118,14 @@ export interface MapOverlayOptions {
    * 调用方会回退到颜色 + 字形，并把原因记在控制台。
    */
   loadTerrainImage?: (path: string) => Promise<CanvasImageSource | null>
+  /**
+   * 图层可见性（用户设置；缺省 = 全部显示）。
+   *
+   * **六个层都只从这一个口子读**（`grid` 与 `labels` 也一样）：
+   * 绘制层不再自己存 `showGrid` / `showShapeLabels` 之类的副本 ——
+   * 同一件事存两份，就必然出现"设置里打开、按钮显示关闭"这种没法解释的状态。
+   */
+  getLayers?: () => LayerVisibility
 }
 
 function asElement(value: unknown): HTMLElement | null {
@@ -164,7 +170,6 @@ export class MapOverlay {
   /** 上一次实测的"位图像素 / 屏幕 CSS 像素"（作为下一帧的初值） */
   private rasterPxPerCssPx: number | null = null
 
-  showGrid: boolean
   /** 悬停预览：绘制模式下高亮笔刷落点 */
   private hover: { x: number; y: number; radius: number } | null = null
   private stats: OverlayStats = {
@@ -189,7 +194,6 @@ export class MapOverlay {
     this.options = options
     this.handle = options.handle
     this.getDocument = options.getDocument
-    this.showGrid = options.showGrid ?? true
     this.canvasFactory = options.canvasFactory ?? null
   }
 
@@ -204,12 +208,6 @@ export class MapOverlay {
   /** 覆盖层容器：交互层把指针监听挂在这里 */
   getContainer(): HTMLElement | null {
     return this.container
-  }
-
-  setShowGrid(showGrid: boolean): void {
-    if (this.showGrid === showGrid) return
-    this.showGrid = showGrid
-    this.requestRedraw()
   }
 
   /** 设置悬停预览（笔刷落点高亮）；传 null 清除 */
@@ -351,6 +349,7 @@ export class MapOverlay {
         rasterPxPerCssPx,
         labelScale,
         fontFamily,
+        layers: this.layers(),
       })
       if (!plan) {
         this.container.style.display = 'none'
@@ -372,6 +371,7 @@ export class MapOverlay {
             rasterPxPerCssPx: measured,
             labelScale,
             fontFamily,
+            layers: this.layers(),
           })
         } catch {
           rebuilt = null
@@ -487,6 +487,11 @@ export class MapOverlay {
   ): void {
     if (!this.options.getPlacements || !this.options.getMarkerHost) return
 
+    // 标记层被图层开关关掉时：连放置计算都不做（省一次遍历），但**保留已建的 DOM** ——
+    // 用 display 隐藏而不是 sync([])（后者会把每个标记真的销毁，再打开又要重建）。
+    const showMarkers = this.layers().markers !== false
+    if (!showMarkers && !this.markerLayer) return
+
     if (!this.markerLayer) {
       const host = this.options.getMarkerHost()
       if (!host) return
@@ -501,6 +506,12 @@ export class MapOverlay {
         ...(this.options.hasIcon ? { hasIcon: this.options.hasIcon } : {}),
       })
       this.stats.markerLayerAttached = true
+    }
+
+    this.markerLayer.setVisible(showMarkers)
+    if (!showMarkers) {
+      this.stats.lastMarkerCount = 0
+      return
     }
 
     const placements = this.options.getPlacements(document_, projection, viewportRect)
@@ -523,6 +534,17 @@ export class MapOverlay {
   private customTerrains(): readonly CustomTerrain[] {
     return this.options.getCustomTerrains?.() ?? []
   }
+
+  /**
+   * 当前图层可见性（每帧现读设置）。
+   *
+   * 与 `customTerrains` / `getLabelScale` 同一套做法：地图层活得比设置页久，
+   * 取值必须"每次现读"，否则用户关掉一个图层要重开画布才生效。
+   */
+  private layers(): LayerVisibility {
+    return this.options.getLayers?.() ?? DEFAULT_LAYER_VISIBILITY
+  }
+
 
   /**
    * 取（必要时重建）地形图集。
@@ -696,9 +718,10 @@ export class MapOverlay {
       }
     }
 
-    this.stats.lastGridCells = this.showGrid ? this.drawGrid(ctx, plan, document_, targetRadius) : 0
+    // 网格与名称都从图层设置读（不再有覆盖层内部的副本）
+    this.stats.lastGridCells = isLayerVisible(this.layers(), 'grid') ? this.drawGrid(ctx, plan, document_, targetRadius) : 0
 
-    const showShapeLabels = this.options.getShowShapeLabels?.() ?? true
+    const showShapeLabels = isLayerVisible(this.layers(), 'labels')
     for (const region of plan.regions) drawRegion(ctx, layer, region, showShapeLabels)
     for (const path of plan.paths) drawPath(ctx, layer, path, showShapeLabels)
     this.stats.lastRegionCount = plan.regions.length

@@ -61,6 +61,8 @@ export class MarkerLayer {
   /** 刚拖动完的那个 id：抑制紧随其后的 click（否则拖一下会顺带打开笔记） */
   private suppressClickId: string | null = null
   private interactive = false
+  /** 图层可见性（与"有没有标记"是两件事，见 setVisible） */
+  private visible = true
   private destroyed = false
 
   constructor(options: MarkerLayerOptions) {
@@ -91,6 +93,23 @@ export class MarkerLayer {
 
   isInteractive(): boolean {
     return this.interactive
+  }
+
+  /**
+   * 整层显示/隐藏（图层开关用）。
+   *
+   * 为什么切容器的 `display` 而不是"把可见集清空"（`sync([])`）：
+   * 清空会把每个标记的 DOM 真的销毁掉，重新打开图层时又要逐个重建 ——
+   * 而图层开关的含义是"看不看"，不是"有没有"。DOM 留着，回来时一帧内就恢复原样。
+   */
+  setVisible(visible: boolean): void {
+    if (this.visible === visible) return
+    this.visible = visible
+    this.container.style.display = visible ? '' : 'none'
+  }
+
+  isVisible(): boolean {
+    return this.visible
   }
 
   /** 按当前的可见集合同步 DOM：新增、更新、移除 */

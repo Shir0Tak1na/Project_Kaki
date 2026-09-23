@@ -127,8 +127,6 @@ export interface EditorStatus {
   strokeCells: number
   /** 进行中的草稿顶点数（0 = 没有草稿） */
   draftPoints: number
-  /** 名称标签是否显示 */
-  showShapeLabels: boolean
   /** 路径/区域的几何模式（工具栏据此高亮） */
   geometryMode: GeometryMode
 }
@@ -156,8 +154,10 @@ export class MapEditor {
    * - `edge`：勾勒六边形边框 —— 落点吸附到网格顶点，且顶点之间沿格边连接。
    */
   geometryMode: GeometryMode = 'interior'
-  /** 是否显示路径/区域的名称标签 */
-  showShapeLabels = true
+  // 说明：这里**刻意没有** `showShapeLabels`。
+  // "要不要显示路径/区域名称"是插件设置里的 `layers.labels`（见 layerVisibility.ts），
+  // 绘制层直接读它。编辑器里再存一份，就会出现"设置里打开、按钮显示关闭"这类
+  // 互相矛盾的状态 —— 同一件事只能有一个真相。
 
   /** 当前笔画：格键 → 笔画开始前的状态 */
   private strokePrevious: Map<string, TerrainCell | null> | null = null
@@ -188,7 +188,6 @@ export class MapEditor {
       painting: this.strokePrevious !== null,
       strokeCells: this.strokeCells.length,
       draftPoints: this.draft?.clickCount ?? 0,
-      showShapeLabels: this.showShapeLabels,
       geometryMode: this.geometryMode,
     }
   }
@@ -669,14 +668,6 @@ export class MapEditor {
     if (!document_) return ''
     if (hit.kind === 'path') return document_.paths.find((item) => item.id === hit.id)?.label ?? ''
     return document_.regions.find((item) => item.id === hit.id)?.label ?? ''
-  }
-
-  /** 名称显示开关（地图元素多时用来降噪） */
-  setShowShapeLabels(show: boolean): void {
-    if (this.showShapeLabels === show) return
-    this.showShapeLabels = show
-    this.options.onChanged()
-    this.options.onStateChanged?.()
   }
 
   removeRegion(id: string): boolean {

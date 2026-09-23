@@ -29,6 +29,15 @@ import {
 } from '../render/terrainCatalog.ts'
 import { listTerrainStyles } from '../render/terrainStyle.ts'
 import {
+  DEFAULT_LAYER_VISIBILITY,
+  LAYER_KEYS,
+  LAYER_LABELS,
+  isLayerVisible,
+  layerVisibilityFromLegacy,
+  type LayerKey,
+  type LayerVisibility,
+} from '../render/layerVisibility.ts'
+import {
   defaultPathColors,
   defaultRegionColors,
   isDefaultPathColors,
@@ -44,8 +53,6 @@ import {
 export interface CartographerSettings {
   /** 名称字号倍率（1 = 默认）。范围 0.5–3.0，步长 0.1。 */
   labelScale: number
-  /** 是否显示六边形网格线 */
-  showGrid: boolean
   /**
    * 开发者模式：打开后才会出现开发用探针命令（诊断 Canvas / 监视视口变化）。
    * 关着时这些命令会从命令面板里**隐藏**，避免误触。
@@ -65,16 +72,27 @@ export interface CartographerSettings {
    * （它们会退化成回退视觉，数据仍在文件里）。
    */
   customTerrains: CustomTerrain[]
+  /**
+   * 图层可见性（地形 / 网格 / 区域 / 路径 / 标记 / 名称）。
+   *
+   * 为什么放在设置里而不是写进地图文件：图层是"我现在想看到什么"，
+   * 地图文件描述的是"世界上有什么"。把显示偏好写进数据，
+   * 等于换个看法就改了用户的地图，还会污染 Git diff。
+   */
+  layers: LayerVisibility
+  /** 是否显示画布上的图例（默认关：图例是"要看的时候才看"的东西） */
+  showLegend: boolean
 }
 
 export const DEFAULT_SETTINGS: CartographerSettings = {
   labelScale: 1,
-  showGrid: true,
   developerMode: false,
   pathColors: defaultPathColors(),
   regionColors: defaultRegionColors(),
   labelFontFamily: '',
   customTerrains: [],
+  layers: DEFAULT_LAYER_VISIBILITY,
+  showLegend: false,
 }
 
 export const LABEL_SCALE_MIN = 0.5
@@ -98,13 +116,17 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
   const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   return {
     labelScale: normalizeLabelScale(source.labelScale),
-    showGrid: source.showGrid !== false,
     developerMode: source.developerMode === true,
     pathColors: normalizePathColors(source.pathColors),
     regionColors: normalizeRegionColors(source.regionColors),
     labelFontFamily: normalizeFontFamily(source.labelFontFamily),
     // 自定义地形逐条独立校验：data.json 被手工改坏时只丢坏的那一条，其余照常可用
     customTerrains: normalizeCustomTerrains(source.customTerrains),
+    // 图层：**只有这一份状态**（网格也在里面，不再有并列的 showGrid 字段）。
+    // `source.showGrid` 只作为**迁移输入**读一次：早期只有这一个开关，
+    // 老用户把它关掉过的话必须变成"隐藏网格"，不能因为换代就把他的选择丢掉。
+    layers: layerVisibilityFromLegacy({ showGrid: source.showGrid, layers: source.layers }),
+    showLegend: source.showLegend === true,
   }
 }
 
@@ -166,10 +188,12 @@ export class CartographerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('显示六边形网格')
-      .setDesc('关闭后只隐藏网格线，不会隐藏地形或地图层。')
+      .setDesc('关闭后只隐藏网格线，不会隐藏地形或地图层。它与下面「图层」一节里的网格是同一个开关。')
       .addToggle((toggle) =>
-        toggle.setValue(settings.showGrid).onChange((value) => {
-          void this.plugin.setShowGrid(value)
+        toggle.setValue(isLayerVisible(settings.layers, 'grid')).onChange((value) => {
+          // 内部写的是图层设置（`layers.grid`）—— 网格就是六个图层之一，
+          // 保留这个开关是为了不让老用户重新找一遍位置
+          void this.plugin.setLayerVisible('grid', value)
           this.display()
         }),
       )
@@ -183,6 +207,40 @@ export class CartographerSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(settings.developerMode).onChange((value) => {
           void this.plugin.setDeveloperMode(value)
+          this.display()
+        }),
+      )
+
+    // ---- 图层（地形 / 网格 / 区域 / 路径 / 标记 / 名称）----
+    containerEl.createEl('h3', { text: '图层' })
+    containerEl.createEl('div', {
+      cls: 'fc-settings-note',
+      text:
+        '图层开关只决定"看不看"，不写进地图数据 —— 关掉某层再打开，内容原样还在。' +
+        '网格也在这一组里（它同时是上面的「显示六边形网格」开关）。',
+    })
+
+    for (const key of LAYER_KEYS) {
+      new Setting(containerEl)
+        .setName(`显示${LAYER_LABELS[key]}`)
+        .setDesc(this.describeLayer(key))
+        .addToggle((toggle) =>
+          toggle.setValue(isLayerVisible(settings.layers, key)).onChange((value) => {
+            void this.plugin.setLayerVisible(key, value)
+            this.display()
+          }),
+        )
+    }
+
+    new Setting(containerEl)
+      .setName('显示图例')
+      .setDesc(
+        '在画布右下角显示图例。内容由地图上**实际有的**地形、路径、区域生成（不是固定清单），' +
+          '所以它永远与画面一致；工具条上也有一个「图例」按钮。',
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(settings.showLegend).onChange((value) => {
+          void this.plugin.setShowLegend(value)
           this.display()
         }),
       )
@@ -257,6 +315,24 @@ export class CartographerSettingTab extends PluginSettingTab {
           void this.plugin.activatePanel()
         }),
       )
+  }
+
+  /** 每个图层的说明：写清"关掉之后你会看到什么"，而不是复述开关名字 */
+  private describeLayer(key: LayerKey): string {
+    switch (key) {
+      case 'terrain':
+        return '六边形地形底色与图形。关掉后只剩矢量元素（路径/区域/标记），文档里的格子不受影响。'
+      case 'grid':
+        return '六边形网格线。与上面的「显示六边形网格」是同一个开关。'
+      case 'regions':
+        return '半透明区域填充与边框（国境、领地）。'
+      case 'paths':
+        return '河流、道路、贸易路线、边界。'
+      case 'markers':
+        return '标记与文字标注（画布上可点击、可拖动的那些实体）。'
+      case 'labels':
+        return '路径与区域的名称标注。工具条上的「名称」按钮切换的是同一个值。'
+    }
   }
 
   /**

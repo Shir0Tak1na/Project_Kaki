@@ -2601,12 +2601,20 @@ console.log('\n场景 16：路径与区域命名（画完即命名、双击重�
     `strokeText=${calls.strokeText} fillText=${calls.fillText}`,
   )
 
-  // ---- 名称显示开关 ----
+  // ---- 名称显示开关（唯一真相是图层设置 layers.labels）----
   const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
   const nameButton = collectByClass(toolbarEl, 'fc-toolbar-names')[0]
   check('工具条上有"名称"开关', nameButton !== undefined)
+  check('名称图层初始是打开的', plugin.getSettings().layers.labels === true, JSON.stringify(plugin.getSettings().layers))
   fireEvent(nameButton, 'click')
-  check('点击名称开关后进入"隐藏名称"状态', editor.showShapeLabels === false, String(editor.showShapeLabels))
+  // 刻意**不 await**：点一下必须当场生效（广播在落盘之前），
+  // 否则会出现"点了之后下一帧还画着名称"
+  check(
+    '点击名称开关改的是图层设置（不是编辑器里的一份私有状态）',
+    plugin.getSettings().layers.labels === false,
+    JSON.stringify(plugin.getSettings().layers),
+  )
+  check('按钮的高亮读的是设置，当场跟着变', nameButton.textContent === '名称', String(nameButton.textContent))
   calls = frame()
   check(
     '隐藏名称后不画任何形状文字',
@@ -2615,7 +2623,7 @@ console.log('\n场景 16：路径与区域命名（画完即命名、双击重�
   )
   check('区域本身照常绘制（只是没有名字）', calls.fill >= 1, String(calls.fill))
   fireEvent(nameButton, 'click')
-  check('再点一次恢复显示名称', editor.showShapeLabels === true)
+  check('再点一次恢复显示名称', plugin.getSettings().layers.labels === true, JSON.stringify(plugin.getSettings().layers))
   calls = frame()
   check('名称重新出现', drawnText(ctx).includes('北境领'), drawnText(ctx))
 
@@ -4275,6 +4283,320 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   )
 
   plugin.onunload()
+}
+
+console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是"有没有"）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const doc = () => layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+
+  // 直接往文档里放内容：本场景测的是**渲染与图层**，不是绘制手势（那是场景 15/21 的事）。
+  // 直接用真实存在的 ID 与颜色，断言才能钉住"画的是这个东西"。
+  const RIVER_COLOR = '#4a9fd8'
+  const REGION_COLOR = '#44cf6e'
+  doc().terrain['0_0'] = { t: 'forest' }
+  doc().terrain['1_0'] = { t: 'water' }
+  doc().paths.push({
+    id: 'p1',
+    type: 'river',
+    pts: [[0, 0], [200, 0], [200, 200]],
+    width: 8,
+    color: RIVER_COLOR,
+    label: '长歌川',
+  })
+  doc().regions.push({
+    id: 'r1',
+    label: '北境领',
+    pts: [[-300, -200], [0, -200], [0, 0], [-300, 0]],
+    color: REGION_COLOR,
+    opacity: 0.22,
+  })
+  doc().markers.push({ id: 'm1', label: '龙脊城', p: [100, 100], icon: 'city' })
+
+  // ---- 默认：六个图层全开 ----
+  let calls = frame()
+  check(
+    '默认六层都显示',
+    stats().lastCellCount === 2 && stats().lastPathCount === 1 && stats().lastRegionCount === 1,
+    `格 ${stats().lastCellCount} 路径 ${stats().lastPathCount} 区域 ${stats().lastRegionCount}`,
+  )
+  check(
+    '默认那一帧真的画了河流（用文档里存的那个颜色描边）',
+    calls.groups.some((group) => group.strokeStyle === RIVER_COLOR),
+    JSON.stringify([...new Set(calls.groups.map((group) => group.strokeStyle))]),
+  )
+  check(
+    '默认那一帧真的填了区域色',
+    calls.fills.some((fill) => fill.fillStyle === REGION_COLOR),
+    JSON.stringify([...new Set(calls.fills.map((fill) => fill.fillStyle))]),
+  )
+  check('默认那一帧画了形状名称', drawnText(ctx).includes('北境领') || drawnText(ctx).includes('长歌川'), drawnText(ctx))
+
+  // ---- 隐藏路径：那一帧没有路径描边，但文档里的路径还在 ----
+  await plugin.setLayerVisible('paths', false)
+  calls = frame()
+  check('隐藏路径后计划里没有路径', stats().lastPathCount === 0, String(stats().lastPathCount))
+  check(
+    '隐藏路径后没有任何一条河流颜色的描边',
+    calls.groups.every((group) => group.strokeStyle !== RIVER_COLOR),
+    JSON.stringify([...new Set(calls.groups.map((group) => group.strokeStyle))]),
+  )
+  check('路径仍然在文档里（图层不改数据）', doc().paths.length === 1, String(doc().paths.length))
+  check('区域不受影响（只关了路径这一层）', stats().lastRegionCount === 1, String(stats().lastRegionCount))
+
+  // ---- 隐藏地形：计划里没有格子，文档格数不变 ----
+  const cellCountBefore = Object.keys(doc().terrain).length
+  await plugin.setLayerVisible('terrain', false)
+  calls = frame()
+  check('隐藏地形后没有格子被画', stats().lastCellCount === 0, String(stats().lastCellCount))
+  check('地形格仍然在文档里', Object.keys(doc().terrain).length === cellCountBefore, String(Object.keys(doc().terrain).length))
+  await plugin.setLayerVisible('regions', false)
+  calls = frame()
+  check(
+    '地形与区域都关掉后，这一帧一个填色都没有',
+    calls.fills.length === 0,
+    `${calls.fills.length} 次 fill（${JSON.stringify([...new Set(calls.fills.map((fill) => fill.fillStyle))])}）`,
+  )
+  check('文档里的区域也没被删', doc().regions.length === 1, String(doc().regions.length))
+
+  // ---- 隐藏标记：DOM 不显示（而不是把实体销毁） ----
+  const markerContainer = () => collectByClass(wrapper, 'fc-marker-layer')[0]
+  await plugin.setLayerVisible('markers', false)
+  frame()
+  check('隐藏标记后统计为 0', stats().lastMarkerCount === 0, String(stats().lastMarkerCount))
+  check(
+    '隐藏标记后标记层的 DOM 不显示',
+    markerContainer() !== undefined && markerContainer().style.display === 'none',
+    String(markerContainer()?.style.display),
+  )
+  check('标记仍然在文档里', doc().markers.length === 1, String(doc().markers.length))
+  await plugin.setLayerVisible('markers', true)
+  frame()
+  check(
+    '重新打开标记层后 DOM 又显示（DOM 没有被销毁过）',
+    markerContainer().style.display !== 'none' && stats().lastMarkerCount === 1,
+    `display=${markerContainer().style.display} 标记=${stats().lastMarkerCount}`,
+  )
+
+  // ---- 隐藏名称：形状名称不再绘制 ----
+  await plugin.setLayerVisible('terrain', true)
+  await plugin.setLayerVisible('regions', true)
+  await plugin.setLayerVisible('paths', true)
+  frame()
+  await plugin.setLayerVisible('labels', false)
+  calls = frame()
+  check(
+    '隐藏名称后没有任何文字被画出来',
+    calls.calls.fillText === 0 && calls.calls.strokeText === 0,
+    `fillText=${calls.calls.fillText} strokeText=${calls.calls.strokeText}`,
+  )
+  check('形状本身照常绘制', stats().lastPathCount === 1 && stats().lastRegionCount === 1)
+  check(
+    '工具条「名称」按钮的高亮读的是设置（不是它自己的状态）',
+    (collectByClass(wrapper, 'fc-toolbar-names')[0]?.textContent ?? '') === '名称',
+    String(collectByClass(wrapper, 'fc-toolbar-names')[0]?.textContent),
+  )
+
+  // ---- 图例 ----
+  const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
+  const legendRows = () =>
+    collectByClass(legendEl(), 'fc-legend-row').map((row) => ({
+      kind: row.dataset.kind,
+      label: collectByClass(row, 'fc-legend-label')[0]?.textContent ?? '',
+      count: collectByClass(row, 'fc-legend-count')[0]?.textContent ?? '',
+      color: collectByClass(row, 'fc-legend-swatch')[0]?.style.backgroundColor ?? '',
+    }))
+  check('图例默认是隐藏的', legendEl() !== undefined && legendEl().style.display === 'none', String(legendEl()?.style.display))
+
+  await plugin.setLayerVisible('labels', true)
+  await plugin.setShowLegend(true)
+  frame()
+  check('打开图例后它显示出来', legendEl().style.display !== 'none', String(legendEl().style.display))
+  const rows = legendRows()
+  const labels = rows.map((row) => row.label)
+  check(
+    '图例只列地图上实际有的东西（地形两种 + 河流 + 区域预设名）',
+    labels.includes('森林') && labels.includes('水域') && labels.includes('河流') && labels.includes('王国'),
+    JSON.stringify(labels),
+  )
+  check(
+    '图例里的计数与地图内容一致',
+    rows.filter((row) => row.kind === 'terrain').every((row) => row.count === '1') &&
+      rows.filter((row) => row.kind === 'path').every((row) => row.count === '1'),
+    JSON.stringify(rows),
+  )
+  check(
+    '图例色块用绘制层同一份颜色（河流色 = 文档/调色板里的值）',
+    rows.some((row) => row.kind === 'path' && row.color === RIVER_COLOR),
+    JSON.stringify(rows.filter((row) => row.kind === 'path')),
+  )
+  check('图例里没有地图上不存在的层（没有标记条目 —— 标记不参与图例）', rows.every((row) => row.kind !== 'marker'))
+
+  // 隐藏一层 → 该层的条目消失（图例跟着"实际启用的"走）
+  await plugin.setLayerVisible('paths', false)
+  frame()
+  check('隐藏路径后图例里没有河流', !legendRows().map((row) => row.label).includes('河流'), JSON.stringify(legendRows().map((row) => row.label)))
+  await plugin.setLayerVisible('terrain', false)
+  frame()
+  const afterTerrainOff = legendRows().map((row) => row.label)
+  check('隐藏地形后图例里没有地形', !afterTerrainOff.includes('森林') && !afterTerrainOff.includes('水域'), JSON.stringify(afterTerrainOff))
+  await plugin.setLayerVisible('paths', true)
+  await plugin.setLayerVisible('terrain', true)
+
+  // ---- 工具条入口 ----
+  const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
+  const legendButton = collectByClass(toolbarEl, 'fc-toolbar-legend')[0]
+  check('工具条上有「图例」按钮', legendButton !== undefined)
+  fireEvent(legendButton, 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('点工具条按钮会把图例设置写回', plugin.getSettings().showLegend === false, String(plugin.getSettings().showLegend))
+  frame()
+  check('并且图例真的收起来了', legendEl().style.display === 'none', String(legendEl().style.display))
+
+  const nameButton = collectByClass(toolbarEl, 'fc-toolbar-names')[0]
+  fireEvent(nameButton, 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '工具条「名称」按钮写的是图层设置（不是编辑器里的一份私有状态）',
+    plugin.getSettings().layers.labels === false,
+    JSON.stringify(plugin.getSettings().layers),
+  )
+
+  // ---- 设置页 ----
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  openSettings()
+  check('设置页有六个图层开关', ['显示地形', '显示网格', '显示区域', '显示路径', '显示标记', '显示名称'].every((name) => settingNamed(name)?.toggle !== undefined), String(FakeSetting.created.length))
+  check('设置页有图例开关', settingNamed('显示图例')?.toggle !== undefined)
+  check(
+    '设置页的开关反映当前值（名称刚被工具条关掉）',
+    settingNamed('显示名称')?.toggle.value === false && settingNamed('显示路径')?.toggle.value === true,
+    JSON.stringify({ name: settingNamed('显示名称')?.toggle.value, path: settingNamed('显示路径')?.toggle.value }),
+  )
+  settingNamed('显示网格').toggle.handler(false)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('设置页关掉网格 → 图层设置里网格是关的', plugin.getSettings().layers.grid === false, JSON.stringify(plugin.getSettings().layers))
+  calls = frame()
+  check('关掉网格后那一帧不描网格线', stats().lastGridCells === 0, String(stats().lastGridCells))
+
+  // ---- 状态命令：让"地图怎么少了东西"有一个可查的答案 ----
+  await plugin.setLayerVisible('paths', false)
+  await plugin.setLayerVisible('labels', false)
+  await plugin.setShowLegend(true)
+  noticeLog.length = 0
+  runCommand(plugin, 'map-status')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const statusText = noticeLog.join('\n')
+  check(
+    '状态命令报出当前隐藏了哪些层',
+    statusText.includes('图层：') && statusText.includes('路径') && statusText.includes('名称'),
+    statusText.slice(0, 200),
+  )
+  check(
+    '状态命令列出图例条目（从地图实际内容生成）',
+    statusText.includes('图例：') && statusText.includes('森林') && statusText.includes('王国'),
+    statusText.slice(0, 300),
+  )
+  await plugin.setLayerVisible('paths', true)
+  await plugin.setLayerVisible('labels', true)
+  // 网格在前面的设置页步骤里被关掉了：这里显式恢复，才能断言"全部显示"这句话
+  await plugin.setLayerVisible('grid', true)
+  noticeLog.length = 0
+  runCommand(plugin, 'map-status')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  check('全部显示时状态命令这么说', noticeLog.join('\n').includes('图层：全部显示'), noticeLog.join('\n').slice(0, 200))
+
+  // ---- 重开地图层：新建的工具条必须与设置一致 ----
+  // 这是"两份状态"最容易露馅的地方：如果名称开关还存在每张画布的运行时状态里，
+  // 重开之后按钮显示的就是默认值，而设置里却是另一个值 —— 用户看到的就是"我明明关了它又开了"。
+  await plugin.setLayerVisible('labels', false)
+  layers.disable(canvasPath)
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  const nameButtonAfterReopen = () => collectByClass(canvas.wrapperEl, 'fc-toolbar-names')[0]
+  check(
+    '重开地图层后，名称按钮仍然显示设置里的状态（关闭）',
+    nameButtonAfterReopen()?.textContent === '名称',
+    String(nameButtonAfterReopen()?.textContent),
+  )
+  await plugin.setLayerVisible('labels', true)
+  check(
+    '在设置侧打开后，重开的按钮也跟着打开',
+    nameButtonAfterReopen()?.textContent === '名称 ✓',
+    String(nameButtonAfterReopen()?.textContent),
+  )
+
+  // ---- 落盘 + 重启读回 ----
+  // 显式造一个"非默认"组合：不去依赖前面步骤留下的状态（第一版就是靠残留状态断言，
+  // 结果在我调整步骤顺序后立刻失效 —— 断言必须自己把前提摆好）
+  await plugin.setLayerVisible('paths', false)
+  await plugin.setLayerVisible('markers', false)
+  await plugin.setShowLegend(true)
+  const persisted = JSON.parse(plugin._data ?? '{}')
+  check(
+    '图层与图例都落盘了',
+    persisted.layers?.paths === false &&
+      persisted.layers?.markers === false &&
+      persisted.layers?.terrain === true &&
+      persisted.showLegend === true,
+    JSON.stringify({ layers: persisted.layers, showLegend: persisted.showLegend }),
+  )
+  const saved = plugin._data
+  plugin.onunload()
+
+  const PluginClass = loadBundleAsCjs()
+  const restarted = new PluginClass(app, { id: 'project-kaki' })
+  restarted._data = saved
+  await restarted.onload()
+  check(
+    '重启后图层与图例设置读回',
+    restarted.getSettings().layers.paths === false &&
+      restarted.getSettings().layers.markers === false &&
+      restarted.getSettings().layers.terrain === true &&
+      restarted.getSettings().showLegend === true,
+    JSON.stringify({ layers: restarted.getSettings().layers, showLegend: restarted.getSettings().showLegend }),
+  )
+  restarted.onunload()
+
+  // ---- 旧设置的迁移：老用户把 showGrid 关掉过，不能因为换代就把他的选择丢掉 ----
+  const legacy = new PluginClass(app, { id: 'project-kaki' })
+  legacy._data = JSON.stringify({ showGrid: false, labelScale: 2 })
+  await legacy.onload()
+  check(
+    '旧 showGrid:false 迁移成"隐藏网格"，其余层照常显示',
+    legacy.getSettings().layers.grid === false &&
+      legacy.getSettings().layers.terrain === true &&
+      legacy.getSettings().labelScale === 2,
+    JSON.stringify({ layers: legacy.getSettings().layers, labelScale: legacy.getSettings().labelScale }),
+  )
+  legacy.onunload()
 }
 
 console.log('')
