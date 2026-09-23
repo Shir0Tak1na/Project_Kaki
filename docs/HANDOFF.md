@@ -1,0 +1,174 @@
+# Project Kaki：Agent 交接说明
+
+更新时间：2026-09-23
+
+这份文档给下一位开发 agent 使用。项目名是 **Project Kaki**（译名 Project 垣，只在第一次出现时标注即可），
+插件 ID 已改为 `project-kaki`（`scripts/deploy.mjs` 会自动迁移旧目录的旧 ID 设置与启用项）。
+
+> ⚠️ 但地图文档类型 `fictional-cartographer-map`、Base 视图 ID `fictional-map`、面板视图 ID
+> `fictional-cartographer-panel` **不要改**：它们写在用户的 `.map.md` frontmatter、`.base` 文件和
+> `.obsidian/workspace.json` 里，改了等于让用户已有的地图、Base 和侧栏布局失效（详见 README §5.8）。
+> 一句话判断法：**标识出现在用户文件里 → 不动；只出现在插件自己的注册调用里 → 可以改。**
+
+## 当前基线
+
+- 工作区：`E:\ObsidianPulgins\fictional-cartographer`（**目录名仍是历史名，未改**；插件 ID 才是 `project-kaki`）
+- 默认测试库：`E:\ObsidianPulgins\test-vault`（插件目录为 `plugins\project-kaki`）
+- 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
+- 最近一次部署：`node scripts/deploy.mjs`
+- 单元测试：176 个通过
+- 冒烟测试：22 个场景、401 条断言全部通过
+- 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
+- 最近验证命令（**在本沙箱里 `npm run <script>` 可能报 `spawn EPERM`，直接跑 `node ...` 最稳**）：
+
+```powershell
+cd E:\ObsidianPulgins\fictional-cartographer
+node scripts/build.mjs
+node --test --test-isolation=none
+node scripts/smoke.mjs
+node scripts/deploy.mjs
+```
+
+> 顺序很重要：**先 build 再 smoke**。冒烟测试加载的是打包产物 `main.js`，
+> 改了源码不重新构建就会拿旧产物跑测试 —— 症状是"新断言全红"，很容易误判成自己写错了。
+
+### 接手后的修复记录（2026-09-23 第三位 agent）
+
+- **修好 `tsc` 报错**：`tests/baseRows.test.ts` 里 `point.split(',').map(Number)` 推断为 `number[]`，
+  解构成 `number | undefined` 后传给 `Math.max/min` 不合类型。**运行时无感、只有 typecheck 会红**，
+  所以"测试全绿"掩盖了它。已显式标注为 `[number, number]`。
+- **修好地形配色分叉**：`src/base/mapPreview.ts` 自己抄了一份 `TERRAIN_COLORS`，
+  9 种颜色与 `src/render/terrainStyle.ts` 里的**全部不同** ——
+  表现是"Base 缩略图和导出 SVG 的颜色与画布上不一样"。
+  现在统一取 `TERRAIN_STYLES[type].base`，并加了单元测试锁住同源。
+- **修好缩略图的重复绘制**：地图元素被画了两遍（专属图形 + 通用圆点），
+  后者会盖掉标记原本的颜色，并产生重复的 `data-row-id`（点击命中的是哪一个说不清）。
+  现在只有**笔记**行补通用圆点。
+- **修好深色主题下看不见的文字**：预览里的 `<text>` 没有 `fill`，SVG 默认是黑色；
+  已改为 `fill="currentColor"` 并在 `styles.css` 里按主题给色与字号。
+- 补了**端到端覆盖**（场景 20，19 条断言）：SVG 导出命令（含未启用地图层的降级提示、
+  文件内容、重名自动加后缀不覆盖）与缩略图的点击契约。
+
+### 本轮改动（改名 + 面板减负，2026-09-23）
+
+- **项目更名**：插件 ID `fictional-cartographer` → `project-kaki`，显示名 `Project Kaki`；
+  `deploy.mjs` 增加迁移（旧目录设置 → 新目录、删旧目录、改写 `community-plugins.json` 启用项）。
+  写入用户文件的三个标识**保持不变**（见开头警告）。
+- **侧边栏"挤"**：按钮改为一行（图标 + 名称），状态描述移到 `title` 悬停提示；分组之间收紧间距。
+- **侧边栏"卡"**（真凶）：面板用"状态签名"决定要不要重建 DOM，而签名里曾包含
+  **当前视口画了多少格地形** —— 平移画布时这个数字每帧都变，于是面板每帧重建 DOM。
+  已把每帧会变的值从签名与摘要里移除（实时数字仍可在「查看当前地图绑定的地图」命令输出里看到）。
+- **一条值得记住的测试教训**：面板原来用 `contentEl.childElementCount > 0` 判断"DOM 是不是空的"，
+  而冒烟用的假 DOM 没有实现 `childElementCount`（`undefined > 0` 恒为假）→
+  "状态没变就跳过重绘"这条策略在测试里**从未生效**，断言只能看到"每次都重建"。
+  现在改用面板自己的 `rendered` 布尔标记，并给假 DOM 补上了 `childElementCount`。
+  **教训：假 DOM 少一个成员，就会让被测逻辑静默走另一条分支。**
+
+## 已完成能力
+
+### 面板与开发工具
+
+- **地图面板**：右侧边栏视图（`fictional-cartographer-panel`），左侧边栏有图标一键打开。
+  面板里的按钮与命令面板**共用同一份动作注册表**（`src/main.ts` 的 `buildActions`），
+  因此不会出现两边不一致；用不上的动作显示为禁用。
+- **开发者模式**（设置里，默认关闭）：`diagnose-canvas` 与 `toggle-viewport-watch`
+  是 `devOnly` 动作，关闭时会通过 `checkCallback` 返回 false 从命令面板**隐藏**（不是灰掉）。
+
+### Canvas
+
+- 六边形地形绘制：9 种内置地形；数字键 `1`-`9` 和工具条均可选。
+- 地标、文字标注、路径、区域绘制。
+- 路径类型：河流、道路、贸易路线、边界。
+- **路径与区域的三种几何模式**（工具条「沿格边 / 逐边 / 穿内部」）：
+  `edge` 吸附到网格顶点并自动沿格边走；`edge-step` 每次点击只沿格边前进一条边（方向由点击位置决定）；
+  `interior` 是原来的自由折线。模式记录在数据的 `mode` 字段里（缺省 `interior`，旧地图兼容）。
+- 区域颜色预设、路径样式预设、标记图标预设。
+- 路径/区域命名、重命名、沿路径排字、区域中心标签。
+- 地图标记和文字标注支持可选笔记链接。
+- 路径支持可选 `link`，创建或重命名后会弹出“关联路径笔记”输入框；链接设置是独立可撤销操作。
+- 地形、标记、路径、区域的编辑历史支持撤销/重做。
+- 地图层启停：命令面板和 Canvas 工具条的“地图层”按钮都可停用当前层。
+- 设置页的“显示六边形网格”会立即作用于已启用地图层并持久化。
+- 工具条挂在 Canvas wrapper 上，但右侧留出原生 Canvas 控件区域；窄窗口时工具条可滚动。
+- 捕获阶段指针处理会放行工具条和 `.canvas-controls`、`.canvas-card-menu` 等原生 UI。
+
+### Base
+
+- 地图文档条目和带 `coordinates` 的笔记合并成表格。
+- 地图缩略图显示地形、路径、区域、标记和笔记点。
+- 缩略图使用统一 X/Y 比例，不拉伸地图。
+- 缩略图元素可点击跳转；没有独立链接时回退到地图文档。
+- `ResizeObserver` 负责缩略图尺寸变化。
+
+### 导出
+
+- 命令 **导出当前地图为 SVG** 已实现。
+- 导出文件默认为 `Maps/<地图名>.svg`，重名时自动添加 `-2`、`-3`。
+- PNG、图例、多图层导出尚未实现。
+
+## 当前设置与 UI 边界
+
+已经有：
+
+- 路径与区域名称字号倍率：`0.5`-`3.0`。
+- 六边形网格显示/隐藏。
+- 工具条内置地形、路径类型、区域颜色、标记图标选择。
+- 名称显示/隐藏按钮。
+- 地图层停用按钮。
+
+尚未有：
+
+- 用户自定义字体族选择。
+- 路径颜色编辑器。
+- 区域颜色编辑器。
+- 自定义地形图标、图块、纹理和变体。
+- 地形图例。
+- 地形/路径/区域/标记分层开关。
+- PNG 导出。
+- 移动端和触控笔交互。
+
+## 下一步建议
+
+建议按以下顺序继续，不要同时改动多个大范围 UI：
+
+1. **先完善设置和样式模型**
+   - 在 `CartographerSettings` 增加可持久化的路径颜色、区域颜色和字体设置；
+   - 将设置通过 `MapLayerManager` 传入 `MapOverlay` / `shapeDraw`；
+   - 先只支持合法 CSS 颜色和主题字体族，保留当前默认值作为回退；
+   - 为每个设置增加纯函数归一化测试和冒烟设置页断言。
+2. **再做图形资源配置**
+   - 先定义稳定的自定义地形 ID，不要直接用显示名称作为存储 ID；
+   - 保证旧地图中 `terrain.*.t` 的 9 种内置类型继续可读；
+   - 再接入用户图片或 SVG 图块，处理资源不存在时的回退图形。
+3. **再做图层控制和图例**
+   - 先把渲染计划拆成 terrain/grid/regions/paths/markers/labels 的可见性开关；
+   - 图层状态应属于视图状态或插件设置，不能写入地图几何数据；
+   - 图例应从实际启用的地形/路径/区域样式生成，避免静态列表和渲染不一致。
+4. **最后做 PNG 导出**
+   - 优先复用 SVG/几何投影，不要复制一套坐标换算；
+   - 在浏览器真实环境验证 `canvas.toBlob`，测试桩只覆盖命令注册和文件创建失败分支。
+
+## 关键文件入口
+
+- [src/main.ts](../src/main.ts)：命令注册、设置加载、插件入口。
+- [src/ui/MapPanel.ts](../src/ui/MapPanel.ts)：侧边栏地图面板（状态签名 + 逐帧合并，避免侧栏发卡）。
+- [src/ui/SettingsTab.ts](../src/ui/SettingsTab.ts)：字号、网格与开发者模式设置。
+- [src/ui/MapToolbar.ts](../src/ui/MapToolbar.ts)：Canvas 工具条和地图层停用按钮。
+- [src/editor/MapInteraction.ts](../src/editor/MapInteraction.ts)：捕获阶段事件和原生 UI 排除。
+- [src/render/MapLayerManager.ts](../src/render/MapLayerManager.ts)：地图层生命周期和设置传递。
+- [src/render/MapOverlay.ts](../src/render/MapOverlay.ts)：覆盖层、网格绘制和逐帧重绘。
+- [src/render/shapeDraw.ts](../src/render/shapeDraw.ts)：路径/区域绘制和名称样式。
+- [src/base/mapPreview.ts](../src/base/mapPreview.ts)：Base 缩略图与 SVG 导出几何。
+- [scripts/smoke.mjs](../scripts/smoke.mjs)：真实打包产物 + 假 Obsidian 端到端回归测试。
+
+## 交接时必须注意
+
+- 不要把工具条重新挂到覆盖层上。覆盖层必须保持 `pointer-events: none`，否则会破坏原生 Canvas 命中测试。
+- 不要删除 `getUiExclusions()` 的原生控件选择器。绘制模式下缩放按钮和卡片菜单必须可用。
+- 不要把 `package.json` 部署到 Obsidian 插件目录。
+- 插件 ID 是 `project-kaki`；**不要**再改它（改了要同步 `manifest.json` + `scripts/deploy.mjs` + `scripts/smoke.mjs` 里的字面量，
+  并给用户做目录与启用项迁移）。同理不要改那三个写在用户文件里的持久化标识，见本文开头的警告。
+- 每次修改 UI 后都要跑 `npm run build`、`npm test`、`node scripts/smoke.mjs`，并部署到测试库后给用户可判伪的手动验证清单。
+- 文档中的测试数量必须和实际输出同步。当前基线是 `176 / 401`（单元测试 / 冒烟断言），
+  两者都能自己数出来：`node --test --test-isolation=none` 的末行、`node scripts/smoke.mjs` 的末行。
+- 加新功能时**同时加冒烟场景**：桩没模拟到的真实行为，就是下一次用户报的 bug。

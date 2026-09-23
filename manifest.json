@@ -1,0 +1,9 @@
+{
+  "id": "project-kaki",
+  "name": "Project Kaki",
+  "version": "0.0.1",
+  "minAppVersion": "1.5.0",
+  "description": "在 Obsidian Canvas 中绘制六边形地形、河流、领域与地标，并通过 Base 导航地图与笔记。",
+  "author": "Shir0Tak1na",
+  "isDesktopOnly": false
+}

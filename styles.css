@@ -1,0 +1,456 @@
+/*
+ * Fictional Cartographer — 样式
+ *
+ * 关于覆盖层的两条硬约束：
+ * 1) 它**始终** `pointer-events: none`。原因：为了把地形画在原生卡片下方，
+ *    覆盖层被插为 `div.canvas` 的第一个子元素，而 **DOM 的绘制顺序与命中测试顺序一致** ——
+ *    它同时也是最底层，指针事件优先落到它上面的元素（边层、节点、canvas 元素）上。
+ *    绘制手势因此改为在**视图容器上以捕获阶段**监听，见 src/editor/MapInteraction.ts。
+ * 2) 不设 z-index：靠 DOM 顺序决定层级，设了反而可能把地形盖到卡片上面。
+ */
+
+.fc-overlay {
+  position: absolute;
+  pointer-events: none;
+}
+
+/* 地形层：尺寸与位置由渲染计划每帧写入行内样式（世界坐标） */
+.fc-terrain-layer {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* 标记/文字标注层：始终不拦截指针，命中测试由 DOM 元素自身负责 */
+.fc-marker-layer {
+  position: absolute;
+  pointer-events: none;
+}
+
+.fc-marker {
+  position: absolute;
+  pointer-events: auto;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+}
+
+/* ---- 标记与文字标注层（挂在未变换的 wrapperEl 上，屏幕坐标）---- */
+
+.fc-marker-layer {
+  position: absolute;
+  inset: 0;
+  /* ⚠️ 容器必须始终穿透：它铺满整个视口，一旦可命中就会挡住原生画布的点选与拖拽。
+     可交互性由下面的 .is-interactive 只作用于**实体元素**。 */
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* 默认（绘制模式）实体本身也不接收事件：此时点击的意思是"在这里放一个新的" */
+.fc-marker,
+.fc-label {
+  pointer-events: none;
+}
+
+/* 选择模式：实体可点、可拖、可右键 */
+.fc-marker-layer.is-interactive .fc-marker,
+.fc-marker-layer.is-interactive .fc-label {
+  pointer-events: auto;
+}
+
+/* 标记：一个"针"——图标 + 名称，锚点在图标下方的尖 */
+.fc-marker {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  cursor: pointer;
+}
+
+.fc-marker-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--fc-marker-color, var(--text-normal));
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+
+.fc-marker-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* 图标名在当前 Lucide 版本里不存在时的降级：画一个圆点，而不是什么都不显示 */
+.fc-marker-icon.fc-icon-fallback::after {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fc-marker-color, var(--text-normal));
+  border: 1px solid rgba(0, 0, 0, 0.45);
+}
+
+.fc-marker-label {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
+}
+
+/* 文字标注：中心对齐，字号由渲染层按缩放 clamp 后写入 */
+.fc-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--text-normal);
+  text-shadow:
+    0 0 3px var(--background-primary),
+    0 0 3px var(--background-primary);
+}
+
+.fc-label.is-bold {
+  font-weight: 600;
+}
+
+.fc-label.is-italic {
+  font-style: italic;
+}
+
+/* ---- 工具条 ---- */
+.fc-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 76px;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: min(460px, calc(100% - 120px));
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+/* 原生 Canvas 控件通常位于右下角；工具条避开右侧控制区，避免遮挡缩放按钮与卡片菜单。 */
+@media (max-width: 700px) {
+  .fc-toolbar {
+    top: 8px;
+    right: 8px;
+    left: 8px;
+    max-width: none;
+    max-height: 38vh;
+    overflow: auto;
+  }
+}
+
+.fc-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 6px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+
+.fc-toolbar-group:first-of-type {
+  padding-left: 0;
+  border-left: none;
+}
+
+.fc-toolbar-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fc-toolbar-button:hover {
+  background: var(--background-modifier-hover);
+}
+
+.fc-toolbar-button.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.fc-toolbar-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.fc-toolbar-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
+
+.fc-toolbar-brush {
+  min-width: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.fc-toolbar-hint {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.fc-toolbar-icon-glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fc-toolbar-icon-glyph svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---- 地图面板（右侧边栏视图） ---- */
+
+/* 设置页标题下的一行译名（名字只在一处出现，别在每个标题里都写两遍） */
+.fc-settings-subtitle {
+  margin: -6px 0 12px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+/* 侧边栏很窄：整个面板用紧凑的单行按钮，描述走悬停提示 */
+.fc-panel-root {
+  padding: 8px 10px 14px;
+  overflow: auto;
+  height: 100%;
+}
+
+.fc-panel-summary {
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  word-break: break-all;
+}
+
+.fc-panel-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.fc-panel-group-title {
+  margin: 2px 0 4px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+/* 一行一个动作：图标 + 名称，不换行、不堆描述 */
+.fc-panel-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  text-align: left;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.fc-panel-button-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fc-panel-button:hover:not(.is-disabled) {
+  background: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border);
+}
+
+.fc-panel-button.is-disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.fc-panel-button-icon {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.fc-panel-button-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---- Base 视图（地图表格） ---- */
+
+
+.fc-base-view {
+  padding: 8px 10px 14px;
+  overflow: auto;
+  height: 100%;
+  font-size: var(--font-ui-small);
+}
+
+.fc-base-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.fc-base-summary-map {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.fc-base-summary-error {
+  color: var(--text-error);
+}
+
+.fc-base-preview-wrap {
+  margin: 8px 0 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary-alt);
+  overflow: hidden;
+}
+
+.fc-base-preview-wrap svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 120px;
+  aspect-ratio: 2 / 1;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.02));
+}
+
+.fc-base-preview-wrap [data-row-id] {
+  cursor: pointer;
+}
+
+/* 预览里的文字标注：颜色跟随主题（SVG 的 fill 默认是黑色，深色主题下会看不见），
+   字号也要显式给，否则会掉到 SVG 默认的 16px、把缩略图塞满 */
+.fc-base-preview-wrap text.fc-preview-label {
+  fill: var(--text-normal);
+  font-size: 11px;
+  font-family: var(--font-interface);
+  paint-order: stroke;
+  stroke: var(--background-primary-alt);
+  stroke-width: 2px;
+}
+
+.fc-base-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.fc-base-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 4px 8px;
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+}
+
+.fc-base-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+  vertical-align: top;
+}
+
+.fc-base-row:hover td {
+  background: var(--background-modifier-hover);
+}
+
+.fc-base-name a {
+  color: var(--link-color);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.fc-base-name a:hover {
+  text-decoration: underline;
+}
+
+/* 来源用左侧色条区分，比再加一列更省空间（颜色与工具条语义一致） */
+.fc-base-row-note td:first-child {
+  box-shadow: inset 2px 0 0 var(--interactive-accent);
+}
+
+.fc-base-row-map td:first-child {
+  box-shadow: inset 2px 0 0 var(--text-faint);
+}
+
+.fc-base-coords,
+.fc-base-detail,
+.fc-base-kind,
+.fc-base-source {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fc-base-row.is-invalid .fc-base-coords {
+  color: var(--text-error);
+}
+
+.fc-base-warning,
+.fc-base-empty {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+
+.fc-base-warning {
+  border-color: var(--text-error);
+}
+
+.fc-base-warning ul,
+.fc-base-empty ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+

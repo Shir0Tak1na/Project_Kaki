@@ -1,0 +1,164 @@
+/**
+ * Base 视图的地图预览：把地图数据和笔记坐标合成一个简单的 SVG 预览。
+ *
+ * 这是 Phase 3 的下一步：在 Base 表格中不只是列数据，还能直接看到地图的大致轮廓与标记位置。
+ * 设计上保持轻量：不依赖 Obsidian，不做复杂交互；重点是生成一个稳定、可验证、可嵌入 DOM 的预览。
+ */
+
+import { hexCorners, parseCellKey } from '../core/hex.ts'
+import type { MapDocument, MapPath, MapRegion, TerrainType } from '../data/mapDocument.ts'
+import { TERRAIN_STYLES } from '../render/terrainStyle.ts'
+import type { MapRow } from './mapRows.ts'
+
+export interface MapPreviewOptions {
+  width: number
+  height: number
+  padding?: number
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
+}
+
+function pointToSvgPoint(x: number, y: number, bounds: { minX: number; minY: number; maxX: number; maxY: number }, width: number, height: number, padding: number): string {
+  const innerW = Math.max(1, width - padding * 2)
+  const innerH = Math.max(1, height - padding * 2)
+  const spanX = bounds.maxX - bounds.minX || 1
+  const spanY = bounds.maxY - bounds.minY || 1
+  // X/Y 使用同一个比例，避免世界地图被缩略图的长宽比拉伸。
+  const scale = Math.min(innerW / spanX, innerH / spanY)
+  const contentW = spanX * scale
+  const contentH = spanY * scale
+  const offsetX = padding + (innerW - contentW) / 2
+  const offsetY = padding + (innerH - contentH) / 2
+  const px = offsetX + (x - bounds.minX) * scale
+  const py = offsetY + (y - bounds.minY) * scale
+  return `${px.toFixed(2)},${py.toFixed(2)}`
+}
+
+function makeBounds(rows: readonly MapRow[], document: MapDocument | null): { minX: number; minY: number; maxX: number; maxY: number } {
+  const points: Array<[number, number]> = []
+
+  if (document) {
+    for (const key of Object.keys(document.terrain)) {
+      const cell = parseCellKey(key)
+      if (cell) points.push(...hexCorners(document.grid, cell.q, cell.r).map((point): [number, number] => [point.x, point.y]))
+    }
+    for (const marker of document.markers) points.push([marker.p[0], marker.p[1]])
+    for (const label of document.labels) points.push([label.p[0], label.p[1]])
+    for (const path of document.paths) points.push(...path.pts)
+    for (const region of document.regions) points.push(...region.pts)
+  }
+
+  for (const row of rows) {
+    if (row.point) points.push([row.point.x, row.point.y])
+  }
+
+  if (points.length === 0) {
+    return { minX: -1, minY: -1, maxX: 1, maxY: 1 }
+  }
+
+  const xs = points.map(([x]) => x)
+  const ys = points.map(([, y]) => y)
+  return {
+    minX: Math.min(...xs),
+    minY: Math.min(...ys),
+    maxX: Math.max(...xs),
+    maxY: Math.max(...ys),
+  }
+}
+
+/**
+ * 地形底色**必须**取自 `terrainStyle`（画布用的同一份）。
+ *
+ * 这里曾经自己抄了一份调色板，结果 9 种颜色与画布上的**全部**不同 ——
+ * 表现就是"Base 缩略图和导出 SVG 的颜色跟画布上不一样"，而且改一处不会同步另一处。
+ * 唯一真相来源比"看起来差不多"重要。
+ */
+function terrainFill(type: TerrainType): string {
+  return TERRAIN_STYLES[type]?.base ?? '#9dc06c'
+}
+
+/** 标记 / 笔记点的填充色（与区域、路径的专属图形区分开） */
+const MARKER_FILL = '#f2d38d'
+const NOTE_FILL = '#8bc6ff'
+
+function pathPointsToSvg(path: MapPath, bounds: { minX: number; minY: number; maxX: number; maxY: number }, width: number, height: number, padding: number): string {
+  return path.pts.map(([x, y]) => pointToSvgPoint(x, y, bounds, width, height, padding)).join(' ')
+}
+
+function regionPointsToSvg(region: MapRegion, bounds: { minX: number; minY: number; maxX: number; maxY: number }, width: number, height: number, padding: number): string {
+  return region.pts.map(([x, y]) => pointToSvgPoint(x, y, bounds, width, height, padding)).join(' ')
+}
+
+export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly MapRow[], options: MapPreviewOptions): string {
+  const widthValue = typeof options.width === 'number' && Number.isFinite(options.width) ? options.width : 200
+  const heightValue = typeof options.height === 'number' && Number.isFinite(options.height) ? options.height : 120
+  const paddingValue = typeof options.padding === 'number' && Number.isFinite(options.padding) ? options.padding : 12
+  const width = clamp(widthValue, 64, 2000)
+  const height = clamp(heightValue, 48, 2000)
+  const padding = clamp(paddingValue, 0, 40)
+  const bounds = makeBounds(rows, document)
+  const content: string[] = []
+  content.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Map preview">`)
+
+  if (document) {
+    for (const [key, cell] of Object.entries(document.terrain)) {
+      const axial = parseCellKey(key)
+      if (!axial) continue
+      const points = hexCorners(document.grid, axial.q, axial.r)
+        .map((point) => pointToSvgPoint(point.x, point.y, bounds, width, height, padding))
+        .join(' ')
+      content.push(`<polygon points="${points}" fill="${terrainFill(cell.t)}" stroke="rgba(17,24,39,0.28)" stroke-width="0.6" />`)
+    }
+
+    for (const region of document.regions) {
+      const points = regionPointsToSvg(region, bounds, width, height, padding)
+      const fill = region.color ?? '#7ab77b'
+      content.push(`<polygon data-row-id="map:region:${region.id}" points="${points}" fill="${fill}" fill-opacity="0.28" stroke="${fill}" stroke-width="1.2" style="cursor:pointer" />`)
+    }
+
+    for (const path of document.paths) {
+      const points = pathPointsToSvg(path, bounds, width, height, padding)
+      content.push(`<polyline data-row-id="map:path:${path.id}" points="${points}" fill="none" stroke="${path.color ?? '#4e9bd6'}" stroke-width="${Math.max(1.2, path.width / 14)}" stroke-linecap="round" stroke-linejoin="round" style="cursor:pointer" />`)
+    }
+
+    for (const label of document.labels) {
+      const point = pointToSvgPoint(label.p[0], label.p[1], bounds, width, height, padding)
+      const [x, y] = point.split(',')
+      const escaped = label.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+      // fill 必须显式给出：SVG 的 fill 默认是黑色，在深色主题的 Base 里等于看不见。
+      // 用 currentColor，让内联预览跟随主题（导出成独立文件时 currentColor 退化为黑色，也可读）。
+      content.push(
+        `<text data-row-id="map:label:${label.id}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="middle" fill="currentColor" class="fc-preview-label" style="cursor:pointer">${escaped}</text>`,
+      )
+    }
+
+    for (const marker of document.markers) {
+      const point = pointToSvgPoint(marker.p[0], marker.p[1], bounds, width, height, padding)
+      const [x, y] = point.split(',')
+      content.push(
+        `<circle data-row-id="map:marker:${marker.id}" cx="${x}" cy="${y}" r="3" fill="${MARKER_FILL}" stroke="#111827" stroke-width="1" style="cursor:pointer" />`,
+      )
+    }
+  }
+
+  // 只有**笔记**行才补一个通用圆点：地图自己的标记/文字/路径/区域上面已经有专属图形了，
+  // 再画一遍会盖掉标记原本的颜色，还会产生重复的 data-row-id（点击命中的是哪一个就说不清了）。
+  for (const row of rows) {
+    if (!row.point || row.source !== 'note') continue
+    const point = pointToSvgPoint(row.point.x, row.point.y, bounds, width, height, padding)
+    const [x, y] = point.split(',')
+    content.push(
+      `<circle data-row-id="${row.id}" cx="${x}" cy="${y}" r="3" fill="${NOTE_FILL}" stroke="#111827" stroke-width="1" style="cursor:pointer" />`,
+    )
+  }
+
+  content.push('</svg>')
+  return content.join('')
+}
+
+/** 生成地图导出 SVG。导出与缩略图共用同一套世界坐标和等比例投影，避免两套渲染产生偏差。 */
+export function buildMapExportSvg(document: MapDocument, width = 1600, height = 1000): string {
+  return buildMapPreviewSvg(document, [], { width, height, padding: 32 })
+}

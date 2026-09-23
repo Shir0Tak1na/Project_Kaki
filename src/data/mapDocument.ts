@@ -1,0 +1,576 @@
+/**
+ * 地图文档数据模型 —— 纯函数模块，不依赖 obsidian，可被单元测试直接覆盖。
+ *
+ * 设计要点（见设计文档 §6 与 §2 ADR-2）：
+ * - 地形以六边形**轴向坐标**存储（键 `"q_r"`），而不是像素坐标；
+ * - 标记 / 区域 / 路径 / 文字标注保留**世界坐标**；
+ * - **未知字段必须原样保留**：旧版本插件打开新版本写的地图时，不得丢字段；
+ * - 校验策略是「结构性错误拒绝加载，单条目错误跳过并告警」——
+ *   手写的地图不该因为一个坏条目而整份打不开。
+ */
+
+import { parseCellKey, type GridSpec } from '../core/hex.ts'
+import type { GeometryMode } from '../core/hexEdges.ts'
+
+/** 当前插件支持的文档版本 */
+export const MAP_DOCUMENT_VERSION = 1
+
+export type TerrainType =
+  | 'mountain'
+  | 'forest'
+  | 'water'
+  | 'desert'
+  | 'plains'
+  | 'swamp'
+  | 'hills'
+  | 'tundra'
+  | 'volcanic'
+
+export const TERRAIN_TYPES: readonly TerrainType[] = [
+  'mountain',
+  'forest',
+  'water',
+  'desert',
+  'plains',
+  'swamp',
+  'hills',
+  'tundra',
+  'volcanic',
+]
+
+export type MarkerIcon =
+  | 'city'
+  | 'town'
+  | 'fortress'
+  | 'ruin'
+  | 'port'
+  | 'temple'
+  | 'mountain-peak'
+  | 'cave'
+  | 'tower'
+
+export const MARKER_ICONS: readonly MarkerIcon[] = [
+  'city',
+  'town',
+  'fortress',
+  'ruin',
+  'port',
+  'temple',
+  'mountain-peak',
+  'cave',
+  'tower',
+]
+
+export type PathType = 'river' | 'road' | 'trade-route' | 'border'
+export const PATH_TYPES: readonly PathType[] = ['river', 'road', 'trade-route', 'border']
+
+/** 位标志：1=旋转，2=镜像，4=变体（比独立字段省体积） */
+export interface TerrainCell {
+  t: TerrainType
+  f?: number
+  c?: string
+}
+
+export interface MapMarker {
+  id: string
+  label: string
+  p: [number, number]
+  icon: MarkerIcon
+  c?: string
+  link?: string
+  desc?: string
+}
+
+export interface MapPath {
+  id: string
+  type: PathType
+  pts: Array<[number, number]>
+  width: number
+  color: string
+  /** 可选关联笔记；未设置时 Base 导航回地图文档 */
+  link?: string
+  /** 名称（河流名/道路名），渲染在折线中点旁边 */
+  label?: string
+  dash?: number[]
+  taper?: boolean
+  smooth?: boolean
+  /**
+   * 几何模式：`interior`（默认，穿过格子内部）或 `edge`（沿六边形边）。
+   *
+   * ⚠️ **几何本身在提交时就已经转换好了**（`pts` 就是沿格边的顶点序列），
+   * 这个字段记录"当初按哪种模式画的"，用于界面回显（与将来的"重新吸附"）；
+   * 渲染不需要读它。缺省即 `interior`，因此旧地图完全兼容。
+   */
+  mode?: GeometryMode
+}
+
+export interface MapRegion {
+  id: string
+  label: string
+  pts: Array<[number, number]>
+  color: string
+  opacity: number
+  borderColor?: string
+  borderWidth?: number
+  link?: string
+  /** 见 `MapPath.mode` */
+  mode?: GeometryMode
+}
+
+export interface MapLabel {
+  id: string
+  text: string
+  p: [number, number]
+  size?: number
+  color?: string
+  bold?: boolean
+  italic?: boolean
+  rotation?: number
+  link?: string
+}
+
+export interface MapDocument {
+  version: number
+  grid: GridSpec
+  /** 键为 `"q_r"` 的稀疏地形表 */
+  terrain: Record<string, TerrainCell>
+  paths: MapPath[]
+  regions: MapRegion[]
+  markers: MapMarker[]
+  labels: MapLabel[]
+  settings?: { colorPalette?: Record<string, string> }
+  /** 本插件未知的顶层字段，原样保留以便前向兼容 */
+  extra?: Record<string, unknown>
+}
+
+export type IssueLevel = 'error' | 'warning'
+
+export interface MapDocumentIssue {
+  level: IssueLevel
+  /** 出问题的字段路径，便于在报告里精确定位 */
+  path: string
+  message: string
+}
+
+export interface ParseResult {
+  ok: boolean
+  document: MapDocument | null
+  issues: MapDocumentIssue[]
+}
+
+// ---------------------------------------------------------------- 基础判断
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function readPoint2(value: unknown): [number, number] | null {
+  if (Array.isArray(value) && value.length >= 2 && isFiniteNumber(value[0]) && isFiniteNumber(value[1])) {
+    return [value[0], value[1]]
+  }
+  if (isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y)) {
+    return [value.x, value.y]
+  }
+  return null
+}
+
+function readPointList(value: unknown): Array<[number, number]> | null {
+  if (!Array.isArray(value)) return null
+  const out: Array<[number, number]> = []
+  for (const item of value) {
+    const point = readPoint2(item)
+    if (point === null) return null
+    out.push(point)
+  }
+  return out.length > 0 ? out : null
+}
+
+const KNOWN_TOP_LEVEL_KEYS = new Set([
+  'version',
+  'grid',
+  'terrain',
+  'paths',
+  'regions',
+  'markers',
+  'labels',
+  'settings',
+])
+
+// ---------------------------------------------------------------- 解析
+
+function parseGrid(value: unknown, issues: MapDocumentIssue[]): GridSpec | null {
+  if (!isRecord(value)) {
+    issues.push({ level: 'error', path: 'grid', message: '缺少 grid 或不是对象' })
+    return null
+  }
+  if (value.kind !== 'hex') {
+    issues.push({ level: 'error', path: 'grid.kind', message: `只支持 kind="hex"，实际为 ${JSON.stringify(value.kind)}` })
+    return null
+  }
+  const orientation = value.orientation
+  if (orientation !== 'pointy' && orientation !== 'flat') {
+    issues.push({
+      level: 'error',
+      path: 'grid.orientation',
+      message: `orientation 必须是 "pointy" 或 "flat"，实际为 ${JSON.stringify(orientation)}`,
+    })
+    return null
+  }
+  const size = value.size
+  if (!isFiniteNumber(size) || size <= 0) {
+    issues.push({ level: 'error', path: 'grid.size', message: `size 必须是正数，实际为 ${JSON.stringify(size)}` })
+    return null
+  }
+  const origin = readPoint2(value.origin) ?? [0, 0]
+  return { kind: 'hex', orientation, size, origin }
+}
+
+function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string, TerrainCell> {
+  const out: Record<string, TerrainCell> = {}
+  if (value === undefined) return out
+  if (!isRecord(value)) {
+    issues.push({ level: 'warning', path: 'terrain', message: 'terrain 不是对象，已忽略' })
+    return out
+  }
+  for (const [key, raw] of Object.entries(value)) {
+    if (parseCellKey(key) === null) {
+      issues.push({ level: 'warning', path: `terrain.${key}`, message: '键不是 "q_r" 形式的整数格，已跳过' })
+      continue
+    }
+    if (!isRecord(raw)) {
+      issues.push({ level: 'warning', path: `terrain.${key}`, message: '不是对象，已跳过' })
+      continue
+    }
+    const type = raw.t
+    if (typeof type !== 'string' || !TERRAIN_TYPES.includes(type as TerrainType)) {
+      issues.push({
+        level: 'warning',
+        path: `terrain.${key}.t`,
+        message: `未知地形类型 ${JSON.stringify(type)}，已跳过该格（可用类型：${TERRAIN_TYPES.join('/')}）`,
+      })
+      continue
+    }
+    const cell: TerrainCell = { t: type as TerrainType }
+    if (isFiniteNumber(raw.f) && raw.f !== 0) cell.f = Math.trunc(raw.f)
+    if (isNonEmptyString(raw.c)) cell.c = raw.c
+    out[key] = cell
+  }
+  return out
+}
+
+function parseArrayField<T>(
+  value: unknown,
+  field: string,
+  issues: MapDocumentIssue[],
+  parseOne: (raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]) => T | null,
+): T[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    issues.push({ level: 'warning', path: field, message: `${field} 不是数组，已忽略` })
+    return []
+  }
+  const out: T[] = []
+  const seenIds = new Set<string>()
+  value.forEach((item, index) => {
+    const path = `${field}[${index}]`
+    if (!isRecord(item)) {
+      issues.push({ level: 'warning', path, message: '不是对象，已跳过' })
+      return
+    }
+    const id = item.id
+    if (isNonEmptyString(id)) {
+      if (seenIds.has(id)) {
+        issues.push({ level: 'warning', path: `${path}.id`, message: `id "${id}" 重复，已跳过该条目` })
+        return
+      }
+      seenIds.add(id)
+    }
+    const parsed = parseOne(item, path, issues)
+    if (parsed !== null) out.push(parsed)
+  })
+  return out
+}
+
+function parseMarker(raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]): MapMarker | null {
+  const id = isNonEmptyString(raw.id) ? raw.id : null
+  const label = isNonEmptyString(raw.label) ? raw.label : null
+  const p = readPoint2(raw.p)
+  if (id === null || label === null || p === null) {
+    issues.push({ level: 'warning', path, message: '标记缺少 id / label / 有效坐标 p，已跳过' })
+    return null
+  }
+  let icon: MarkerIcon = 'town'
+  if (typeof raw.icon === 'string' && MARKER_ICONS.includes(raw.icon as MarkerIcon)) {
+    icon = raw.icon as MarkerIcon
+  } else if (raw.icon !== undefined) {
+    issues.push({ level: 'warning', path: `${path}.icon`, message: `未知图标 ${JSON.stringify(raw.icon)}，已回退为 town` })
+  }
+  const marker: MapMarker = { id, label, p, icon }
+  if (isNonEmptyString(raw.c)) marker.c = raw.c
+  if (isNonEmptyString(raw.link)) marker.link = raw.link
+  if (isNonEmptyString(raw.desc)) marker.desc = raw.desc
+  return marker
+}
+
+/**
+ * 读取几何模式。
+ *
+ * 未知取值一律回退为 `interior`（自由模式）：这是旧地图与新地图都能渲染的安全默认，
+ * 也不会因为手工编辑写错一个词就让形状消失。
+ */
+function readGeometryMode(value: unknown): GeometryMode {
+  if (value === 'edge' || value === 'edge-step') return value
+  return 'interior'
+}
+
+function parsePath(raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]): MapPath | null {
+  const id = isNonEmptyString(raw.id) ? raw.id : null
+  const type = typeof raw.type === 'string' && PATH_TYPES.includes(raw.type as PathType) ? (raw.type as PathType) : null
+  const pts = readPointList(raw.pts)
+  if (id === null || type === null || pts === null) {
+    issues.push({ level: 'warning', path, message: '路径缺少 id / 合法 type / 至少两个有效点，已跳过' })
+    return null
+  }
+  const width = isFiniteNumber(raw.width) && raw.width > 0 ? raw.width : 4
+  if (!isFiniteNumber(raw.width)) {
+    issues.push({ level: 'warning', path: `${path}.width`, message: '缺少或非法 width，已回退为 4' })
+  }
+  const path2: MapPath = {
+    id,
+    type,
+    pts,
+    width,
+    color: isNonEmptyString(raw.color) ? raw.color : '#8ab4f8',
+  }
+  if (isNonEmptyString(raw.label)) path2.label = raw.label
+  if (isNonEmptyString(raw.link)) path2.link = raw.link
+  if (Array.isArray(raw.dash) && raw.dash.every(isFiniteNumber)) path2.dash = raw.dash as number[]
+  if (raw.taper === true) path2.taper = true
+  if (raw.smooth === true) path2.smooth = true
+  path2.mode = readGeometryMode(raw.mode)
+  return path2
+}
+
+function parseRegion(raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]): MapRegion | null {
+  const id = isNonEmptyString(raw.id) ? raw.id : null
+  const pts = readPointList(raw.pts)
+  if (id === null || pts === null || pts.length < 3) {
+    issues.push({ level: 'warning', path, message: '区域缺少 id 或有效顶点（至少 3 个），已跳过' })
+    return null
+  }
+  const region: MapRegion = {
+    id,
+    label: isNonEmptyString(raw.label) ? raw.label : '',
+    pts,
+    color: isNonEmptyString(raw.color) ? raw.color : '#44cf6e',
+    opacity: isFiniteNumber(raw.opacity) ? Math.min(1, Math.max(0, raw.opacity)) : 0.2,
+  }
+  if (isNonEmptyString(raw.borderColor)) region.borderColor = raw.borderColor
+  if (isFiniteNumber(raw.borderWidth)) region.borderWidth = raw.borderWidth
+  if (isNonEmptyString(raw.link)) region.link = raw.link
+  region.mode = readGeometryMode(raw.mode)
+  return region
+}
+
+function parseLabel(raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]): MapLabel | null {
+  const id = isNonEmptyString(raw.id) ? raw.id : null
+  const text = isNonEmptyString(raw.text) ? raw.text : null
+  const p = readPoint2(raw.p)
+  if (id === null || text === null || p === null) {
+    issues.push({ level: 'warning', path, message: '文字标注缺少 id / text / 有效坐标，已跳过' })
+    return null
+  }
+  const label: MapLabel = { id, text, p }
+  if (isFiniteNumber(raw.size)) label.size = raw.size
+  if (isNonEmptyString(raw.color)) label.color = raw.color
+  if (raw.bold === true) label.bold = true
+  if (raw.italic === true) label.italic = true
+  if (isFiniteNumber(raw.rotation)) label.rotation = raw.rotation
+  if (isNonEmptyString(raw.link)) label.link = raw.link
+  return label
+}
+
+/**
+ * 解析地图文档。
+ *
+ * - `ok: false` 表示结构性问题（版本不可识别、grid 不可用）——调用方应拒绝加载；
+ * - `ok: true` 且带 warning 时，问题条目已被跳过，其余数据可用。
+ */
+export function parseMapDocument(input: unknown): ParseResult {
+  const issues: MapDocumentIssue[] = []
+
+  if (!isRecord(input)) {
+    issues.push({ level: 'error', path: '', message: '地图数据不是对象' })
+    return { ok: false, document: null, issues }
+  }
+
+  const version = input.version
+  if (!isFiniteNumber(version) || !Number.isInteger(version) || version < 1) {
+    issues.push({ level: 'error', path: 'version', message: `缺少合法的整数 version，实际为 ${JSON.stringify(version)}` })
+    return { ok: false, document: null, issues }
+  }
+  if (version > MAP_DOCUMENT_VERSION) {
+    issues.push({
+      level: 'error',
+      path: 'version',
+      message: `文档版本 ${version} 高于本插件支持的 ${MAP_DOCUMENT_VERSION}：将只读打开，绝不写回（避免丢弃新版字段）`,
+    })
+    return { ok: false, document: null, issues }
+  }
+
+  const grid = parseGrid(input.grid, issues)
+  if (grid === null) return { ok: false, document: null, issues }
+
+  const extra: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(input)) {
+    if (!KNOWN_TOP_LEVEL_KEYS.has(key)) extra[key] = value
+  }
+
+  let settings: MapDocument['settings']
+  if (isRecord(input.settings)) {
+    const palette = input.settings.colorPalette
+    settings = isRecord(palette)
+      ? { colorPalette: Object.fromEntries(Object.entries(palette).filter(([, v]) => typeof v === 'string')) as Record<string, string> }
+      : {}
+  }
+
+  const document: MapDocument = {
+    version,
+    grid,
+    terrain: parseTerrain(input.terrain, issues),
+    paths: parseArrayField(input.paths, 'paths', issues, parsePath),
+    regions: parseArrayField(input.regions, 'regions', issues, parseRegion),
+    markers: parseArrayField(input.markers, 'markers', issues, parseMarker),
+    labels: parseArrayField(input.labels, 'labels', issues, parseLabel),
+  }
+  if (settings !== undefined) document.settings = settings
+  if (Object.keys(extra).length > 0) document.extra = extra
+
+  return { ok: true, document, issues }
+}
+
+// ---------------------------------------------------------------- 序列化
+
+/** 地形按键排序（先 r 后 q），让 Git diff 稳定且人类可读 */
+function sortedTerrainEntries(terrain: Record<string, TerrainCell>): Array<[string, TerrainCell]> {
+  const entries = Object.entries(terrain).map(([key, cell]) => {
+    const axial = parseCellKey(key)
+    return { key, cell, q: axial?.q ?? 0, r: axial?.r ?? 0 }
+  })
+  entries.sort((a, b) => (a.r === b.r ? a.q - b.q : a.r - b.r))
+  return entries.map((entry) => [entry.key, entry.cell])
+}
+
+/** 数组：每项一行（便于 diff），项内紧凑 */
+function serializeArray(items: readonly unknown[], indent: number): string {
+  if (items.length === 0) return '[]'
+  const inner = ' '.repeat(indent + 2)
+  const lines = items.map((item, index) => `${inner}${JSON.stringify(item)}${index === items.length - 1 ? '' : ','}`)
+  return ['[', ...lines, `${' '.repeat(indent)}]`].join('\n')
+}
+
+/**
+ * 地形表：**每格一行、格内紧凑**。
+ *
+ * 为什么不用 `JSON.stringify(x, null, 2)`：实测那样每格要 42.6 字节，
+ * 6400 格就有 273 KB。这里的写法去掉格内的 `": "` 与换行缩进后约 28 字节/格，
+ * 同时仍然是"一格一行"——Git diff 能精确到格，手工改一个格也只动一行。
+ * 格的键只有 `q_r`（数字/负号/下划线），值用 JSON.stringify 保证转义正确。
+ */
+function serializeTerrain(terrain: Record<string, TerrainCell>, indent: number): string {
+  const entries = sortedTerrainEntries(terrain)
+  if (entries.length === 0) return '{}'
+  const inner = ' '.repeat(indent + 2)
+  const lines = entries.map(
+    ([key, cell], index) => `${inner}${JSON.stringify(key)}: ${JSON.stringify(cell)}${index === entries.length - 1 ? '' : ','}`,
+  )
+  return ['{', ...lines, `${' '.repeat(indent)}}`].join('\n')
+}
+
+/**
+ * 序列化为 JSON 文本。
+ *
+ * 结构保持缩进可读（每格/每个标记一行），格内与数组项内紧凑以控制体积。
+ * 顺序固定：未知顶层字段在前、随后是已知字段、地形按键排序 —— 让 Git diff 稳定。
+ * 「地图状态」命令会报告实际体积。
+ */
+export function serializeMapDocument(document: MapDocument, indent = 2): string {
+  const pad = ' '.repeat(indent)
+  const body: string[] = []
+  const push = (key: string, value: string): void => {
+    body.push(`${pad}${JSON.stringify(key)}: ${value}`)
+  }
+
+  // 未知字段先写，已知字段后写：保证已知字段不会被同名的未知字段覆盖
+  if (document.extra) {
+    for (const [key, value] of Object.entries(document.extra)) {
+      if (KNOWN_TOP_LEVEL_KEYS.has(key)) continue
+      push(key, JSON.stringify(value))
+    }
+  }
+  push('version', JSON.stringify(document.version))
+  push('grid', JSON.stringify(document.grid))
+  push('terrain', serializeTerrain(document.terrain, indent))
+  push('paths', serializeArray(document.paths, indent))
+  push('regions', serializeArray(document.regions, indent))
+  push('markers', serializeArray(document.markers, indent))
+  push('labels', serializeArray(document.labels, indent))
+  if (document.settings) push('settings', JSON.stringify(document.settings))
+
+  return `{\n${body.join(',\n')}\n}`
+}
+
+export function createEmptyMapDocument(options: {
+  orientation?: GridSpec['orientation']
+  size?: number
+  origin?: [number, number]
+}): MapDocument {
+  return {
+    version: MAP_DOCUMENT_VERSION,
+    grid: {
+      kind: 'hex',
+      orientation: options.orientation ?? 'pointy',
+      size: options.size ?? 40,
+      origin: options.origin ?? [0, 0],
+    },
+    terrain: {},
+    paths: [],
+    regions: [],
+    markers: [],
+    labels: [],
+  }
+}
+
+/** 粗略统计，供「地图状态」命令与诊断报告使用 */
+export function summarizeMapDocument(document: MapDocument): {
+  cells: number
+  markers: number
+  paths: number
+  regions: number
+  labels: number
+  terrainBreakdown: Array<{ type: TerrainType; count: number }>
+} {
+  const breakdown = new Map<TerrainType, number>()
+  for (const cell of Object.values(document.terrain)) {
+    breakdown.set(cell.t, (breakdown.get(cell.t) ?? 0) + 1)
+  }
+  const terrainBreakdown = [...breakdown.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count)
+  return {
+    cells: Object.keys(document.terrain).length,
+    markers: document.markers.length,
+    paths: document.paths.length,
+    regions: document.regions.length,
+    labels: document.labels.length,
+    terrainBreakdown,
+  }
+}

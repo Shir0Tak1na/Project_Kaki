@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "verbatimModuleSyntax": false,
+    "outDir": ".build",
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "target": "ES2018",
+    "sourceMap": false,
+    "declaration": false,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["src/**/*.ts"]
+}
