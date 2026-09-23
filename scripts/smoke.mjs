@@ -160,7 +160,10 @@ class FakeImage {
   set src(value) {
     this._src = String(value)
     globalThis.setTimeout(() => {
-      if (loadableImageUrls.has(this._src)) this.onload?.()
+      // `data:` 地址是浏览器**原生就能解码**的（PNG 导出就是喂给它一张 SVG 的 data URL），
+      // 所以这里必须按"加载成功"处理：否则导出会在"图片解码"这一步就失败，
+      // 而真正要覆盖的那条降级路径（假画布没有 toBlob）永远走不到。
+      if (this._src.startsWith('data:') || loadableImageUrls.has(this._src)) this.onload?.()
       else this.onerror?.(new Error(`图片不存在：${this._src}`))
     }, 0)
   }
@@ -558,6 +561,10 @@ const fakeDocument = {
   activeElement: null,
   defaultView: null,
   createElement(tagName) {
+    // 与真实 DOM 同构：`createElement('img')` 给出的是图片对象（有 onload/onerror/complete/naturalWidth），
+    // 不是通用元素。PNG 导出正是走这条路，早先的桩在这里少了一个成员，
+    // 结果"等待图片加载"永远不返回 —— 那类问题在真实浏览器里根本不存在，却会把测试卡死。
+    if (String(tagName).toLowerCase() === 'img') return new FakeImage()
     const el = makeEl({ tagName, className: '' })
     el.ownerDocument = fakeDocument
     if (String(tagName).toLowerCase() === 'canvas') {
@@ -565,6 +572,8 @@ const fakeDocument = {
       // 离屏画布（地形图集、导出用的位图）也要能被检查：它们是内部对象，
       // 不从任何公开 API 暴露出来，但"图集里那一格到底画了什么"正是这个功能要验证的东西。
       createdCanvasContexts.push(el._ctx)
+      // 刻意**不**提供 `toBlob`：这就是 PNG 导出在受限环境下的降级分支
+      // （真实浏览器都有，缺它的情况出现在部分移动端 WebView 上）。
     }
     return el
   },
@@ -1178,6 +1187,8 @@ function resourceUrlFor(path) {
 function makeVault(initialFiles = new Map()) {  const files = new Map()
   const fileObjects = new Map()
   const listeners = { modify: [], create: [], delete: [], rename: [] }
+  /** 二进制写入的原始字节（PNG 导出用）：`files` 里放占位串，字节单独留在这里供断言 */
+  const binaryWrites = new Map()
   let clock = 1
 
   const fileFor = (path) => {
@@ -1227,6 +1238,22 @@ function makeVault(initialFiles = new Map()) {  const files = new Map()
       emit('create', created)
       return created
     },
+    /**
+     * 二进制写入（PNG 导出用）。
+     *
+     * 如实复刻三件事：① 文件进入库（`getAbstractFileByPath` 能找到）；② 重名要抛错（与 `create` 同口径）；
+     * ③ 字节原样保留供断言。`files` 里放的是一个占位串而不是 ArrayBuffer ——
+     * 假库其余读取路径都按文本处理，塞进二进制会连带弄坏那些断言；字节另存在 `binaryFiles` 里。
+     */
+    async createBinary(path, data) {
+      if (files.has(path)) throw new Error(`文件已存在：${path}`)
+      binaryWrites.set(path, data)
+      const created = setContent(path, '<binary>')
+      emit('create', created)
+      return created
+    },
+    /** 供断言：某个路径被写入的二进制字节 */
+    binaryFiles: binaryWrites,
     async createFolder() {},
     getAbstractFileByPath(path) {
       return files.has(path) ? fileFor(path) : null
@@ -4597,6 +4624,153 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
     JSON.stringify({ layers: legacy.getSettings().layers, labelScale: legacy.getSettings().labelScale }),
   )
   legacy.onunload()
+}
+
+console.log('\n场景 26：PNG 导出（复用 SVG 几何 → 光栅化 → 两种失败都要给人话）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  const mapPath = 'Maps/World.map.md'
+  const mapFile = app.vault.getAbstractFileByPath(mapPath)
+  const loaded = await store.load(mapFile)
+  loaded.document.terrain['0_0'] = { t: 'forest' }
+  loaded.document.paths.push({ id: 'p1', type: 'river', pts: [[0, 0], [200, 120]], width: 8, color: '#4a9fd8', label: '北境商路' })
+  loaded.document.regions.push({ id: 'r1', label: '北境领', pts: [[0, 0], [200, 0], [200, 200], [0, 200]], color: '#44cf6e', opacity: 0.22 })
+  await store.writeNow(mapFile, loaded.document, 'World', [canvasPath])
+  await settleEvents()
+
+  const commandById = (id) => plugin.commands.find((command) => command.id === id)
+
+  check('注册了"导出当前地图为 PNG"命令', commandById('export-map-png') !== undefined)
+  check(
+    '命令出现在地图面板里（与命令面板共用同一份动作表）',
+    plugin.getPanelActions().some((action) => action.id === 'export-map-png'),
+    plugin.getPanelActions().map((action) => action.id).join(','),
+  )
+  // 注意口径：本项目里 `available` **只用于面板禁用**，命令本身不做可见性门禁
+  // （开发用探针那种"从命令面板消失"是另一条规则，见 `registerActions`）。
+  // 所以"不能导出"这件事要在**两处**都成立：面板按钮禁用 + 点了给可读提示。
+  const panelAction = plugin.getPanelActions().find((action) => action.id === 'export-map-png')
+  check(
+    '未启用地图层时面板按钮是禁用的（而不是点了才报错）',
+    panelAction?.available?.() === false,
+    String(panelAction?.available?.()),
+  )
+
+  // ---- 未启用地图层：明确提示，且不产生文件 ----
+  noticeLog.length = 0
+  await runCommand(plugin, 'export-map-png')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  check(
+    '没有启用地图层时给出明确提示',
+    noticeLog.some((line) => line.includes('没有可导出的地图') || line.includes('已启用地图层')),
+    noticeLog.join(' | '),
+  )
+  check('未启用时不产生文件', app.vault.files.has('Maps/World.png') === false)
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  check('地图层已启用', layers.getDocument(canvasPath) !== null)
+
+  // ---- 降级路径（不注入任何替身）----
+  // 假环境有 Image 与 2D 上下文，但画布**没有 toBlob** —— 正是部分移动端 WebView 的样子。
+  // 期望：给出可读原因、**不产生文件**（半个空图比没有文件更糟：用户会以为导出成功了）。
+  noticeLog.length = 0
+  openedLinks.length = 0
+  await runCommand(plugin, 'export-map-png')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const failedNotice = noticeLog.find((line) => line.includes('导出 PNG 失败')) ?? ''
+  check('环境不支持时给出可读的失败原因', failedNotice.length > 0, noticeLog.join(' | '))
+  check(
+    '失败提示是人话而不是堆栈（不能出现 Error/at 这类痕迹）',
+    failedNotice.includes('PNG') && !/Error\b|TypeError|undefined| at /.test(failedNotice),
+    failedNotice,
+  )
+  check('失败时不产生文件', app.vault.files.has('Maps/World.png') === false && app.vault.binaryFiles.size === 0)
+
+  // ---- 精确覆盖"没有 toBlob"这条分支（不依赖假 DOM 的细节）----
+  plugin.setPngRasterizer({
+    createImage: () => ({ src: '', complete: false, naturalWidth: 8, onload: null, onerror: null }),
+    waitForImage: async () => true,
+    createCanvas: (width, height) => ({ width, height, getContext: () => ({ drawImage() {} }) }),
+    toBlob: async () => null,
+  })
+  noticeLog.length = 0
+  await runCommand(plugin, 'export-map-png')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  check(
+    'toBlob 返回空时也给人话，且不写文件',
+    noticeLog.some((line) => line.includes('导出 PNG 失败') && line.includes('toBlob')) &&
+      app.vault.binaryFiles.size === 0,
+    noticeLog.join(' | '),
+  )
+
+  // ---- 成功路径：注入替身，断言写进去的**是真的字节**、用的是**导出几何** ----
+  const pngMagic = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+  const seenSvgs = []
+  plugin.setPngRasterizer({
+    createImage: () => ({ src: '', complete: false, naturalWidth: 8, onload: null, onerror: null }),
+    waitForImage: async (image) => {
+      seenSvgs.push(image.src)
+      return true
+    },
+    createCanvas: (width, height) => ({ width, height, getContext: () => ({ drawImage() {} }) }),
+    toBlob: async () => ({ arrayBuffer: async () => pngMagic.buffer.slice(0) }),
+  })
+
+  noticeLog.length = 0
+  openedLinks.length = 0
+  await runCommand(plugin, 'export-map-png')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  const bytes = app.vault.binaryFiles.get('Maps/World.png')
+  check('导出了 PNG 文件', bytes !== undefined && bytes.byteLength > 0, String(bytes?.byteLength))
+  check(
+    '写入的是真正的 PNG 字节（签名 89 50 4E 47…）而不是文本',
+    bytes instanceof ArrayBuffer && new Uint8Array(bytes)[0] === 0x89 && new Uint8Array(bytes)[1] === 0x50,
+    bytes instanceof ArrayBuffer ? [...new Uint8Array(bytes)].slice(0, 4).join(',') : String(bytes),
+  )
+  check('命令报告了导出路径', noticeLog.some((line) => line.includes('Maps/World.png')), noticeLog.join(' | '))
+  check('导出后打开了文件', openedLinks.some((entry) => entry.link === 'Maps/World.png'), JSON.stringify(openedLinks))
+
+  // 复用导出几何：交给光栅化器的那份 SVG 必须**就是**地图导出那一份（含同源的配色与几何），
+  // 而不是 PNG 自己另画一套 —— 这类"两份实现慢慢分叉"的缺陷只能靠断言这个来防。
+  const decoded = seenSvgs.length > 0 ? decodeURIComponent(seenSvgs[0].replace(/^data:[^,]*,/, '')) : ''
+  check('交给光栅化器的是一张 SVG 的 data URL', seenSvgs[0]?.startsWith('data:image/svg+xml') === true, String(seenSvgs[0]).slice(0, 40))
+  check(
+    'PNG 复用的是地图导出的几何与配色（不是第二套实现）',
+    decoded.includes('#44cf6e') && decoded.includes('<polyline') && decoded.includes('width="1600"'),
+    decoded.slice(0, 120),
+  )
+
+  // ---- 重名不覆盖，自动加后缀（与 SVG 导出同一份命名逻辑）----
+  await runCommand(plugin, 'export-map-png')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  check(
+    '重名时自动加后缀（不覆盖已有文件）',
+    app.vault.binaryFiles.has('Maps/World-2.png') && app.vault.binaryFiles.has('Maps/World.png'),
+    [...app.vault.binaryFiles.keys()].join(','),
+  )
+
+  // ---- 恢复真实实现：注入点只该影响测试 ----
+  plugin.setPngRasterizer(null)
+  noticeLog.length = 0
+  await runCommand(plugin, 'export-map-png')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  check(
+    '传 null 恢复真实实现（回到降级分支而不是沿用替身）',
+    noticeLog.some((line) => line.includes('导出 PNG 失败')),
+    noticeLog.join(' | '),
+  )
+
+  plugin.onunload()
 }
 
 console.log('')

@@ -26,6 +26,7 @@ import { disposeViewportWatch, getWatchStatus, startViewportWatch, stopViewportW
 import { MapEditor } from './editor/MapEditor.ts'
 import { MapLayerManager } from './render/MapLayerManager.ts'
 import { buildMapExportSvg } from './base/mapPreview.ts'
+import { exportBasePathFor, rasterizeSvgToPng, uniqueExportPath, type PngRasterDeps } from './base/pngExport.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type PluginAction } from './ui/MapPanel.ts'
 import {
@@ -69,6 +70,15 @@ export type PromptModalFactory = (
 
 const DIAGNOSTIC_FALLBACK_PATH = 'FC-diagnostics.md'
 const DEFAULT_MAP_FOLDER = 'Maps'
+/**
+ * 导出尺寸：SVG 与 PNG **共用同一组数字**。
+ *
+ * 为什么强调共用：PNG 是先导出 SVG 再光栅化的（见 `pngExport.ts`），
+ * 两处各写一份尺寸的话，迟早出现"导出的 SVG 是 1600×1000、PNG 却是别的比例"，
+ * 而那种偏差在缩略图上看起来只是"有点不一样"，很难被发现。
+ */
+const EXPORT_WIDTH = 1600
+const EXPORT_HEIGHT = 1000
 
 export default class ProjectKakiPlugin extends Plugin {
   private store: MapDocumentStore | null = null
@@ -78,6 +88,14 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 命名对话框的工厂：默认用真实对话框，可被替换（自动化测试） */
   private promptModalFactory: PromptModalFactory = (app, options, onSubmit) =>
     new TextPromptModal(app, options, onSubmit)
+  /**
+   * PNG 光栅化的环境依赖（仅自动化测试注入；`null` = 用真实实现）。
+   *
+   * 为什么需要这个口子：真实光栅化要 `Image` 与 `canvas.toBlob`，这套东西在没有浏览器的
+   * 测试环境里跑不出来；而"导出成功时写进去的到底是什么字节""失败时给的是不是人话"这两件事
+   * 恰恰是最该测的。注入依赖之后，成功路径与降级路径都能端到端断言。
+   */
+  private pngRasterDeps: PngRasterDeps | null = null
   /** 不能用 `settings` 这个名字：Obsidian 的 Plugin 基类已经有同名成员 */
   private pluginSettings: CartographerSettings = normalizeSettings(null)
   /** Base 自定义视图是否可用（需要 Obsidian 1.10.0+） */
@@ -277,6 +295,17 @@ export default class ProjectKakiPlugin extends Plugin {
         available: hasLayer,
         describe: () => (hasLayer() ? '导出到地图文件同目录' : '需要先启用地图层'),
         run: () => this.exportActiveMapSvg(),
+      },
+      {
+        id: 'export-map-png',
+        name: '导出当前地图为 PNG',
+        icon: 'image',
+        group: 'file',
+        available: hasLayer,
+        // PNG 与 SVG 是"同一张图的两种格式"：先导出 SVG（共用同一份几何与配色）再光栅化，
+        // 所以这里的描述要把这层关系讲清楚，否则用户会以为两条命令各画各的。
+        describe: () => (hasLayer() ? '与 SVG 同源，转成位图' : '需要先启用地图层'),
+        run: () => this.exportActiveMapPng(),
       },
       {
         id: 'diagnose-canvas',
@@ -494,25 +523,67 @@ export default class ProjectKakiPlugin extends Plugin {
       return
     }
 
-    const basePath = mapPath.replace(/\.map\.md$/i, '')
-    let exportPath = `${basePath}.svg`
-    let suffix = 2
-    while (this.app.vault.getAbstractFileByPath(exportPath)) {
-      exportPath = `${basePath}-${suffix}.svg`
-      suffix += 1
-    }
+    const basePath = exportBasePathFor(mapPath)
+    const exportPath = uniqueExportPath(basePath, '.svg', (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
 
     try {
       // 现读一次设置：导出必须是"当前地图 + 当前自定义地形"的合成结果
       const created = await this.app.vault.create(
         exportPath,
-        buildMapExportSvg(document, 1600, 1000, this.getCustomTerrains()),
+        buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains()),
       )
       new Notice(`已导出地图 SVG：${created.path}`, 8000)
       void this.app.workspace.openLinkText(created.path, '', false)
     } catch (error) {
       console.error('[project-kaki] 导出 SVG 失败', error)
       new Notice(`导出 SVG 失败：${error instanceof Error ? error.message : String(error)}`, 8000)
+    }
+  }
+
+  /**
+   * 导出当前地图为 PNG。
+   *
+   * 与 SVG 导出**共用同一份几何与配色**：先由 `buildMapExportSvg` 生成 SVG（Base 缩略图也用同一份），
+   * 再把它光栅化成位图。这样"导出的图与画布一致"这条承诺只需要维护一处 ——
+   * 如果这里另写一套坐标换算，迟早会出现"PNG 与 SVG 长得不一样"。
+   *
+   * 失败一律给一句人话（`rasterizeSvgToPng` 已经把每条失败路径写成中文原因），
+   * 并且**不产生文件**：半个空图比没有文件更糟（用户会以为导出成功了）。
+   */
+  private async exportActiveMapPng(): Promise<void> {
+    const handle = activeCanvasHandle(this.app)
+    const canvasPath = handle?.file?.path
+    if (!canvasPath || !this.layers) {
+      new Notice('请先打开一个已启用地图层的 Canvas。', 8000)
+      return
+    }
+    const mapPath = this.store?.mapFilePathForCanvas(canvasPath)
+    const document = this.layers.getDocument(canvasPath)
+    if (!mapPath || !document) {
+      new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', 8000)
+      return
+    }
+
+    const basePath = exportBasePathFor(mapPath)
+    const exportPath = uniqueExportPath(basePath, '.png', (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
+
+    try {
+      const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains())
+      const result = await rasterizeSvgToPng(
+        svg,
+        { width: EXPORT_WIDTH, height: EXPORT_HEIGHT },
+        this.pngRasterDeps ?? {},
+      )
+      if (!result.ok) {
+        new Notice(`导出 PNG 失败：${result.reason}`, 10000)
+        return
+      }
+      const created = await this.app.vault.createBinary(exportPath, await result.blob.arrayBuffer())
+      new Notice(`已导出地图 PNG：${created.path}`, 8000)
+      void this.app.workspace.openLinkText(created.path, '', false)
+    } catch (error) {
+      console.error('[project-kaki] 导出 PNG 失败', error)
+      new Notice(`导出 PNG 失败：${error instanceof Error ? error.message : String(error)}`, 8000)
     }
   }
 
@@ -738,6 +809,16 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 替换命名对话框（自动化测试用；不改动则为真实的输入对话框） */
   setPromptModalFactory(factory: PromptModalFactory): void {
     this.promptModalFactory = factory
+  }
+
+  /**
+   * 注入 PNG 光栅化的环境依赖（自动化测试用；传 `null` 恢复真实实现）。
+   *
+   * 真实实现要 `Image` + `canvas.toBlob`，测试环境里跑不出来；而"成功时写入的字节对不对"
+   * 与"失败时给的是不是人话"是最该测的两件事，所以留这个口子。
+   */
+  setPngRasterizer(deps: PngRasterDeps | null): void {
+    this.pngRasterDeps = deps
   }
 
   // ------------------------------------------------------------ 地图层
