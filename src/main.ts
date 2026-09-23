@@ -30,10 +30,20 @@ import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type PluginAction } from './ui/MapPanel.ts'
 import {
   CartographerSettingTab,
-  DEFAULT_SETTINGS,
   normalizeLabelScale,
+  normalizeSettings,
+  paletteOf,
   type CartographerSettings,
 } from './ui/SettingsTab.ts'
+import {
+  defaultPathColors,
+  defaultRegionColors,
+  normalizeFontFamily,
+  normalizePathColors,
+  normalizeRegionColors,
+  type StylePalette,
+} from './render/stylePalette.ts'
+import type { PathType } from './data/mapDocument.ts'
 import { TextPromptModal, type TextPromptOptions } from './ui/TextPromptModal.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
@@ -55,7 +65,7 @@ export default class ProjectKakiPlugin extends Plugin {
   private promptModalFactory: PromptModalFactory = (app, options, onSubmit) =>
     new TextPromptModal(app, options, onSubmit)
   /** 不能用 `settings` 这个名字：Obsidian 的 Plugin 基类已经有同名成员 */
-  private pluginSettings: CartographerSettings = { ...DEFAULT_SETTINGS }
+  private pluginSettings: CartographerSettings = normalizeSettings(null)
   /** Base 自定义视图是否可用（需要 Obsidian 1.10.0+） */
   private basesAvailable = false
   /** 动作注册表：命令面板与地图面板共用（见 buildActions） */
@@ -77,6 +87,8 @@ export default class ProjectKakiPlugin extends Plugin {
       // 名称字号倍率：设置界面改完立即生效
       getLabelScale: () => this.pluginSettings.labelScale,
       getShowGrid: () => this.pluginSettings.showGrid,
+      // 样式（路径/区域颜色、名称字体族）：地图层每帧现读，改完设置立刻生效
+      getStylePalette: () => this.getStylePalette(),
     })
 
     this.addSettingTab(new CartographerSettingTab(this.app, this))
@@ -503,14 +515,14 @@ export default class ProjectKakiPlugin extends Plugin {
     return this.pluginSettings
   }
 
+  /** 当前样式调色板（地图层每帧现读它，见 `MapLayerManagerDeps.getStylePalette`） */
+  getStylePalette(): StylePalette {
+    return paletteOf(this.pluginSettings)
+  }
+
   private async loadSettings(): Promise<void> {
-    const stored = (await this.loadData()) as Partial<CartographerSettings> | null
-    this.pluginSettings = {
-      ...DEFAULT_SETTINGS,
-      labelScale: normalizeLabelScale(stored?.labelScale ?? DEFAULT_SETTINGS.labelScale),
-      showGrid: stored?.showGrid !== false,
-      developerMode: stored?.developerMode === true,
-    }
+    // 一切入口都走 normalizeSettings：data.json 被手工改坏时只在这里收敛一次
+    this.pluginSettings = normalizeSettings(await this.loadData())
   }
 
   /** 修改名称字号倍率并立即重绘已打开的地图（设置界面用） */
@@ -520,6 +532,47 @@ export default class ProjectKakiPlugin extends Plugin {
     this.pluginSettings = { ...this.pluginSettings, labelScale: next }
     await this.saveData(this.pluginSettings)
     this.layers?.redrawAll()
+  }
+
+  /** 改一种路径类型的默认颜色（只影响之后新画的路径） */
+  async setPathColor(type: PathType, color: string): Promise<void> {
+    const next = normalizePathColors({ ...this.pluginSettings.pathColors, [type]: color })
+    if (next[type] === this.pluginSettings.pathColors[type]) return
+    this.pluginSettings = { ...this.pluginSettings, pathColors: next }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
+  /** 改第 index 个区域预设色（工具条上按顺序对应的色块） */
+  async setRegionColor(index: number, color: string): Promise<void> {
+    const list = [...this.pluginSettings.regionColors]
+    if (index < 0 || index >= list.length) return
+    const next = normalizeRegionColors(list.map((item, i) => (i === index ? color : item)))
+    if (next[index] === list[index]) return
+    this.pluginSettings = { ...this.pluginSettings, regionColors: next }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
+  /** 改名称字体族（空串 = 跟随主题）；非法串会被收敛成空串而不是透传给 canvas */
+  async setLabelFontFamily(value: string): Promise<void> {
+    const next = normalizeFontFamily(value)
+    if (next === this.pluginSettings.labelFontFamily) return
+    this.pluginSettings = { ...this.pluginSettings, labelFontFamily: next }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
+  /** 样式恢复出厂（设置页的「恢复默认」） */
+  async resetStylePalette(): Promise<void> {
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      pathColors: defaultPathColors(),
+      regionColors: defaultRegionColors(),
+      labelFontFamily: '',
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
   }
 
   /**

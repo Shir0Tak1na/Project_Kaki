@@ -546,11 +546,79 @@ class FakeSetting {
     return this
   }
 
-  addText() {
+  addText(callback) {
+    const setting = this
+    const text = {
+      value: '',
+      placeholder: null,
+      setPlaceholder(value) {
+        this.placeholder = value
+        return this
+      },
+      setValue(value) {
+        this.value = value
+        return this
+      },
+      onChange(handler) {
+        this.handler = handler
+        return this
+      },
+      /** 模拟用户在输入框里打字后失焦（触发 onChange） */
+      async type(value) {
+        this.value = value
+        await this.handler?.(value)
+        return this
+      },
+    }
+    callback?.(text)
+    setting.text = text
     return this
   }
 
-  addButton() {
+  addColorPicker(callback) {
+    const setting = this
+    const picker = {
+      value: null,
+      setValue(value) {
+        this.value = value
+        return this
+      },
+      onChange(handler) {
+        this.handler = handler
+        return this
+      },
+      /** 模拟用户选了一个颜色 */
+      async pick(value) {
+        this.value = value
+        await this.handler?.(value)
+        return this
+      },
+    }
+    callback?.(picker)
+    setting.colorPicker = picker
+    return this
+  }
+
+  addButton(callback) {
+    const setting = this
+    const button = {
+      text: '',
+      setButtonText(value) {
+        this.text = value
+        return this
+      },
+      onClick(handler) {
+        this.handler = handler
+        return this
+      },
+      /** 模拟点击 */
+      async click() {
+        await this.handler?.()
+        return this
+      },
+    }
+    callback?.(button)
+    setting.button = button
     return this
   }
 
@@ -3502,6 +3570,186 @@ console.log('\n场景 22：地图面板（侧边栏视图）与开发者模式�
   )
   panel.render(true)
   check('force 时才会强制重建', collectByClass(panel.contentEl, 'fc-panel-button')[0] !== firstButton)
+
+  plugin.onunload()
+}
+
+console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族）与"只影响新对象"的边界')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  const prompts = []
+  plugin.setPromptModalFactory((_app, options, onSubmit) => {
+    prompts.push({ options, onSubmit })
+    return { open() {} }
+  })
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const wrapper = canvas.wrapperEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const doc = () => layers.getDocument(canvasPath)
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const clickAt = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+  }
+  /** 画一条路径（起点/终点给世界坐标），跳过命名 */
+  const drawPath = (x0, y0) => {
+    editor.setMode('paint')
+    editor.setTool('path')
+    clickAt({ x: x0, y: y0 })
+    clickAt({ x: x0 + 300, y: y0 + 120 })
+    clickAt({ x: x0 + 300, y: y0 + 120 })
+    flushFrames()
+    prompts[prompts.length - 1].onSubmit('')
+    flushFrames()
+    return doc().paths[doc().paths.length - 1]
+  }
+  /** 画一个区域（跳过命名） */
+  const drawRegion = (x0, y0) => {
+    editor.setMode('paint')
+    editor.setTool('region')
+    clickAt({ x: x0, y: y0 })
+    clickAt({ x: x0 + 400, y: y0 })
+    clickAt({ x: x0 + 400, y: y0 + 300 })
+    clickAt({ x: x0 + 400, y: y0 + 300 })
+    flushFrames()
+    prompts[prompts.length - 1].onSubmit('')
+    flushFrames()
+    return doc().regions[doc().regions.length - 1]
+  }
+  /** 设置页里按名字找控件 */
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const pickerNamed = (fragment) =>
+    FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))?.colorPicker
+  const textNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))?.text
+  const buttonNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))?.button
+
+  // ---- 先画一条路径，用来验证"改设置不会动已有对象" ----
+  const beforePath = drawPath(-500, -200)
+  const defaultRiver = '#4a9fd8'
+
+  // ---- 设置界面 ----
+  openSettings()
+  const riverPicker = pickerNamed('路径颜色 · 河流')
+  const regionPicker = pickerNamed('区域颜色 · 公国')
+  const fontText = textNamed('名称字体族')
+  check('设置页有每种路径的颜色选择器', pickerNamed('路径颜色 · 河流') && pickerNamed('路径颜色 · 边界') ? true : false)
+  check('设置页有每个区域预设的颜色选择器', pickerNamed('区域颜色 · 王国') !== undefined && pickerNamed('区域颜色 · 海域') !== undefined)
+  check('设置页有名称字体族输入框', fontText !== undefined && fontText.placeholder === '留空 = 跟随主题', String(fontText?.placeholder))
+  check('选择器带出当前值（出厂默认）', riverPicker?.value === defaultRiver, String(riverPicker?.value))
+  check('字体族默认为空（= 跟随主题）', fontText?.value === '', JSON.stringify(fontText?.value))
+
+  // ---- 改路径颜色：只影响**之后**新画的对象 ----
+  await riverPicker.pick('#ff0000')
+  check('路径颜色写进了设置', plugin.getSettings().pathColors.river === '#ff0000', JSON.stringify(plugin.getSettings().pathColors))
+  const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
+  check(
+    '路径颜色已落盘（真实 JSON 往返，不是只存在内存里）',
+    persisted()?.pathColors?.river === '#ff0000',
+    JSON.stringify(persisted()?.pathColors),
+  )
+  const afterPath = drawPath(-500, 300)
+  check('新画的路径用了新颜色', afterPath.color === '#ff0000', String(afterPath.color))
+  check(
+    '已经画好的路径不受设置影响（颜色存在地图文件里）',
+    doc().paths[0].color === beforePath.color && doc().paths[0].color === defaultRiver,
+    `第一条 ${doc().paths[0].color} · 第二条 ${afterPath.color}`,
+  )
+
+  // ---- 工具条色块跟随设置，且**不重建 DOM** ----
+  const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
+  const riverButtonBefore = collectByClass(toolbarEl, 'fc-toolbar-path').find((button) => button.title === '河流')
+  const swatchBefore = collectByClass(riverButtonBefore, 'fc-toolbar-swatch')[0]
+  check('工具条上的色块已变成新颜色', swatchBefore?.style.backgroundColor === '#ff0000', String(swatchBefore?.style.backgroundColor))
+  check('色块刷新是原地改样式，没有重建按钮', collectByClass(toolbarEl, 'fc-toolbar-path').find((button) => button.title === '河流') === riverButtonBefore)
+
+  // ---- 区域颜色：按下标选色 ----
+  await regionPicker.pick('#123456')
+  editor.setRegionPresetIndex(2)
+  check('区域预设按下标取色，改设置后新区域立刻用新色', editor.regionColor === '#123456', editor.regionColor)
+  const region = drawRegion(-500, 700)
+  check('新画的区域用了新颜色', region.color === '#123456', String(region.color))
+  check('区域透明度仍是出厂默认（颜色设置不该改别的字段）', region.opacity === 0.22, String(region.opacity))
+
+  // ---- 名称字体族：必须真的出现在 ctx.font 里，且不能带 var() ----
+  await fontText.type('Noto Serif SC, serif')
+  const run = (() => {
+    editor.setMode('paint')
+    editor.setTool('region')
+    clickAt({ x: -600, y: -600 })
+    clickAt({ x: -200, y: -600 })
+    clickAt({ x: -200, y: -300 })
+    clickAt({ x: -200, y: -300 })
+    flushFrames()
+    prompts[prompts.length - 1].onSubmit('字体样本')
+    flushFrames()
+    return drawnRuns(frame()).find((item) => item.text === '字体样本')
+  })()
+  check('名称真的用上了设置的字体族', typeof run?.font === 'string' && run.font.includes('Noto Serif SC'), String(run?.font))
+  check('字体串里没有 var()（否则整条声明会被静默忽略）', typeof run?.font === 'string' && !run.font.includes('var('), String(run?.font))
+  check('字号仍然只有一个 px（没被拼成两条简写）', (String(run?.font).match(/\d+px/g) ?? []).length === 1, String(run?.font))
+
+  // ---- 非法输入必须被挡在绘制层之外 ----
+  await fontText.type('600 24px sans-serif')
+  check('整条 font 简写被拒绝（会被收敛成空 = 跟随主题）', plugin.getSettings().labelFontFamily === '', JSON.stringify(plugin.getSettings().labelFontFamily))
+  const fallbackRun = (() => {
+    editor.setMode('paint')
+    editor.setTool('region')
+    clickAt({ x: 600, y: -600 })
+    clickAt({ x: 1000, y: -600 })
+    clickAt({ x: 1000, y: -300 })
+    clickAt({ x: 1000, y: -300 })
+    flushFrames()
+    prompts[prompts.length - 1].onSubmit('回退样本')
+    flushFrames()
+    return drawnRuns(frame()).find((item) => item.text === '回退样本')
+  })()
+  check(
+    '非法字体没有漏进 ctx.font',
+    typeof fallbackRun?.font === 'string' && !fallbackRun.font.includes('600 24px'),
+    String(fallbackRun?.font),
+  )
+
+  // 注意：颜色选择器的 onChange 不重新渲染设置页，所以上面拿到的控件还都是活的
+  await riverPicker.pick('var(--text-normal)')
+  check(
+    '非法颜色被挡下并回退到出厂色（canvas 会静默忽略非法色）',
+    plugin.getSettings().pathColors.river === defaultRiver,
+    String(plugin.getSettings().pathColors.river),
+  )
+
+  // ---- 恢复默认 ----
+  await buttonNamed('恢复出厂样式').click()
+  const restored = plugin.getSettings()
+  check(
+    '「恢复默认」把颜色与字体都还原',
+    restored.pathColors.river === defaultRiver && restored.labelFontFamily === '' && restored.regionColors[2] === '#a882ff',
+    JSON.stringify({ river: restored.pathColors.river, font: restored.labelFontFamily, region2: restored.regionColors[2] }),
+  )
+  check('未改动的键没有被写进设置（normalize 会过滤未知键）', !('extra' in restored.pathColors))
 
   plugin.onunload()
 }

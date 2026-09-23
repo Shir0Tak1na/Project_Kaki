@@ -155,7 +155,14 @@ region: 北境王国            # 可选，用于分组
 |---|---|---|
 | 路径与区域名称的字号 | 1× | 名称随缩放变大但有不小于下限的实际字号；这里整体缩放，右侧直接显示换算后的 CSS 字号 |
 | 显示六边形网格 | 开 | 关闭后地形照常绘制，只是不画网格线 |
+| 路径颜色（4 种） | 出厂色 | 河流 / 道路 / 贸易路线 / 边界各自的默认颜色 |
+| 区域颜色（6 个预设） | 出厂色 | 工具条上那一排色块，按顺序对应 |
+| 名称字体族 | 跟随主题 | 可写字体列表（如 `Noto Serif SC, serif`）；只接受字体族，整条 CSS font 简写会被拒绝 |
+| 恢复出厂样式 | — | 一键把颜色与字体还原 |
 | 开发者模式 | 关 | 打开后才出现两个诊断用探针命令 |
+
+> **颜色只影响新画的对象。** 路径与区域把自己的颜色存在地图文件里（`path.color` / `region.color`），
+> 所以改设置**不会**悄悄改掉你已经画好的地图 —— 想统一改色请重画，或直接编辑文件里的 `color` 字段。
 
 ## 数据与文件
 
@@ -219,8 +226,8 @@ canvases:
 ```bash
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
-node --test --test-isolation=none                 # 176 个单元测试
-node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，22 个场景 / 401 条断言
+node --test --test-isolation=none                 # 184 个单元测试
+node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，23 个场景 / 423 条断言
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```
 

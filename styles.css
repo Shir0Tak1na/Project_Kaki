@@ -238,6 +238,16 @@
   font-size: var(--font-ui-smaller);
 }
 
+/* 设置页里的一段说明（例如"这些颜色只影响新画的对象"） */
+.fc-settings-note {
+  margin: -4px 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 /* 侧边栏很窄：整个面板用紧凑的单行按钮，描述走悬停提示 */
 .fc-panel-root {
   padding: 8px 10px 14px;

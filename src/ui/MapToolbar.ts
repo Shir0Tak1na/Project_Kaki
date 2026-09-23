@@ -14,13 +14,14 @@ import type { EditorStatus, EditorTool, MapEditor } from '../editor/MapEditor.ts
 import type { GeometryMode } from '../core/hexEdges.ts'
 import { listTerrainStyles } from '../render/terrainStyle.ts'
 import { lucideIconFor } from '../render/markerPlacement.ts'
-import { REGION_PRESETS, getPathStyle } from '../render/shapeStyle.ts'
+import { REGION_PRESETS } from '../render/shapeStyle.ts'
+import { defaultPathColors, defaultRegionColors, resolvePathStyle, type PathColorMap } from '../render/stylePalette.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
 
-/** 路径类型按固定顺序展示（与 PATH_TYPES 一致） */
-function listPathStyles(): Array<{ type: PathType; label: string; color: string }> {
+/** 路径类型按固定顺序展示（与 PATH_TYPES 一致）；颜色来自当前调色板 */
+function listPathStyles(colors: PathColorMap): Array<{ type: PathType; label: string; color: string }> {
   return PATH_TYPES.map((type) => {
-    const style = getPathStyle(type)
+    const style = resolvePathStyle(type, colors)
     return { type, label: style.label, color: style.color }
   })
 }
@@ -32,6 +33,14 @@ export interface MapToolbarOptions {
   onUndo: () => void
   onRedo: () => void
   onToggleLayer?: () => void
+  /**
+   * 当前样式调色板（来自插件设置）。
+   *
+   * 工具条**不缓存**颜色：点亮色块时按下标去调色板里现取，
+   * `refresh()` 时也重新读一遍色块颜色 —— 于是设置里改完颜色，工具条立刻跟上，
+   * 又不需要重建 DOM（侧边栏那次"每帧重建"的教训）。
+   */
+  getPalette?: () => { pathColors: PathColorMap; regionColors: string[] }
 }
 
 const TOOL_LABELS: Record<EditorTool, { label: string; hint: string }> = {
@@ -70,7 +79,10 @@ export class MapToolbar {
   private readonly terrainButtons = new Map<TerrainType, HTMLButtonElement>()
   private readonly iconButtons = new Map<MarkerIcon, HTMLButtonElement>()
   private readonly pathButtons = new Map<PathType, HTMLButtonElement>()
-  private readonly regionButtons = new Map<string, HTMLButtonElement>()
+  private readonly regionButtons = new Map<number, HTMLButtonElement>()
+  /** 色块元素：设置里改了颜色后，刷新时原地改背景色（不重建 DOM） */
+  private readonly pathSwatches = new Map<PathType, HTMLElement>()
+  private readonly regionSwatches = new Map<number, HTMLElement>()
   private readonly geometryButtons = new Map<GeometryMode, HTMLButtonElement>()
   private readonly terrainGroup: HTMLElement
   private readonly iconGroup: HTMLElement
@@ -171,7 +183,7 @@ export class MapToolbar {
     // 路径类型（仅路径工具下显示）
     this.pathGroup = doc.createElement('div')
     this.pathGroup.className = 'fc-toolbar-group fc-toolbar-path-group'
-    for (const style of listPathStyles()) {
+    for (const style of listPathStyles(this.palette().pathColors)) {
       const button = doc.createElement('button')
       button.className = 'fc-toolbar-button fc-toolbar-path'
       button.title = style.label
@@ -187,6 +199,7 @@ export class MapToolbar {
         this.refresh()
       })
       this.pathButtons.set(style.type, button)
+      this.pathSwatches.set(style.type, swatch)
       this.pathGroup.appendChild(button)
     }
     this.root.appendChild(this.pathGroup)
@@ -208,10 +221,10 @@ export class MapToolbar {
     }
     this.root.appendChild(this.geometryGroup)
 
-    // 区域颜色（仅区域工具下显示）
+    // 区域颜色（仅区域工具下显示）：按下标建按钮，颜色在点击/刷新时现取
     this.regionGroup = doc.createElement('div')
     this.regionGroup.className = 'fc-toolbar-group fc-toolbar-region-group'
-    for (const preset of REGION_PRESETS) {
+    REGION_PRESETS.forEach((preset, index) => {
       const button = doc.createElement('button')
       button.className = 'fc-toolbar-button fc-toolbar-region'
       button.title = preset.label
@@ -220,12 +233,13 @@ export class MapToolbar {
       swatch.style.backgroundColor = preset.color
       button.appendChild(swatch)
       button.addEventListener('click', () => {
-        options.editor.setRegionColor(preset.color)
+        options.editor.setRegionPresetIndex(index)
         this.refresh()
       })
-      this.regionButtons.set(preset.color, button)
+      this.regionButtons.set(index, button)
+      this.regionSwatches.set(index, swatch)
       this.regionGroup.appendChild(button)
-    }
+    })
     this.root.appendChild(this.regionGroup)
 
     // 笔刷大小（仅笔刷工具下显示）
@@ -300,6 +314,11 @@ export class MapToolbar {
     return this.root
   }
 
+  /** 当前调色板（缺省即出厂默认） */
+  private palette(): { pathColors: PathColorMap; regionColors: string[] } {
+    return this.options.getPalette?.() ?? { pathColors: defaultPathColors(), regionColors: defaultRegionColors() }
+  }
+
   /** 按编辑器当前状态刷新按钮文案与可用性 */
   refresh(): void {
     const status: EditorStatus = this.options.editor.getStatus()
@@ -332,7 +351,22 @@ export class MapToolbar {
     for (const [mode, button] of this.geometryButtons) button.classList.toggle('is-active', mode === status.geometryMode)
 
     for (const [type, button] of this.pathButtons) button.classList.toggle('is-active', type === status.pathType)
-    for (const [color, button] of this.regionButtons) button.classList.toggle('is-active', color === status.regionColor)
+    // 区域色块：按下标比对（设置里换了颜色也能正确高亮），并顺带把色块更新到最新设置
+    const palette = this.palette()
+    for (const [index, button] of this.regionButtons) {
+      const color = palette.regionColors[index]
+      const swatch = this.regionSwatches.get(index)
+      if (swatch && typeof color === 'string' && color.length > 0 && swatch.style.backgroundColor !== color) {
+        swatch.style.backgroundColor = color
+      }
+      button.classList.toggle('is-active', typeof color === 'string' && color === status.regionColor)
+    }
+    for (const [type, swatch] of this.pathSwatches) {
+      const color = palette.pathColors[type]
+      if (typeof color === 'string' && color.length > 0 && swatch.style.backgroundColor !== color) {
+        swatch.style.backgroundColor = color
+      }
+    }
 
     this.brushLabel.textContent = `${status.brushRadius}`
     this.nameButton.classList.toggle('is-active', status.showShapeLabels)

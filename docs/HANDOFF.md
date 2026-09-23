@@ -18,8 +18,8 @@
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
-- 单元测试：176 个通过
-- 冒烟测试：22 个场景、401 条断言全部通过
+- 单元测试：184 个通过
+- 冒烟测试：23 个场景、423 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - 最近验证命令（**在本沙箱里 `npm run <script>` 可能报 `spawn EPERM`，直接跑 `node ...` 最稳**）：
 
@@ -114,29 +114,29 @@ node scripts/deploy.mjs
 
 - 路径与区域名称字号倍率：`0.5`-`3.0`。
 - 六边形网格显示/隐藏。
-- 工具条内置地形、路径类型、区域颜色、标记图标选择。
+- **样式设置**（① 已完成）：4 种路径的默认颜色、6 个区域预设色、名称字体族（`''` = 跟随主题）、
+  「恢复出厂样式」。语义是"只影响新画的对象"，见 `ENGINEERING-NOTES.md` §5.10。
+  实现：`src/render/stylePalette.ts`（纯函数：颜色/字体校验 + 解析）、设置页颜色选择器与输入框、
+  `MapLayerManager.setStylePalette()` 广播刷新。
+- 工具条内置地形、路径类型、区域颜色、标记图标选择（色块跟随设置，刷新时原地改样式、不重建 DOM）。
 - 名称显示/隐藏按钮。
 - 地图层停用按钮。
 
 尚未有：
 
-- 用户自定义字体族选择。
-- 路径颜色编辑器。
-- 区域颜色编辑器。
-- 自定义地形图标、图块、纹理和变体。
-- 地形图例。
-- 地形/路径/区域/标记分层开关。
-- PNG 导出。
+- 自定义地形图标、图块、纹理和变体（②）。
+- 地形图例（③）。
+- 地形/路径/区域/标记分层开关（③）。
+- PNG 导出（④）。
 - 移动端和触控笔交互。
+- 「把样式设置应用到已有对象」的一键重着色（需要一个新的可撤销 op；当前只影响新对象）。
 
 ## 下一步建议
 
 建议按以下顺序继续，不要同时改动多个大范围 UI：
 
-1. **先完善设置和样式模型**
-   - 在 `CartographerSettings` 增加可持久化的路径颜色、区域颜色和字体设置；
-   - 将设置通过 `MapLayerManager` 传入 `MapOverlay` / `shapeDraw`；
-   - 先只支持合法 CSS 颜色和主题字体族，保留当前默认值作为回退；
+1. ✅ **已完成：设置和样式模型**（路径/区域颜色、字体族，见上「当前设置与 UI 边界」）
+   - 遗留：把样式设置"应用到已有对象"需要一个新的可撤销 op，目前刻意不做。
    - 为每个设置增加纯函数归一化测试和冒烟设置页断言。
 2. **再做图形资源配置**
    - 先定义稳定的自定义地形 ID，不要直接用显示名称作为存储 ID；
@@ -156,7 +156,8 @@ node scripts/deploy.mjs
 - [docs/ENGINEERING-NOTES.md](./ENGINEERING-NOTES.md)：工程笔记（踩过的坑、测试策略、未验证项）。
 - [src/main.ts](../src/main.ts)：命令注册、设置加载、插件入口。
 - [src/ui/MapPanel.ts](../src/ui/MapPanel.ts)：侧边栏地图面板（状态签名 + 逐帧合并，避免侧栏发卡）。
-- [src/ui/SettingsTab.ts](../src/ui/SettingsTab.ts)：字号、网格与开发者模式设置。
+- [src/ui/SettingsTab.ts](../src/ui/SettingsTab.ts)：设置项与界面（字号、网格、样式、开发者模式）。
+- [src/render/stylePalette.ts](../src/render/stylePalette.ts)：颜色/字体校验与样式解析（纯函数，有单测）。
 - [src/ui/MapToolbar.ts](../src/ui/MapToolbar.ts)：Canvas 工具条和地图层停用按钮。
 - [src/editor/MapInteraction.ts](../src/editor/MapInteraction.ts)：捕获阶段事件和原生 UI 排除。
 - [src/render/MapLayerManager.ts](../src/render/MapLayerManager.ts)：地图层生命周期和设置传递。
@@ -179,6 +180,6 @@ node scripts/deploy.mjs
 - 插件 ID 是 `project-kaki`；**不要**再改它（改了要同步 `manifest.json` + `scripts/deploy.mjs` + `scripts/smoke.mjs` 里的字面量，
   并给用户做目录与启用项迁移）。同理不要改那三个写在用户文件里的持久化标识，见本文开头的警告。
 - 每次修改 UI 后都要跑 `npm run build`、`npm test`、`node scripts/smoke.mjs`，并部署到测试库后给用户可判伪的手动验证清单。
-- 文档中的测试数量必须和实际输出同步。当前基线是 `176 / 401`（单元测试 / 冒烟断言），
+- 文档中的测试数量必须和实际输出同步。当前基线是 `184 / 423`（单元测试 / 冒烟断言），
   两者都能自己数出来：`node --test --test-isolation=none` 的末行、`node scripts/smoke.mjs` 的末行。
 - 加新功能时**同时加冒烟场景**：桩没模拟到的真实行为，就是下一次用户报的 bug。

@@ -29,7 +29,18 @@ import { cellsAlongSegment } from './brushPath.ts'
 import { History, applyOp, opsFromPrevious, type MapOp } from './history.ts'
 import { nextLabelId, nextMarkerId, snapToCellCenter } from '../render/markerPlacement.ts'
 import { hitTestPolygon, hitTestPolyline, visiblePolyline } from '../render/shapeGeometry.ts'
-import { DEFAULT_REGION_BORDER_WIDTH, DEFAULT_REGION_OPACITY, defaultRegionColor, getPathStyle } from '../render/shapeStyle.ts'
+import {
+  DEFAULT_REGION_BORDER_WIDTH,
+  DEFAULT_REGION_OPACITY,
+} from '../render/shapeStyle.ts'
+import {
+  defaultPathColors,
+  defaultRegionColors,
+  normalizeColor,
+  resolveDefaultRegionColor,
+  resolvePathStyle,
+  type StylePalette,
+} from '../render/stylePalette.ts'
 
 /** 路径/区域 id：与标记共用"避开已用 id"的策略 */
 function nextShapeId(document_: MapDocument, prefix: string): string {
@@ -89,6 +100,14 @@ export interface MapEditorOptions {
   onSaveRequested?: () => void
   /** 模式/地形/历史等状态变化（刷新工具栏） */
   onStateChanged?: () => void
+  /**
+   * 当前生效的样式调色板（来自插件设置）。
+   *
+   * 语义边界：调色板只决定**新画的对象**的颜色；已经画好的对象把颜色存在地图文件里，
+   * 渲染时用文件里的值 —— 所以改设置不会悄悄改掉用户已有的地图。
+   * 缺省时退回出厂样式（单元测试/无设置上下文时也能构造编辑器）。
+   */
+  getPalette?: () => StylePalette
   historyLimit?: number
 }
 
@@ -122,7 +141,13 @@ export class MapEditor {
   terrainType: TerrainType = 'forest'
   markerIcon: MarkerIcon = 'town'
   pathType: PathType = 'river'
-  regionColor: string = defaultRegionColor()
+  /**
+   * 区域预设色下标（工具栏上点第几个色块）。
+   *
+   * 存下标而不是颜色：设置里改了调色板之后，**新画的区域会自动用新颜色**，
+   * 不会留着一个已经过期的旧色值。已画好的区域仍然用文件里存的颜色。
+   */
+  regionPresetIndex = 0
   brushRadius = 0
   /**
    * 路径与区域的几何模式（用户要的"两种模式"）：
@@ -193,9 +218,33 @@ export class MapEditor {
     this.options.onStateChanged?.()
   }
 
+  /** 当前调色板（缺省即出厂默认，见 `MapEditorOptions.getPalette`） */
+  getPalette(): StylePalette {
+    return this.options.getPalette?.() ?? { pathColors: defaultPathColors(), regionColors: defaultRegionColors(), fontFamily: '' }
+  }
+
+  /** 当前区域颜色：由预设下标 → 调色板解析出来（所以改设置后新区域立刻用新色） */
+  get regionColor(): string {
+    const list = this.getPalette().regionColors
+    return normalizeColor(list[this.regionPresetIndex], resolveDefaultRegionColor(list))
+  }
+
   setRegionColor(color: string): void {
-    if (this.regionColor === color) return
-    this.regionColor = color
+    const palette = this.getPalette()
+    const index = palette.regionColors.findIndex((item) => normalizeColor(item, '') === normalizeColor(color, ''))
+    // 认不出来（例如颜色来自旧设置）就退回第一个预设，而不是把任意颜色塞进状态
+    const next = index >= 0 ? index : 0
+    if (this.regionPresetIndex === next) return
+    this.regionPresetIndex = next
+    this.options.onStateChanged?.()
+  }
+
+  /** 直接按下标选区域色（工具栏用；下标会被夹取到合法范围） */
+  setRegionPresetIndex(index: number): void {
+    const palette = this.getPalette()
+    const clamped = Math.min(Math.max(0, Math.trunc(index)), Math.max(0, palette.regionColors.length - 1))
+    if (this.regionPresetIndex === clamped) return
+    this.regionPresetIndex = clamped
     this.options.onStateChanged?.()
   }
 
@@ -405,7 +454,7 @@ export class MapEditor {
    */
   beginDraft(kind: 'path' | 'region', world: Point): void {
     if (this.mode !== 'paint') return
-    const style = getPathStyle(this.pathType)
+    const style = resolvePathStyle(this.pathType, this.getPalette().pathColors)
     // 沿格边模式下，落点先吸附到最近的网格顶点
     const start = this.snapDraftPoint(world)
     this.draft = {
@@ -541,7 +590,7 @@ export class MapEditor {
 
   private buildPathFrom(points: Point[]): MapOp {
     const document_ = this.options.getDocument()!
-    const style = getPathStyle(this.pathType)
+    const style = resolvePathStyle(this.pathType, this.getPalette().pathColors)
     // 沿格边模式：顶点之间也要沿格边走（否则远处两点之间仍是一条斜穿格子的直线）
     const geometry = this.commitGeometry(points, false)
     const path: MapPath = {

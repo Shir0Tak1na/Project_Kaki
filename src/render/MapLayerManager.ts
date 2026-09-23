@@ -17,6 +17,7 @@ import { TextPromptModal, type TextPromptOptions } from '../ui/TextPromptModal.t
 import { MapToolbar } from '../ui/MapToolbar.ts'
 import { MapOverlay, type OverlayStats } from './MapOverlay.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
+import { defaultStylePalette, type StylePalette } from './stylePalette.ts'
 
 export interface LayerStatus {
   canvasPath: string
@@ -43,6 +44,13 @@ export interface MapLayerManagerDeps {
   /** 名称字号倍率（用户设置；1 = 默认） */
   getLabelScale?: () => number
   getShowGrid?: () => boolean
+  /**
+   * 样式调色板（路径颜色 / 区域颜色 / 名称字体族），来自插件设置。
+   *
+   * 传函数而不是值：地图层的存活时间远长于设置页，取值必须"每次现读"，
+   * 否则用户改完设置要重开画布才生效。
+   */
+  getStylePalette?: () => StylePalette
   onToggleLayer?: (canvasPath: string) => void
 }
 
@@ -291,6 +299,8 @@ export class MapLayerManager {
       getShowShapeLabels: () => this.entries.get(canvasPath)?.editor.showShapeLabels ?? true,
       // 名称字号倍率：来自插件设置
       getLabelScale: () => this.deps.getLabelScale?.() ?? 1,
+      // 名称字体族：来自插件设置（空串 = 跟随主题）
+      getLabelFontFamily: () => this.deps.getStylePalette?.().fontFamily ?? '',
       onOpenLink: (link) => this.openNote(link, mapPath),
       onDeleteMarker: (placement) => this.deletePlacement(canvasPath, placement),
       // 拖动移动：客户端坐标 → 世界坐标的换算只在这里做（标记层不认识画布内部坐标系）
@@ -320,6 +330,8 @@ export class MapLayerManager {
       getDocument: () => this.entries.get(canvasPath)?.document ?? null,
       onChanged: () => overlay.requestRedraw(),
       onSaveRequested: () => this.scheduleSave(canvasPath),
+      // 新画的路径/区域取当前调色板里的颜色；已画好的对象用文件里存的颜色，不受设置影响
+      getPalette: () => this.deps.getStylePalette?.() ?? defaultStylePalette(),
       onStateChanged: () => {
         // 单一收口点：任何模式/工具变化都会经过这里，
         // 因此标记层的交互开关放在这里最稳（不依赖调用方是否走了交互层）
@@ -388,6 +400,10 @@ export class MapLayerManager {
       try {
         toolbar = new MapToolbar(toolbarHost, {
           editor,
+          getPalette: () => {
+            const palette = this.deps.getStylePalette?.() ?? defaultStylePalette()
+            return { pathColors: palette.pathColors, regionColors: palette.regionColors }
+          },
           onModeChanged: (mode) => interaction.notifyModeChanged(mode),
           onToggleLayer: () => this.disable(canvasPath),
           onUndo: () => {
@@ -444,6 +460,19 @@ export class MapLayerManager {
 
   setShowGrid(showGrid: boolean): void {
     for (const entry of this.entries.values()) entry.overlay.setShowGrid(showGrid)
+  }
+
+  /**
+   * 设置里改了样式（路径颜色/区域颜色/字体）之后调用：让所有已挂载的地图跟上。
+   *
+   * 颜色与字体都是**每帧现读**的（见各处 `getStylePalette`），所以这里不需要传值，
+   * 只需要：① 让工具条的色块与高亮刷新一次；② 请求重绘（字体变了，名称要重排）。
+   */
+  setStylePalette(): void {
+    for (const entry of this.entries.values()) {
+      entry.toolbar?.refresh()
+      entry.overlay.requestRedraw()
+    }
   }
 
   disableAll(): void {

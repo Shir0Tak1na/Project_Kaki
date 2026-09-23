@@ -86,6 +86,13 @@ export interface MapOverlayOptions {
   getShowShapeLabels?: () => boolean
   /** 名称字号倍率（用户设置；1 = 默认） */
   getLabelScale?: () => number
+  /**
+   * 名称字体族（用户设置）。
+   *
+   * 返回 `''` 表示"跟随主题"（这时才去读 getComputedStyle）。
+   * 设置层已经保证这里不会出现 `var()`：那种串会让整条 `ctx.font` 失效、字号静默退回默认值。
+   */
+  getLabelFontFamily?: () => string
 }
 
 function asElement(value: unknown): HTMLElement | null {
@@ -391,6 +398,12 @@ export class MapOverlay {
    * 主题字体只能这样取：算好具体的字体列表，再交给画布。
    */
   private resolveFontFamily(): string {
+    // 用户在设置里指定了字体族就用它（已经在设置层清洗过：含 var()/斜杠等一律被收敛成空串）。
+    // 注意这里**不能**回头去读 getComputedStyle：设置的字体可能并未加载，
+    // 读回来的是"解析后的列表"，看起来更"安全"，但会让用户设置的字体悄悄失效。
+    const configured = this.options.getLabelFontFamily?.() ?? ''
+    if (configured.trim().length > 0 && !configured.includes('var(')) return configured
+
     const target = this.container ?? this.canvas
     if (!target) return 'sans-serif'
     try {
