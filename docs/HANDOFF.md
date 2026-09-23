@@ -15,6 +15,7 @@
 - 工作区：`E:\ObsidianPulgins\fictional-cartographer`（**目录名仍是历史名，未改**；插件 ID 才是 `project-kaki`）
 - 默认测试库：`E:\ObsidianPulgins\test-vault`（插件目录为 `plugins\project-kaki`）
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
+- 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
 - 单元测试：176 个通过
 - 冒烟测试：22 个场景、401 条断言全部通过
@@ -163,6 +164,12 @@ node scripts/deploy.mjs
 
 ## 交接时必须注意
 
+- **提交前必须跑完 构建 → 类型检查 → 单测 → 冒烟**（四条命令见上）。冒烟加载的是打包产物，
+  不重新构建就会拿旧产物跑测试。
+- **不要把 `main.js` / `.build/` / `.npmrc` / `node_modules/` 提交进仓库**：前两者是构建产物（能重建），
+  `.npmrc` 里写着本机绝对路径。`.gitignore` 已经挡住它们，别用 `git add -f` 绕过。
+- **不要 `git push --force`**：远端 `main` 上有 GitHub 生成的 `LICENSE`（Apache-2.0），强推会删掉它。
+  本地第一个提交是与远端 `Initial commit` 合并后的结果（README 以本地为准）。
 - 不要把工具条重新挂到覆盖层上。覆盖层必须保持 `pointer-events: none`，否则会破坏原生 Canvas 命中测试。
 - 不要删除 `getUiExclusions()` 的原生控件选择器。绘制模式下缩放按钮和卡片菜单必须可用。
 - 不要把 `package.json` 部署到 Obsidian 插件目录。

@@ -50,12 +50,35 @@ node scripts/deploy.mjs                           # 部署到 test-vault
 （`check` = 构建 → 测试 → 冒烟 → 部署）。**但在本沙箱里 `npm run <script>` 可能报 `spawn EPERM`**，
 直接跑 `node ...` 最稳。
 
+### 版本管理（GitHub：`Shir0Tak1na/Project_Kaki`，Apache-2.0）
+
+远端仓库已接好（`origin`，分支 `main`）。提交前请按顺序跑完 **构建 → 类型检查 → 单测 → 冒烟**，
+再提交；`.gitignore` 已排除 `node_modules/`、`.build/`、`main.js`、`.npmrc` 等（见下）。
+
+```powershell
+node scripts/build.mjs
+node node_modules/typescript/bin/tsc --noEmit
+node --test --test-isolation=none
+node scripts/smoke.mjs
+git add -A ; git commit -m "..." ; git push
+```
+
+两条注意事项：
+
+- **`main.js` 是构建产物，不入库**（社区插件的惯例：发布时把它作为 Release 附件）。
+  所以 clone 之后要装进 `.obsidian/plugins/` 得先构建。想让仓库直接可用，就把 `.gitignore`
+  里的 `main.js` 那行删掉并提交它。
+- **不要 `git push --force`**：远端 `main` 上有 GitHub 生成的 `LICENSE`（Apache-2.0），
+  强推会把它删掉。本地历史是"合并远端初始提交"的结果，正常 `push` 即可。
+- 本机 git 曾在 `E:\ObsidianPulgins` 上报 `dubious ownership`（目录属主是 Administrators），
+  修法是把该路径加进 `safe.directory`（已加）：`git config --global --add safe.directory E:/ObsidianPulgins/fictional-cartographer`。
+
 ### ⚠️ 本沙箱环境的限制（违反会得到莫名的 `Access is denied` / `EPERM`）
 
 | 现象 | 原因 | 做法 |
 |---|---|---|
 | 命令输出为空 / `Access is denied` | 把子进程输出接进管道会被拒绝 | **不要用 `\|`、`>`、`2>&1`**；想要留档就让脚本自己写文件 |
-| `npm install` 报 `EPERM ... npm-cache` | npm 缓存在工作区之外 | 已在 `.npmrc` 指向工作区内的 `.npm-cache/`，不要改回去 |
+| `npm install` 报 `EPERM ... npm-cache` | npm 缓存在工作区之外 | 已在 `.npmrc` 指向工作区内的 `.npm-cache/`，不要改回去（该文件含本机绝对路径，已被 git 忽略） |
 | `npm install` 报 `spawn EPERM` | 生命周期脚本要 spawn 子进程 | 一律加 `--ignore-scripts` |
 | `node --test` 报 `spawn EPERM` | 测试运行器默认每个文件起子进程 | 加 `--test-isolation=none` |
 
