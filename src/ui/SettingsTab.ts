@@ -16,128 +16,42 @@
 
 import { PluginSettingTab, Setting, type App } from 'obsidian'
 import type ProjectKakiPlugin from '../main.ts'
-import { PATH_TYPES, type PathType } from '../data/mapDocument.ts'
+import { PATH_TYPES } from '../data/mapDocument.ts'
 import { PATH_STYLES, REGION_PRESETS } from '../render/shapeStyle.ts'
 import {
   CUSTOM_TERRAIN_PREFIX,
   DEFAULT_CUSTOM_TERRAIN_COLOR,
   MAX_CUSTOM_TERRAINS,
   checkTerrainImagePath,
-  normalizeCustomTerrains,
   terrainIdProblem,
-  type CustomTerrain,
 } from '../render/terrainCatalog.ts'
 import { listTerrainStyles } from '../render/terrainStyle.ts'
-import {
-  DEFAULT_LAYER_VISIBILITY,
-  LAYER_KEYS,
-  LAYER_LABELS,
-  isLayerVisible,
-  layerVisibilityFromLegacy,
-  type LayerKey,
-  type LayerVisibility,
-} from '../render/layerVisibility.ts'
-import {
-  defaultPathColors,
-  defaultRegionColors,
-  isDefaultPathColors,
-  isDefaultRegionColors,
-  normalizeColor,
-  normalizeFontFamily,
-  normalizePathColors,
-  normalizeRegionColors,
-  type PathColorMap,
-  type StylePalette,
-} from '../render/stylePalette.ts'
-
-export interface CartographerSettings {
-  /** 名称字号倍率（1 = 默认）。范围 0.5–3.0，步长 0.1。 */
-  labelScale: number
-  /**
-   * 开发者模式：打开后才会出现开发用探针命令（诊断 Canvas / 监视视口变化）。
-   * 关着时这些命令会从命令面板里**隐藏**，避免误触。
-   */
-  developerMode: boolean
-  /** 每种路径类型的默认颜色（新画的路径用它） */
-  pathColors: PathColorMap
-  /** 区域预设色（新画的区域用它） */
-  regionColors: string[]
-  /** 名称字体族；`''` = 跟随主题 */
-  labelFontFamily: string
-  /**
-   * 用户自定义地形（内置 9 种之外的）。
-   *
-   * 这里的 `id`（形如 `custom:swamp2`）就是写进地图文件的 `terrain.<格键>.t` 的值，
-   * 与显示名完全解耦：改显示名不影响已存数据，删掉定义也不会删掉地图上的格子
-   * （它们会退化成回退视觉，数据仍在文件里）。
-   */
-  customTerrains: CustomTerrain[]
-  /**
-   * 图层可见性（地形 / 网格 / 区域 / 路径 / 标记 / 名称）。
-   *
-   * 为什么放在设置里而不是写进地图文件：图层是"我现在想看到什么"，
-   * 地图文件描述的是"世界上有什么"。把显示偏好写进数据，
-   * 等于换个看法就改了用户的地图，还会污染 Git diff。
-   */
-  layers: LayerVisibility
-  /** 是否显示画布上的图例（默认关：图例是"要看的时候才看"的东西） */
-  showLegend: boolean
-}
-
-export const DEFAULT_SETTINGS: CartographerSettings = {
-  labelScale: 1,
-  developerMode: false,
-  pathColors: defaultPathColors(),
-  regionColors: defaultRegionColors(),
-  labelFontFamily: '',
-  customTerrains: [],
-  layers: DEFAULT_LAYER_VISIBILITY,
-  showLegend: false,
-}
-
-export const LABEL_SCALE_MIN = 0.5
-export const LABEL_SCALE_MAX = 3
-export const LABEL_SCALE_STEP = 0.1
-
-/** 把任意输入收敛成合法倍率（数据文件可能被手工改坏） */
-export function normalizeLabelScale(value: unknown): number {
-  const numeric = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(numeric)) return DEFAULT_SETTINGS.labelScale
-  return Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, Math.round(numeric * 10) / 10))
-}
+import { LAYER_KEYS, LAYER_LABELS, isLayerVisible, type LayerKey } from '../render/layerVisibility.ts'
+import { isDefaultPathColors, isDefaultRegionColors } from '../render/stylePalette.ts'
 
 /**
- * 把任意输入收敛成一份完整设置。
+ * 数据模型在 `settingsModel.ts`（纯函数、不 import obsidian，因此可单测）。
  *
- * **所有入口都走这里**（`loadData` 的结果、测试注入的对象），
- * 于是"data.json 被手工改坏"只会在一个地方被处理掉，而不是散落成一堆 `??` 兜底。
+ * 这里**转出**同名符号，是为了让既有调用点（`main.ts` 等）一行都不用改；
+ * 同时把界面真正用到的几个常量 import 进来（转出不会让它们进入本文件作用域）。
  */
-export function normalizeSettings(raw: unknown): CartographerSettings {
-  const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
-  return {
-    labelScale: normalizeLabelScale(source.labelScale),
-    developerMode: source.developerMode === true,
-    pathColors: normalizePathColors(source.pathColors),
-    regionColors: normalizeRegionColors(source.regionColors),
-    labelFontFamily: normalizeFontFamily(source.labelFontFamily),
-    // 自定义地形逐条独立校验：data.json 被手工改坏时只丢坏的那一条，其余照常可用
-    customTerrains: normalizeCustomTerrains(source.customTerrains),
-    // 图层：**只有这一份状态**（网格也在里面，不再有并列的 showGrid 字段）。
-    // `source.showGrid` 只作为**迁移输入**读一次：早期只有这一个开关，
-    // 老用户把它关掉过的话必须变成"隐藏网格"，不能因为换代就把他的选择丢掉。
-    layers: layerVisibilityFromLegacy({ showGrid: source.showGrid, layers: source.layers }),
-    showLegend: source.showLegend === true,
-  }
-}
+import {
+  LABEL_SCALE_MAX,
+  LABEL_SCALE_MIN,
+  LABEL_SCALE_STEP,
+  type CartographerSettings,
+} from './settingsModel.ts'
 
-/** 设置 → 绘制层消费的调色板 */
-export function paletteOf(settings: CartographerSettings): StylePalette {
-  return {
-    pathColors: settings.pathColors,
-    regionColors: settings.regionColors,
-    fontFamily: settings.labelFontFamily,
-  }
-}
+export {
+  DEFAULT_SETTINGS,
+  LABEL_SCALE_MAX,
+  LABEL_SCALE_MIN,
+  LABEL_SCALE_STEP,
+  normalizeLabelScale,
+  normalizeSettings,
+  paletteOf,
+} from './settingsModel.ts'
+export type { CartographerSettings } from './settingsModel.ts'
 
 export class CartographerSettingTab extends PluginSettingTab {
   private readonly plugin: ProjectKakiPlugin
