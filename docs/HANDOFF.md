@@ -150,14 +150,39 @@ node scripts/deploy.mjs
    - 优先复用 SVG/几何投影，不要复制一套坐标换算；
    - 在浏览器真实环境验证 `canvas.toBlob`，测试桩只覆盖命令注册和文件创建失败分支。
 
+## 发版流程
+
+```powershell
+node scripts/release.mjs 1.0.0 --dry-run   # 先看会改什么（不写盘）
+node scripts/release.mjs 1.0.0             # 真正把版本写进四处
+git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-tags
+```
+
+- **版本号必须在四处一致**：`manifest.json`、`package.json`、`package-lock.json`、`versions.json`
+  （最后一个是「版本 → minAppVersion」映射）。`scripts/release.mjs` 负责这件事并逐项自检 ——
+  手工改最容易漏一个，而漏掉的后果是**发布在云端失败**（本地看不出来）。
+- 推送 tag 会触发 `.github/workflows/release.yml`：校验 `tag == manifest.version` → `npm ci` → 构建 →
+  类型检查 / 单测 / 冒烟 → 发布 Release，附件为 `main.js` / `manifest.json` / `styles.css`
+  （`main.js` 不入库，只能由工作流生成后作为附件上传）。
+- 发布前请先跑一遍四道闸（见本文开头）；`CHANGELOG.md` 记得补条目。
+- **工作流只在 windows-latest + Node 24 上跑**：本项目只在 Windows 验证过，而单测直接 import `.ts`
+  需要 Node 22.6+ 的类型剥离（Node 20 会直接失败）。
+- 如果 Actions 不可用（配额/权限），退路是：本地 `node scripts/build.mjs` 后，在 GitHub 的
+  Releases 页面手动创建 tag 与 Release，并把这三个文件拖进去。
+
 ## 关键文件入口
 
 - [README.md](../README.md)：**面向使用者的门面**（安装、快捷键、Base 用法、FAQ）。改功能时同步改它。
 - [docs/ENGINEERING-NOTES.md](./ENGINEERING-NOTES.md)：工程笔记（踩过的坑、测试策略、未验证项）。
 - [src/main.ts](../src/main.ts)：命令注册、设置加载、插件入口。
 - [src/ui/MapPanel.ts](../src/ui/MapPanel.ts)：侧边栏地图面板（状态签名 + 逐帧合并，避免侧栏发卡）。
-- [src/ui/SettingsTab.ts](../src/ui/SettingsTab.ts)：设置项与界面（字号、网格、样式、开发者模式）。
+- [src/ui/SettingsTab.ts](../src/ui/SettingsTab.ts)：设置项与界面（字号、网格、样式、自定义地形、图层、开发者模式）。
 - [src/render/stylePalette.ts](../src/render/stylePalette.ts)：颜色/字体校验与样式解析（纯函数，有单测）。
+- [src/render/terrainCatalog.ts](../src/render/terrainCatalog.ts)：自定义地形目录与三级回退（纯函数，有单测）。
+- [src/render/layerVisibility.ts](../src/render/layerVisibility.ts) · [src/render/legend.ts](../src/render/legend.ts)：图层开关与图例条目（纯函数，有单测）。
+- [src/ui/MapLegend.ts](../src/ui/MapLegend.ts)：画布上的图例面板（签名比对、不每帧重建）。
+- [src/base/pngExport.ts](../src/base/pngExport.ts)：SVG → PNG 光栅化（依赖注入，可无浏览器单测）。
+- [scripts/release.mjs](../scripts/release.mjs)：发版时统一四处版本号。
 - [src/ui/MapToolbar.ts](../src/ui/MapToolbar.ts)：Canvas 工具条和地图层停用按钮。
 - [src/editor/MapInteraction.ts](../src/editor/MapInteraction.ts)：捕获阶段事件和原生 UI 排除。
 - [src/render/MapLayerManager.ts](../src/render/MapLayerManager.ts)：地图层生命周期和设置传递。

@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { axialToWorld, cellKey, cellsInRadius, hexDistance, hexCorners } from '../src/core/hex.ts'
 import { buildMapExportSvg } from '../src/base/mapPreview.ts'
 import { TERRAIN_STYLES } from '../src/render/terrainStyle.ts'
+import { TERRAIN_TYPES } from '../src/data/mapDocument.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const outFile = resolve(here, '../docs/images/preview.svg')
@@ -38,19 +39,27 @@ const GRID = { kind: 'hex', orientation: 'pointy', size: 40, origin: [0, 0] }
 const ISLAND_RADIUS = 3
 const SEA_RADIUS = 4
 
-/** 按"离岛心的距离 + 方位角"分配地形，让示例看起来像真的地图而不是随机噪声 */
+/**
+ * 按"离岛心的距离 + 方位角"分配地形。
+ *
+ * ⚠️ 每个分支都必须**可达**：我第一版最后写了一句 `return distance === 2 ? 'forest' : 'grass'`，
+ * 其中 `'grass'` 永远不会被执行（distance 只有 0/1/2/3 四种情况，前面都返回了）——
+ * 于是"示例里有没有用错 ID"这件事被藏了大半，我改完 ID 还以为验证过了。
+ * 现在的写法让 9 种内置地形**每一种都真的出现在图上**，错误 ID 无处可藏。
+ */
 function terrainAt(q, r) {
   const distance = hexDistance({ q: 0, r: 0 }, { q, r })
-  if (distance > ISLAND_RADIUS) return 'water'
-  if (distance === ISLAND_RADIUS) return 'swamp'
+  if (distance > ISLAND_RADIUS) return 'water' // 外海
+  if (distance === ISLAND_RADIUS) return 'swamp' // 环岛沼泽带
   const center = axialToWorld(GRID, q, r)
   const angle = Math.atan2(center.y, center.x)
-  if (angle > 1.1) return 'desert' // 右下：沙漠
-  if (angle < -1.9) return 'tundra' // 上方偏左：冻原
-  if (distance === 0) return 'volcano' // 正中：火山
-  if (distance === 1) return 'mountain' // 内圈：山脉
-  if (angle < -0.6) return 'hill'
-  return distance === 2 ? 'forest' : 'grass'
+  if (distance === 0) return 'volcanic' // 岛心火山
+  if (distance === 1) return 'mountain' // 内圈山脉
+  // distance === 2：按方位分块，让示例里出现多种地貌
+  if (angle < -1.9) return 'tundra'
+  if (angle < -0.6) return 'hills'
+  if (angle > 1.1) return 'desert'
+  return angle > 0.2 ? 'plains' : 'forest'
 }
 
 const terrain = {}
@@ -154,8 +163,15 @@ console.log(
 const problems = []
 const ring = cellsInRadius(SEA_RADIUS).filter((cell) => hexDistance({ q: 0, r: 0 }, cell) === SEA_RADIUS)
 if (!ring.every((cell) => terrain[cellKey(cell.q, cell.r)]?.t === 'water')) problems.push('最外圈不全是水')
-if (terrain[cellKey(0, 0)]?.t !== 'volcano') problems.push('岛心不是火山')
+if (terrain[cellKey(0, 0)]?.t !== 'volcanic') problems.push('岛心不是火山')
+
+// 地形 ID 必须都是**合法的内置 ID**。
+// 这条是补上的：我第一版写的是 grass / hill / volcano —— 那三个 ID 根本不存在，
+// 导出时静默走了"未知地形"的回退配色（回退色也在调色板里，所以原来的调色板断言照样通过），
+// 结果 README 上那张预览图的配色是错的，而且没有任何地方报错。
 const kinds = new Set(Object.values(terrain).map((cell) => cell.t))
+const unknown = [...kinds].filter((type) => !TERRAIN_TYPES.includes(type))
+if (unknown.length > 0) problems.push(`用了不存在的地形 ID：${unknown.join(', ')}（合法值：${TERRAIN_TYPES.join('/')}）`)
 if (kinds.size < 5) problems.push(`地形种类过少（${kinds.size} 种）`)
 if (hexCorners(GRID, 0, 0).length !== 6) problems.push('六边形顶点数不是 6')
 if (document.paths.length !== 3 || document.markers.length !== 4) problems.push('路径/标记数量与预期不符')
@@ -206,6 +222,19 @@ const palette = new Set([...Object.values(TERRAIN_STYLES).map((style) => style.b
 for (const match of svg.matchAll(/<polygon[^>]*fill="([^"]+)"/g)) {
   if (!palette.has(match[1])) problems.push(`地形/区域用了画布调色板以外的颜色 ${match[1]}`)
 }
+
+// 每种地形必须画成**各自的颜色**。
+// 这条比"颜色在调色板里"更强：如果某个 ID 不存在，它会和别的未知 ID 一起落到同一个回退色上，
+// 于是"地形种类数"会大于"实际出现的颜色数" —— 上一版的错误就是被这样藏住的。
+const terrainKinds = new Set(Object.values(terrain).map((cell) => cell.t))
+const regionColors = new Set(document.regions.map((region) => region.color))
+const usedTerrainColors = new Set(
+  [...svg.matchAll(/<polygon[^>]*fill="([^"]+)"/g)].map((match) => match[1]).filter((color) => !regionColors.has(color)),
+)
+if (usedTerrainColors.size !== terrainKinds.size) {
+  problems.push(`地形 ${terrainKinds.size} 种，却只画出 ${usedTerrainColors.size} 种颜色（有 ID 落到了同一个回退色）`)
+}
+console.log(`  地形配色：${kinds.size} 种 · 实际画出 ${usedTerrainColors.size} 种颜色`)
 
 console.log(`  元素：${JSON.stringify(counts)}`)
 console.log(`  内容占比：X ${(spanX * 100).toFixed(0)}% · Y ${(spanY * 100).toFixed(0)}%`)

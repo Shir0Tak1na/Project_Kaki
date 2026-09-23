@@ -1,7 +1,7 @@
 {
   "name": "fictional-cartographer",
   "version": "0.0.1",
-  "description": "Project Kaki（Project 垣）：Obsidian 六边形客制化地图创作插件",
+  "description": "Obsidian 插件：在 Canvas 里绘制六边形虚构世界地图，并通过 Base 与世界观笔记互联（显示名 Project Kaki，译名 Project 垣）",
   "private": true,
   "type": "module",
   "scripts": {
