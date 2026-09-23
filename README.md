@@ -197,10 +197,16 @@ region: 北境王国            # 可选，用于分组
 
 ## 导出
 
-`Ctrl/Cmd+P` → **导出当前地图为 SVG** → 在**地图文件同目录**生成 `<地图名>.svg`
-（重名时自动加后缀，不覆盖已有文件）。
+| 命令 | 产物 | 说明 |
+|---|---|---|
+| **导出当前地图为 SVG** | `<地图名>.svg` | 矢量图，可无损缩放 |
+| **导出当前地图为 PNG** | `<地图名>.png` | 位图（1600×1000），方便直接贴到别处 |
 
-导出与 Base 缩略图**共用同一套世界坐标与配色**，所以导出的图与画布上看到的一致。
+两者都写到**地图文件同目录**，重名时自动加 `-2`、`-3`（不会覆盖已有文件），导出后自动打开。
+它们**同源**：共用同一套世界坐标与配色（PNG 就是先出 SVG 再光栅化），所以导出的图与画布上看到的一致。
+
+PNG 失败时（浏览器环境不支持把 SVG 转位图）会给出**可读原因**，而且**不会留下一个空文件** ——
+免得你以为导出成功了。遇到这种情况请改用 SVG 导出。
 
 ## 设置
 
@@ -285,8 +291,8 @@ canvases:
 ```bash
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
-node --test --test-isolation=none                 # 223 个单元测试
-node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，25 个场景 / 514 条断言
+node --test --test-isolation=none                 # 236 个单元测试
+node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，26 个场景 / 532 条断言
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```
 
