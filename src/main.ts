@@ -678,6 +678,7 @@ export default class ProjectKakiPlugin extends Plugin {
     glyph?: unknown
     imagePath?: unknown
     mode?: unknown
+    imageLayout?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
     const result = validateCustomTerrainInput(input)
     if (!result.ok) return result
@@ -705,7 +706,14 @@ export default class ProjectKakiPlugin extends Plugin {
    */
   async updateCustomTerrain(
     index: number,
-    patch: { label?: unknown; color?: unknown; glyph?: unknown; imagePath?: unknown; mode?: unknown },
+    patch: {
+      label?: unknown
+      color?: unknown
+      glyph?: unknown
+      imagePath?: unknown
+      mode?: unknown
+      imageLayout?: unknown
+    },
   ): Promise<void> {
     const current = this.pluginSettings.customTerrains[index]
     if (!current) return
@@ -717,6 +725,7 @@ export default class ProjectKakiPlugin extends Plugin {
       imagePath: patch.imagePath !== undefined ? patch.imagePath : current.imagePath,
       // 只切模式时其余字段原样带着走 —— 于是"切回去"不会丢配置（用户来回切不会白配一遍）
       mode: patch.mode !== undefined ? patch.mode : current.mode,
+      imageLayout: patch.imageLayout !== undefined ? patch.imageLayout : current.imageLayout,
     })
     if (!next.ok) {
       console.warn(`[project-kaki] 自定义地形 ${current.id} 的修改被拒绝：${next.problem}`)

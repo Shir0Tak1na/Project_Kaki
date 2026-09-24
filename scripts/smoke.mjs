@@ -235,6 +235,13 @@ function makeRecordingContext() {
   const fills = []
   /** 每次 `drawImage()` 的实参（source + 目标矩形）：用来断言"画的是这张图/这个图块" */
   const images = []
+  /**
+   * 每次 `clip()` 时当前路径的点（位图坐标）。
+   *
+   * 「整片铺图」的正确性有一半在裁剪上：**超出这片区域的不渲染**。
+   * 只记录"clip 被调用过"是不够的 —— 那样连"裁到哪"都不知道，断言不出任何几何性质。
+   */
+  const clips = []
   let current = null
   // 变换只累积平移与旋转（被测代码只用 translate + rotate，不做嵌套矩阵运算）
   let tx = 0
@@ -247,6 +254,7 @@ function makeRecordingContext() {
     texts,
     fills,
     images,
+    clips,
     fillStyle: '',
     strokeStyle: '',
     lineWidth: 1,
@@ -262,6 +270,7 @@ function makeRecordingContext() {
       texts.length = 0
       fills.length = 0
       images.length = 0
+      clips.length = 0
       current = null
       tx = 0
       ty = 0
@@ -354,6 +363,9 @@ function makeRecordingContext() {
     },
     clip() {
       calls.clip += 1
+      // 记录**裁到哪个路径**，而不只是次数：整片铺图的正确性就体现在
+      // "裁剪路径 = 这一片所有六边形的并集"上，只数次数断言不出任何几何性质。
+      clips.push(current ? current.points.map((point) => ({ x: point.x, y: point.y })) : [])
     },
     drawImage(source, ...args) {
       calls.drawImage += 1
@@ -5792,6 +5804,215 @@ console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）�
     `新建的图集数=${createdCanvasContexts.length - baselineLegacy}`,
   )
   legacy.onunload()
+}
+
+console.log('\n场景 31：图片地形的「显示方式」（单格一张 / 整片一张）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  // 图片：假 `Image` 是 64×48（4:3），于是"不改变比例"可以被精确断言
+  app.vault.files.set('Assets/forest.png', '<png-bytes>')
+  loadableImageUrls.add(resourceUrlFor('Assets/forest.png'))
+  app.vault.files.set('Assets/missing.png', '<png-bytes>')
+
+  await plugin.addCustomTerrain({
+    id: 'grove',
+    label: '林地',
+    color: '#336655',
+    imagePath: 'Assets/forest.png',
+    mode: 'image',
+    imageLayout: 'region',
+  })
+  await plugin.addCustomTerrain({
+    id: 'cellwood',
+    label: '单格林',
+    color: '#445533',
+    imagePath: 'Assets/forest.png',
+    mode: 'image',
+    imageLayout: 'cell',
+  })
+  await plugin.addCustomTerrain({
+    id: 'ghost',
+    label: '缺图林',
+    color: '#554433',
+    imagePath: 'Assets/missing.png',
+    mode: 'image',
+    imageLayout: 'region',
+  })
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const doc = () => layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = async () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    flushFrames()
+    return ctx
+  }
+  const regionImages = () => ctx.images.filter((entry) => entry.source?.__isFakeImage)
+  const centroid = (points) => ({
+    x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+    y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
+  })
+  const boundsOfPoints = (points) => ({
+    minX: Math.min(...points.map((point) => point.x)),
+    maxX: Math.max(...points.map((point) => point.x)),
+    minY: Math.min(...points.map((point) => point.y)),
+    maxY: Math.max(...points.map((point) => point.y)),
+  })
+
+  // ---- 两个相邻的「整片」格：应当只画一张图，且范围跨两格 ----
+  doc().terrain['0_0'] = { t: 'custom:grove' }
+  doc().terrain['1_0'] = { t: 'custom:grove' }
+  let calls = await frame()
+  check('整片模式：两个相邻格只算一块', stats().lastImageRegionCount === 1, String(stats().lastImageRegionCount))
+  check('整片模式：这一帧只画了一张这种图', regionImages().length === 1, `图片绘制 ${regionImages().length} 次`)
+  const regionDraw = regionImages()[0]
+  const rect = regionDraw ? regionDraw.args.slice(-4) : null
+  check('整片模式：图片绘制带完整目标矩形', Array.isArray(rect) && rect.length === 4, JSON.stringify(rect))
+  if (rect) {
+    const ratio = rect[2] / rect[3]
+    check(
+      '整片模式：保持图片比例（64:48，没有被拉伸铺满）',
+      Math.abs(ratio - 64 / 48) < 1e-6,
+      `目标矩形 ${rect[2]}×${rect[3]}，比例 ${ratio.toFixed(4)}，图片比例 ${(64 / 48).toFixed(4)}`,
+    )
+  }
+
+  // ---- 裁剪：必须是两格六边形的并集（12 个顶点），并且盖住两格的格心 ----
+  check('整片模式：确实用了裁剪（超出区域不渲染靠它）', calls.clips.length >= 1, `clip 调用 ${calls.clips.length} 次`)
+  const clipPath = calls.clips.find((points) => points.length === 12)
+  check(
+    '整片模式：裁剪路径是两格六边形的并集（12 个顶点）',
+    clipPath !== undefined,
+    calls.clips.map((points) => points.length).join(','),
+  )
+  if (clipPath && rect) {
+    const first = centroid(clipPath.slice(0, 6))
+    const second = centroid(clipPath.slice(6))
+    const clipBounds = boundsOfPoints(clipPath)
+    check(
+      '整片模式：图片范围覆盖两格的格心（不是只画了一格）',
+      rect[0] <= first.x && rect[0] + rect[2] >= first.x && rect[0] <= second.x && rect[0] + rect[2] >= second.x,
+      `图片 x=${rect[0].toFixed(1)} w=${rect[2].toFixed(1)}；格心 ${first.x.toFixed(1)} / ${second.x.toFixed(1)}`,
+    )
+    check(
+      '整片模式：图片不超出裁剪范围（contain 的结果必须装得下）',
+      rect[0] >= clipBounds.minX - 1e-6 &&
+        rect[1] >= clipBounds.minY - 1e-6 &&
+        rect[0] + rect[2] <= clipBounds.maxX + 1e-6 &&
+        rect[1] + rect[3] <= clipBounds.maxY + 1e-6,
+      `图片 ${rect.join(',')} vs 裁剪 ${JSON.stringify(clipBounds)}`,
+    )
+    check(
+      '整片模式：裁剪范围比两格心距更宽（确实跨了两格）',
+      clipBounds.maxX - clipBounds.minX > Math.abs(second.x - first.x),
+      `裁剪宽 ${(clipBounds.maxX - clipBounds.minX).toFixed(1)}，两格心距 ${Math.abs(second.x - first.x).toFixed(1)}`,
+    )
+  }
+
+  // ---- 不相邻的第三格：另起一块，于是第二张图 ----
+  doc().terrain['8_8'] = { t: 'custom:grove' }
+  calls = await frame()
+  check('整片模式：不相邻的第三格另算一块', stats().lastImageRegionCount === 2, String(stats().lastImageRegionCount))
+  check('整片模式：两块各画一张图', regionImages().length === 2, `图片绘制 ${regionImages().length} 次`)
+  check(
+    '整片模式：两张图的目标矩形不同（不是同一块画了两遍）',
+    regionImages().length === 2 && JSON.stringify(regionImages()[0].args) !== JSON.stringify(regionImages()[1].args),
+    JSON.stringify(regionImages().map((entry) => entry.args)),
+  )
+
+  // ---- `cell` 布局保持原样：逐格贴图（走图集），不走整片路径 ----
+  // 注意：这个计数是**全局**的（前面那两片 grove 还在），所以要比增量，不能写死 0。
+  // 第一版就是写死了 0 而误判（实现是对的）—— 见 ENGINEERING-NOTES §5.15。
+  const regionsBeforeCell = stats().lastImageRegionCount
+  doc().terrain['10_10'] = { t: 'custom:cellwood' }
+  calls = await frame()
+  check(
+    '单格布局：不产生整片绘制（走图集逐格贴图）',
+    stats().lastImageRegionCount === regionsBeforeCell,
+    `${regionsBeforeCell} → ${stats().lastImageRegionCount}`,
+  )
+  check('单格布局：格子照常被画（帧里有格子）', stats().lastCellCount >= 1, String(stats().lastCellCount))
+
+  // ---- 图片缺失：不回退成"整片空白"，而是逐格的颜色 + 字形 ----
+  const regionsBeforeMissing = stats().lastImageRegionCount
+  doc().terrain['20_20'] = { t: 'custom:ghost' }
+  doc().terrain['21_20'] = { t: 'custom:ghost' }
+  calls = await frame()
+  check(
+    '缺图时不做整片绘制（图片不可用）',
+    stats().lastImageRegionCount === regionsBeforeMissing,
+    `${regionsBeforeMissing} → ${stats().lastImageRegionCount}`,
+  )
+  const regionsBeforeGhost = stats().lastImageRegionCount
+  check('缺图时格子仍然被画（回退到颜色 + 字形，不是留白）', stats().lastCellCount >= 2, String(stats().lastCellCount))
+  check(
+    '缺图的那两格没有让整片计数增加（它们没有图片可整片铺）',
+    stats().lastImageRegionCount === regionsBeforeGhost,
+    String(stats().lastImageRegionCount),
+  )
+
+  // ---- 平移时整片图片的尺寸不能变（包围盒必须来自整块，而不是"当前可见的那部分"）----
+  // 这是一条**回归断言**：第一版用视口裁剪后的格子做连通块，于是跨出视口的那一片
+  // 会被当成"更小的一片" —— 平移时整片图片跟着缩放/抖动。
+  const LONG_IMAGE = 'Assets/forest2.png'
+  app.vault.files.set(LONG_IMAGE, '<png-bytes-2>')
+  loadableImageUrls.add(resourceUrlFor(LONG_IMAGE))
+  await plugin.addCustomTerrain({
+    id: 'longwood',
+    label: '长林',
+    color: '#2f5f4f',
+    imagePath: LONG_IMAGE,
+    mode: 'image',
+    imageLayout: 'region',
+  })
+  // 一条在**基线时整条可见**、平移后**左端出界**的连通林带。
+  //
+  // ⚠️ 几何要被算准，否则这条断言没有鉴别力（我在这上面试了三次）：
+  // - 若林带比视口还宽：可见部分永远被视口宽度限制，平移前后尺寸一样 → **空断言**；
+  // - 若平移量太小、林带没出界：两次的可见集合相同 → 也是空断言；
+  // - 只有"整条可见 → 平移后只剩一部分"时，用可见格当整块的 bug 才会让尺寸变小。
+  for (let q = -12; q <= 2; q += 1) doc().terrain[`${q}_3`] = { t: 'custom:longwood' }
+  calls = await frame()
+  const longImage = FakeImage.instances.find((image) => image.src === resourceUrlFor(LONG_IMAGE))
+  const longRectBefore = calls.images.find((entry) => entry.source === longImage)?.args.slice(-4) ?? null
+  check('长林带：整片只画一张图', longRectBefore !== null, `画了 ${calls.images.filter((entry) => entry.source === longImage).length} 次`)
+
+  // 向左平移：林带的左端被推出视口，只剩一部分可见
+  canvas._applyViewport({ de: -400, df: 0, scaleFactor: 1 })
+  calls = await frame()
+  const longRectAfter = calls.images.find((entry) => entry.source === longImage)?.args.slice(-4) ?? null
+  if (longRectBefore && longRectAfter) {
+    check(
+      '平移之后整片图片的尺寸不变（说明包围盒来自整块，而不是可见的那部分）',
+      Math.abs(longRectAfter[2] - longRectBefore[2]) < 1e-6 && Math.abs(longRectAfter[3] - longRectBefore[3]) < 1e-6,
+      `平移前 ${longRectBefore[2].toFixed(1)}×${longRectBefore[3].toFixed(1)} → 平移后 ${longRectAfter[2].toFixed(1)}×${longRectAfter[3].toFixed(1)}`,
+    )
+    check(
+      '平移确实改变了它在画面上的位置（否则上面的断言没有鉴别力）',
+      Math.abs(longRectAfter[0] - longRectBefore[0]) > 1,
+      `${longRectBefore[0].toFixed(1)} → ${longRectAfter[0].toFixed(1)}`,
+    )
+  } else {
+    check('平移之后长林带仍然被画出来', false, `平移后拿到 ${longRectAfter === null ? 'null' : '矩形'}`)
+  }
+
+  plugin.onunload()
 }
 
 if (failures === 0) {

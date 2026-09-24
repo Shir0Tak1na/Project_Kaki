@@ -21,8 +21,8 @@ import {
 import { MAX_CUSTOM_TERRAINS, type CustomTerrain } from '../src/render/terrainCatalog.ts'
 
 const SAMPLE: CustomTerrain[] = [
-  { id: 'custom:marsh', label: '沼泽地', color: '#336655', glyph: 'swamp', imagePath: '', mode: 'color' },
-  { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png', mode: 'image' },
+  { id: 'custom:marsh', label: '沼泽地', color: '#336655', glyph: 'swamp', imagePath: '', mode: 'color', imageLayout: 'cell' },
+  { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png', mode: 'image', imageLayout: 'region' },
 ]
 
 test('导出 → 序列化 → 解析：内容往返一致', () => {
@@ -35,6 +35,20 @@ test('导出 → 序列化 → 解析：内容往返一致', () => {
   assert.deepEqual(parsed.bundle.terrains, SAMPLE)
   assert.equal(parsed.skipped.length, 0)
   assert.equal(parsed.bundle.generator, 'test')
+  // 「显示方式」必须一起带走：否则"整片一张"配好的地形导入到别处会退回单格铺图，
+  // 看起来像导入失败（这条断言就是钉住这件事）
+  assert.equal(parsed.bundle.terrains[1]!.imageLayout, 'region')
+})
+
+test('旧格式（没有 imageLayout）导入时推断为 cell，不会突然变成整片铺图', () => {
+  const legacy = JSON.stringify({
+    version: 1,
+    terrains: [{ id: 'custom:old', label: '旧地形', color: '#336655', imagePath: 'Assets/a.png', mode: 'image' }],
+  })
+  const parsed = parseResourceBundle(legacy)
+  assert.equal(parsed.ok, true, JSON.stringify(parsed))
+  if (!parsed.ok) return
+  assert.equal(parsed.bundle.terrains[0]!.imageLayout, 'cell')
 })
 
 test('序列化是稳定的：键顺序固定、末尾有换行（导出的文件要能被 diff）', () => {
@@ -130,11 +144,11 @@ test('全部条目都不可用时：报告第一条的原因（而不是返回�
 
 test('合并：同 ID 保留用户现有的定义（导入是补充，不是替换）', () => {
   const existing: CustomTerrain[] = [
-    { id: 'custom:marsh', label: '我的沼泽', color: '#000000', glyph: '', imagePath: 'Assets/mine.png', mode: 'image' },
+    { id: 'custom:marsh', label: '我的沼泽', color: '#000000', glyph: '', imagePath: 'Assets/mine.png', mode: 'image', imageLayout: 'cell' },
   ]
   const incoming: CustomTerrain[] = [
-    { id: 'custom:marsh', label: '别人的沼泽', color: '#ffffff', glyph: 'swamp', imagePath: '', mode: 'color' },
-    { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: '', mode: 'color' },
+    { id: 'custom:marsh', label: '别人的沼泽', color: '#ffffff', glyph: 'swamp', imagePath: '', mode: 'color', imageLayout: 'cell' },
+    { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell' },
   ]
   const merged = mergeTerrains(existing, incoming)
   assert.deepEqual(merged.added, ['custom:reef'])
@@ -154,10 +168,11 @@ test('合并：respect 上限，超出的条目被跳过并说明原因', () => 
     glyph: '',
     imagePath: '',
     mode: 'color' as const,
+    imageLayout: 'cell' as const,
   }))
   const incoming: CustomTerrain[] = [
-    { id: 'custom:new1', label: '新一', color: '#123456', glyph: '', imagePath: '', mode: 'color' },
-    { id: 'custom:new2', label: '新二', color: '#123456', glyph: '', imagePath: '', mode: 'color' },
+    { id: 'custom:new1', label: '新一', color: '#123456', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell' },
+    { id: 'custom:new2', label: '新二', color: '#123456', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell' },
   ]
   const merged = mergeTerrains(existing, incoming)
   assert.equal(merged.terrains.length, MAX_CUSTOM_TERRAINS)

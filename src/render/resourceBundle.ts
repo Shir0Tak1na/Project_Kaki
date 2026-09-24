@@ -77,6 +77,9 @@ export function serializeResourceBundle(bundle: ResourceBundle): string {
       // 模式必须一起带走：否则"图片模式下配好的图"导入到别处可能被当成调色模式而画不出来。
       // 旧格式没有这个字段，导入侧的迁移会按"有图就是图片模式"推断，所以加了它不会破坏兼容。
       `"mode": ${JSON.stringify(terrain.mode)}`,
+      // 布局同样要带走：否则"整片一张（连通区域）"导入到别处会退回单格铺图 —— 看起来像导入失败。
+      // 旧格式缺这个字段时推断为 `cell`（与升级前一致），所以也不破坏兼容。
+      `"imageLayout": ${JSON.stringify(terrain.imageLayout)}`,
     ]
     const comma = index === bundle.terrains.length - 1 ? '' : ','
     lines.push(`    { ${fields.join(', ')} }${comma}`)
@@ -135,7 +138,15 @@ export function parseResourceBundle(text: string, options: { maxTerrains?: numbe
     // 这里不重复判断（校验规则只有一份，见文件头注释）
     const input =
       item !== null && typeof item === 'object'
-        ? (item as { id: unknown; label?: unknown; color?: unknown; glyph?: unknown; imagePath?: unknown })
+        ? (item as {
+            id: unknown
+            label?: unknown
+            color?: unknown
+            glyph?: unknown
+            imagePath?: unknown
+            mode?: unknown
+            imageLayout?: unknown
+          })
         : ({ id: undefined } as { id: unknown })
     const result = validateCustomTerrainInput(input)
     if (!result.ok) {

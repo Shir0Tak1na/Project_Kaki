@@ -82,6 +82,19 @@ export type CustomTerrainMode = 'color' | 'image'
 /** 新建时的默认模式：调色不依赖任何外部资源，最不容易失败 */
 export const DEFAULT_CUSTOM_TERRAIN_MODE: CustomTerrainMode = 'color'
 
+/**
+ * 图片地形的显示方式。
+ *
+ * - `cell`：**每格一张图**（原来的行为，也是默认）；
+ * - `region`：**所有连通的同类型格共用一张图** —— 适合"整片森林/整片海共用一张纹理"的用法。
+ *
+ * 为什么默认是 `cell` 而不是 `region`：旧数据里没有这个字段，默认必须是"与升级前完全一致"的那个；
+ * 而且 `region` 需要按连通块裁剪，行为更复杂，不该由用户意外获得。
+ */
+export type TerrainImageLayout = 'cell' | 'region'
+
+export const DEFAULT_TERRAIN_IMAGE_LAYOUT: TerrainImageLayout = 'cell'
+
 export interface CustomTerrain {
   /** 完整 ID（含 `custom:` 前缀）—— **就是写进地图文件的 `t` 值** */
   id: string
@@ -95,6 +108,8 @@ export interface CustomTerrain {
   imagePath: string
   /** 用哪套视觉：调色（颜色 + 字形）还是图片 */
   mode: CustomTerrainMode
+  /** 图片模式下怎么铺：每格一张，还是整片（连通区域）一张 */
+  imageLayout: TerrainImageLayout
 }
 
 /** 绘制层真正消费的地形视觉（内置、自定义、未知三种情况被抹平成同一个形状） */
@@ -106,6 +121,8 @@ export interface ResolvedTerrainStyle {
   glyph: GlyphShape[]
   /** 非空表示这一格要画图片（画不出来时由绘制层回退到颜色 + 字形） */
   imagePath: string
+  /** 图片怎么铺：`cell` 每格一张；`region` 连通的同类型格共用一张（绘制层据此走裁剪路径） */
+  imageLayout: TerrainImageLayout
   /** 内置 9 种之一 */
   builtin: boolean
   /** 设置里找不到这个 ID（旧文件、别人的文件、或用户刚把定义删了） */
@@ -234,6 +251,17 @@ export function normalizeTerrainMode(raw: unknown, imagePath: string): CustomTer
   return imagePath.length > 0 ? 'image' : 'color'
 }
 
+/**
+ * 收敛"图片怎么铺"。
+ *
+ * 与模式不同，这里**没有可推断的信息**（没有哪个字段能暗示用户想要整片铺图），
+ * 所以缺失与非法值一律落到 `'cell'` —— 也就是"与升级前完全一致"的行为。
+ * 绝不静默变成 `region`：那会让老用户的地形突然按连通块重新铺图，看起来像是地图坏了。
+ */
+export function normalizeTerrainImageLayout(raw: unknown): TerrainImageLayout {
+  return raw === 'cell' || raw === 'region' ? raw : DEFAULT_TERRAIN_IMAGE_LAYOUT
+}
+
 /* --------------------------------------------------------------- 集合 */
 
 function normalizeOneTerrain(raw: unknown): CustomTerrain | null {
@@ -251,6 +279,7 @@ function normalizeOneTerrain(raw: unknown): CustomTerrain | null {
     glyph: isBuiltinTerrain(source.glyph) ? source.glyph : '',
     imagePath,
     mode: normalizeTerrainMode(source.mode, imagePath),
+    imageLayout: normalizeTerrainImageLayout(source.imageLayout),
   }
 }
 
@@ -305,6 +334,7 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
       outline: style.outline,
       glyph: style.glyph,
       imagePath: '',
+      imageLayout: DEFAULT_TERRAIN_IMAGE_LAYOUT,
       builtin: true,
       unknown: false,
     }
@@ -320,6 +350,8 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
       // 调色模式下**不把图片路径交出去**：绘制层拿不到它就绝不会去画图片，
       // 于是"模式"这件事只需要在这里判断一次，而不是散落到每一处绘制代码里。
       imagePath: terrain.mode === 'image' ? terrain.imagePath : '',
+      // 同上：调色模式下图片根本不参与绘制，布局一律报告为 `cell`（绘制层据此走逐格路径）
+      imageLayout: terrain.mode === 'image' ? terrain.imageLayout : DEFAULT_TERRAIN_IMAGE_LAYOUT,
       builtin: false,
       unknown: false,
     }
@@ -331,6 +363,7 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
     outline: FALLBACK_TERRAIN_OUTLINE,
     glyph: FALLBACK_TERRAIN_GLYPH,
     imagePath: '',
+    imageLayout: DEFAULT_TERRAIN_IMAGE_LAYOUT,
     builtin: false,
     unknown: true,
   }
@@ -361,7 +394,10 @@ export function terrainLabelOf(id: string, custom: readonly CustomTerrain[] = []
  */
 export function terrainCatalogSignature(custom: readonly CustomTerrain[] = []): string {
   return custom
-    .map((terrain) => `${terrain.id}|${terrain.label}|${terrain.color}|${terrain.glyph}|${terrain.imagePath}|${terrain.mode}`)
+    .map(
+      (terrain) =>
+        `${terrain.id}|${terrain.label}|${terrain.color}|${terrain.glyph}|${terrain.imagePath}|${terrain.mode}|${terrain.imageLayout}`,
+    )
     .join(';')
 }
 
@@ -373,6 +409,7 @@ export function validateCustomTerrainInput(input: {
   glyph?: unknown
   imagePath?: unknown
   mode?: unknown
+  imageLayout?: unknown
 }): { ok: true; terrain: CustomTerrain } | { ok: false; problem: string } {
   const id = normalizeTerrainId(input.id)
   if (id === null) return { ok: false, problem: terrainIdProblem(input.id) ?? 'ID 不合法' }
@@ -387,6 +424,7 @@ export function validateCustomTerrainInput(input: {
       glyph: isBuiltinTerrain(input.glyph) ? input.glyph : '',
       imagePath: image.path,
       mode: normalizeTerrainMode(input.mode, image.path),
+      imageLayout: normalizeTerrainImageLayout(input.imageLayout),
     },
   }
 }

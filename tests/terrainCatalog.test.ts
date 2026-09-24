@@ -40,6 +40,7 @@ const swamp = (over: Partial<CustomTerrain> = {}): CustomTerrain => ({
   glyph: '',
   imagePath: '',
   mode: 'color',
+  imageLayout: 'cell',
   ...over,
 })
 
@@ -233,6 +234,12 @@ test('目录签名：内容不变则相同，任一字段变化都会变（工�
     terrainCatalogSignature([swamp({ mode: 'color' })]),
     terrainCatalogSignature([swamp({ mode: 'image' })]),
   )
+  // 布局同样改变视觉（每格一张 vs 整片一张），也必须进签名：
+  // 否则用户切了"显示方式"之后画面不变，看起来像没生效
+  assert.notEqual(
+    terrainCatalogSignature([swamp({ mode: 'image', imageLayout: 'cell' })]),
+    terrainCatalogSignature([swamp({ mode: 'image', imageLayout: 'region' })]),
+  )
   assert.equal(terrainCatalogSignature([]), '')
 })
 
@@ -299,7 +306,15 @@ test('新增校验：ID 或图片路径不合法时拒绝，并且不返回半�
     glyph: '',
     imagePath: 'Assets/a.png',
     mode: 'image',
+    // 没给布局 → `cell`（每格一张，与升级前的行为一致）
+    imageLayout: 'cell',
   })
+
+  // 布局也一样：缺失 → `cell`；只有显式的 `region` 才会走整片铺图
+  const region = validateCustomTerrainInput({ id: 'swamp4', imagePath: 'Assets/a.png', imageLayout: 'region' })
+  assert.equal(region.ok === true && region.terrain.imageLayout, 'region')
+  const broken = validateCustomTerrainInput({ id: 'swamp5', imagePath: 'Assets/a.png', imageLayout: 'wat' })
+  assert.equal(broken.ok === true && broken.terrain.imageLayout, 'cell', '非法布局绝不静默变成 region')
 
   // 新建时不给模式 + 不给图片 → 默认调色（最不容易失败的那一种）
   const created = validateCustomTerrainInput({ id: 'swamp3' })

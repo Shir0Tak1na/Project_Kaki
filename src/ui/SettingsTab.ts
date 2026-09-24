@@ -429,6 +429,25 @@ export class CartographerSettingTab extends PluginSettingTab {
               })
           }),
         )
+
+      // 「显示方式」始终可见（和图片那一栏同样的理由：需要用户能找到的东西不能藏）。
+      // 只有 `region` 会改变铺图方式，所以说明里写清两种选择的差别与代价。
+      new Setting(containerEl)
+        .setName(`　└ 显示方式 · ${terrain.label}`)
+        .setDesc(
+          '单格一张：每个格子各贴一张图（默认）。' +
+            '整片一张：**所有连通的同类型格**共用一张图 —— 图片等比缩放（不拉伸）居中放到这一片的范围里，' +
+            '超出这一片的部分不渲染。适合"整片森林/整片海共用一张纹理"。',
+        )
+        .addDropdown((dropdown) => {
+          dropdown.addOption('cell', '单格一张')
+          dropdown.addOption('region', '整片一张（连通区域）')
+          dropdown.setValue(terrain.imageLayout)
+          dropdown.onChange((value) => {
+            void this.plugin.updateCustomTerrain(index, { imageLayout: value })
+            this.display()
+          })
+        })
     })
 
     // ---- 新建 ----

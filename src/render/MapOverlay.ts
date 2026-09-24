@@ -22,12 +22,13 @@ import {
   watchViewportChanges,
   type CanvasHandle,
 } from '../canvas/CanvasAdapter.ts'
-import { axialToWorld, hexCorners } from '../core/hex.ts'
+import { axialToWorld, cellKey, hexCorners, parseCellKey } from '../core/hex.ts'
 import { brushCellsAt, visibleCellBounds } from './hexGrid.ts'
 import { buildRenderPlan, worldToRaster, type MapRenderPlan } from './renderPlan.ts'
 import { MarkerLayer } from './MarkerLayer.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
 import { drawDraft, drawPath, drawRegion, labelCssPx } from './shapeDraw.ts'
+import { findTerrainRegions, fitContain, hashTerrainCells, type TerrainRegion } from './terrainRegions.ts'
 import {
   buildTerrainAtlas,
   drawTerrainCell,
@@ -61,6 +62,14 @@ export interface OverlayStats {
   lastPathCount: number
   lastRegionCount: number
   lastMarkerCount: number
+  /**
+   * 本帧按"整片一张图"画出来的连通块数量。
+   *
+   * 为什么要单独统计：这个模式下**正确的表现是"图比格子少"**（一片 N 格只画一张），
+   * 而"每格一张"与"整片一张"在屏幕上可能只差一点点。有一个可读的数字，
+   * 用户报"看起来没生效"时就能一眼判断是渲染没走通还是观感问题。
+   */
+  lastImageRegionCount: number
   markerLayerAttached: boolean
   lastRaster: { width: number; height: number } | null
   /** 实测的"位图像素 / 屏幕 CSS 像素"（名称字号的换算依据，诊断用） */
@@ -140,6 +149,24 @@ function hostWindow(container: HTMLElement | null): (Window & typeof globalThis)
   return typeof window !== 'undefined' ? window : undefined
 }
 
+/**
+ * 取图片的原始像素尺寸（用于"保持比例"的换算）。
+ *
+ * 用鸭子类型而不是 `instanceof HTMLImageElement`：图片可能是 `HTMLImageElement`、
+ * `HTMLCanvasElement` 或 `ImageBitmap`，三者的尺寸字段名不同；而断言某个具体类会让
+ * "换一种图片来源就静默失去比例"（尺寸读成 0 时 `fitContain` 会退化成拉伸铺满）。
+ */
+export function imagePixelSize(image: unknown): { width: number; height: number } {
+  const source = image as { naturalWidth?: unknown; naturalHeight?: unknown; width?: unknown; height?: unknown } | null
+  if (source === null || typeof source !== 'object') return { width: 0, height: 0 }
+  const width = typeof source.naturalWidth === 'number' ? source.naturalWidth : Number(source.width ?? 0)
+  const height = typeof source.naturalHeight === 'number' ? source.naturalHeight : Number(source.height ?? 0)
+  return {
+    width: Number.isFinite(width) && width > 0 ? width : 0,
+    height: Number.isFinite(height) && height > 0 ? height : 0,
+  }
+}
+
 export class MapOverlay {
   private readonly options: MapOverlayOptions
   private readonly handle: CanvasHandle
@@ -172,6 +199,14 @@ export class MapOverlay {
 
   /** 悬停预览：绘制模式下高亮笔刷落点 */
   private hover: { x: number; y: number; radius: number } | null = null
+  /**
+   * 「整片一张图」的连通块缓存。
+   *
+   * 为什么要缓存：连通块要在**每帧**用来绘制，而"每帧重新分组、重建一堆对象"是性能灾难。
+   * 缓存键 = 该类型的**可见格数 + 顺序无关的格子哈希**（`hashTerrainCells`）：
+   * 便宜、能可靠发现"格子变了"，而哈希碰撞的代价只是"这一帧仍用上一帧的分块"，下一帧自我纠正。
+   */
+  private terrainRegionCache = new Map<string, { key: string; regions: TerrainRegion[] }>()
   private stats: OverlayStats = {
     attached: false,
     hostClass: null,
@@ -182,6 +217,7 @@ export class MapOverlay {
     lastPathCount: 0,
     lastRegionCount: 0,
     lastMarkerCount: 0,
+    lastImageRegionCount: 0,
     markerLayerAttached: false,
     lastRaster: null,
     rasterPxPerCssPx: 1,
@@ -658,6 +694,7 @@ export class MapOverlay {
     this.terrainImages.set(path, image)
     // 图集里这一格还画的是回退色：签名变了（多了一张就绪的图）→ 下一帧重建
     this.atlasSignature = ''
+    // 整片铺图那边也要重画：刚才这张图之前是不可用的，这一帧起才能画
     this.requestRedraw()
   }
 
@@ -678,6 +715,118 @@ export class MapOverlay {
           '数据仍保留在文件里；如果你想看到原样，请在设置里补一条同 ID 的自定义地形。',
       )
     }
+  }
+
+  /**
+   * 「整片一张图」：把每种选了 `region` 布局的地形，按**连通块**各画一张图片。
+   *
+   * 三条实现要点（都是需求里的原话，逐条落实）：
+   *
+   * 1. **不改变图片比例** —— 用 `fitContain`（等比缩放 + 居中），而不是拉伸铺满包围盒。
+   * 2. **超出区域的不渲染** —— 用该连通块**所有六边形的并集**做 `ctx.clip()`，
+   *    而不是只按包围盒裁。按包围盒裁的话，一块 L 形的领地会把"拐角外"的图也画出来，
+   *    那部分其实是属于别人的地形。
+   * 3. **不进图集** —— 图集是"每种地形一格位图"，天生只能逐格贴；整片铺图必须在每帧按块直接画。
+   *    代价是一次 `save/clip/drawImage/restore`，而连通块数量远小于格子数。
+   *
+   * 图片还没加载好（或加载失败）时**什么都不画**：逐格那一遍已经画过颜色 + 字形，
+   * 于是"图没就绪"的表现是回退视觉，而不是一片空白。
+   */
+  private drawRegionImages(
+    ctx: CanvasRenderingContext2D,
+    plan: MapRenderPlan,
+    document_: MapDocument,
+    targetRadius: number,
+  ): number {
+    const custom = this.customTerrains()
+    /**
+     * 本帧每种 region 布局地形的**全部**格（不是只算可见的）。
+     *
+     * ⚠️ 这里必须用整个文档的格子：`plan.cells` 是**视口裁剪后**的结果，
+     * 拿它做连通块的话，一片跨出视口的区域会被当成"更小的一片"，包围盒跟着视口变 ——
+     * 表现就是**平移时整片图片跟着缩放/抖动**。
+     * 代价与 `buildRenderPlan` 每帧遍历一次 `document.terrain` 同量级（它本来就要遍历）。
+     */
+    const cellsByType = new Map<string, Array<{ q: number; r: number }>>()
+    for (const [key, cell] of Object.entries(document_.terrain)) {
+      const style = resolveTerrainStyle(cell.t, custom)
+      if (style.imageLayout !== 'region' || style.imagePath.length === 0) continue
+      const axial = parseCellKey(key)
+      if (axial === null) continue
+      const list = cellsByType.get(style.id)
+      if (list === undefined) cellsByType.set(style.id, [{ q: axial.q, r: axial.r }])
+      else list.push({ q: axial.q, r: axial.r })
+    }
+    if (cellsByType.size === 0) return 0
+
+    // 可见格集合：**裁剪路径**只需要覆盖可见的那部分（视口外的画了也看不见），
+    // 但"图片放多大"必须来自整块，见上面的说明。
+    const visibleKeys = new Set<string>()
+    for (const cell of plan.cells) visibleKeys.add(cellKey(cell.q, cell.r))
+
+    let drawnRegions = 0
+    for (const [type, cells] of cellsByType) {
+      const style = resolveTerrainStyle(type, custom)
+      const image = this.terrainImages.get(style.imagePath)
+      if (image === undefined) continue
+
+      // 缓存：格数 + 顺序无关的哈希。碰撞只会让这一帧沿用上一帧的分块，下一帧自我纠正。
+      const cacheKey = `${cells.length}|${hashTerrainCells(cells)}`
+      const cached = this.terrainRegionCache.get(type)
+      const regions =
+        cached !== undefined && cached.key === cacheKey
+          ? cached.regions
+          : findTerrainRegions(cells, document_.grid)
+      if (cached === undefined || cached.key !== cacheKey) {
+        this.terrainRegionCache.set(type, { key: cacheKey, regions })
+      }
+
+      const size = imagePixelSize(image)
+      for (const region of regions) {
+        if (region.cells.length === 0) continue
+        // 只画在视口里有可见格的块（省掉画布外那些块的 clip + drawImage）
+        const visibleCells = region.cells.filter((cell) => visibleKeys.has(cellKey(cell.q, cell.r)))
+        if (visibleCells.length === 0) continue
+        // 世界坐标的包围盒 → 位图坐标（变换是相似变换，所以直接换算两个角即可）
+        const topLeft = worldToRaster(plan.layer, region.bounds.minX, region.bounds.minY)
+        const bottomRight = worldToRaster(plan.layer, region.bounds.maxX, region.bounds.maxY)
+        const target = {
+          minX: topLeft.x,
+          minY: topLeft.y,
+          maxX: bottomRight.x,
+          maxY: bottomRight.y,
+        }
+        const fit = fitContain(target, size.width, size.height)
+        if (!(fit.width > 0) || !(fit.height > 0)) continue
+
+        ctx.save()
+        ctx.beginPath()
+        for (const member of visibleCells) {
+          const center = axialToWorld(document_.grid, member.q, member.r)
+          const rasterCenter = worldToRaster(plan.layer, center.x, center.y)
+          const corners = hexCorners(
+            {
+              kind: 'hex',
+              orientation: document_.grid.orientation,
+              size: targetRadius,
+              origin: [rasterCenter.x, rasterCenter.y],
+            },
+            0,
+            0,
+          )
+          corners.forEach((point, index) => {
+            if (index === 0) ctx.moveTo(point.x, point.y)
+            else ctx.lineTo(point.x, point.y)
+          })
+          ctx.closePath()
+        }
+        ctx.clip()
+        ctx.drawImage(image, fit.x, fit.y, fit.width, fit.height)
+        ctx.restore()
+        drawnRegions += 1
+      }
+    }
+    return drawnRegions
   }
 
   private drawPlan(plan: MapRenderPlan, document_: MapDocument): void {
@@ -718,9 +867,12 @@ export class MapOverlay {
       }
     }
 
+    // 「整片一张图」的图片画在**逐格地形之上、网格线之下**：
+    // 它属于地形这一层（网格线压在它上面才正常，不然整片图会盖住网格）。
+    this.stats.lastImageRegionCount = this.drawRegionImages(ctx, plan, document_, targetRadius)
+
     // 网格与名称都从图层设置读（不再有覆盖层内部的副本）
     this.stats.lastGridCells = isLayerVisible(this.layers(), 'grid') ? this.drawGrid(ctx, plan, document_, targetRadius) : 0
-
     const showShapeLabels = isLayerVisible(this.layers(), 'labels')
     for (const region of plan.regions) drawRegion(ctx, layer, region, showShapeLabels)
     for (const path of plan.paths) drawPath(ctx, layer, path, showShapeLabels)
