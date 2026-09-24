@@ -363,6 +363,39 @@
   color: var(--text-faint);
 }
 
+/* ---- 报告面板（地图状态 / 诊断报告） ---- */
+
+/*
+ * 正文：等宽 + 可选中复制 + 超长可滚动。
+ * 用 <pre> 是因为报告的换行与缩进是有意义的（地形分类、图例条目都是缩进列表）。
+ */
+.fc-report-body {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.6;
+  /* pre 默认不换行：长路径 / 长 ID 会把对话框撑破 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 关键：报告最常见的用途就是复制给别人看 */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.fc-report-hint {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 /* ---- 地图面板（右侧边栏视图） ---- */
 
 /* 设置页标题下的一行译名（名字只在一处出现，别在每个标题里都写两遍） */

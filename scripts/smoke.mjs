@@ -46,8 +46,17 @@ const REAL = {
 // 插件会把整份诊断报告 console.log 出来；默认抑制它，只在 --verbose 时显示，
 // 否则真正的测试结论会被几百行报告淹没。报告内容仍会从 vault 写入路径断言。
 const capturedReports = []
+/**
+ * 所有被打印到控制台的字符串。
+ *
+ * 为什么需要它：报告面板打不开时，插件会把报告正文**打到控制台**当作退路
+ * （否则这次排查就白做了）。那条退路必须能被断言 —— 而 `capturedReports`
+ * 只认诊断报告的前缀（`# Project Kaki — Phase 0`），状态报告不在其列。
+ */
+const consoleLines = []
 const realConsoleLog = console.log.bind(console)
 console.log = (first, ...rest) => {
+  if (typeof first === 'string') consoleLines.push(first)
   if (typeof first === 'string' && first.startsWith('# Project Kaki — Phase 0')) {
     capturedReports.push(first)
     if (verbose) realConsoleLog(first)
@@ -459,6 +468,19 @@ function makeEl({
     },
     setPointerCapture() {},
     releasePointerCapture() {},
+    /**
+     * 聚焦相关：真实 DOM 的每个元素都有这几个方法，而对话框打开后会自动聚焦输入框
+     * （`setTimeout(() => inputEl.focus(), 0)`）。桩里缺 `focus` 会在下一个 tick 抛错 ——
+     * 报错位置离真正的原因很远，所以这里一并补上，并如实维护 `document.activeElement`。
+     */
+    focus() {
+      el.doc.activeElement = el
+    },
+    blur() {
+      if (el.doc.activeElement === el) el.doc.activeElement = null
+    },
+    select() {},
+    setSelectionRange() {},
     appendChild(child) {
       child.parentNode = el
       el.children.push(child)
@@ -601,14 +623,70 @@ fakeDocument.defaultView = {
 globalThis.window = globalThis.window ?? fakeDocument.defaultView
 
 const noticeLog = []
+/** 与 noticeLog 一一对应：每条提示的时长（毫秒）。用户抱怨过"等太久才消失"，所以时长必须可断言 */
+const noticeDurations = []
 const vaultWrites = []
 /** 记录被打开过的笔记链接（工作区桩会往里写） */
 const openedLinks = []
 
-class FakeNotice {
-  constructor(message) {
-    noticeLog.push(String(message))
+/**
+ * 假的剪贴板：如实记录被写入的文本。
+ *
+ * 真实 Obsidian 里报告面板的「复制」按钮走 `navigator.clipboard.writeText`；
+ * 桩里没有它的话，那条断言只能看到"复制失败的分支"，等于没测成功路径。
+ * `installClipboard(false)` 覆盖"剪贴板不可用"的退化分支（真实环境确实会发生：
+ * 非安全上下文、权限被拒）。
+ *
+ * ⚠️ 实现上**只给真实的 `navigator` 加一个属性**，不替换它：
+ * 前两版都栽在这上面 —— 第一版把 navigator 换成只有 `clipboard` 的对象，
+ * 结果 `navigator.userAgent` 没了，诊断报告直接抛错（与剪贴板毫不相干的功能被打挂）；
+ * 第二版改用 `Object.create(navigator)` 继承，又撞上 Node 的 `userAgent` 是**私有字段 getter**，
+ * 换个 receiver 就抛 "Cannot read private member"。
+ * 教训：**桩要补全能力，不要替换实体**；浏览器里的 navigator 本来就有 clipboard，
+ * 给它加一个属性才是更接近真实的形状。
+ */
+const clipboardWrites = []
+function installClipboard(available) {
+  const target = globalThis.navigator
+  if (target === undefined || target === null) return false
+  if (available) {
+    target.clipboard = {
+      writeText: async (text) => {
+        clipboardWrites.push(String(text))
+      },
+    }
+  } else {
+    // 不可用时把它去掉（Node 的 navigator 本来就没有 clipboard，所以在原型链上也取不到）
+    delete target.clipboard
   }
+  return true
+}
+installClipboard(true)
+
+/**
+ * 假 Notice。
+ *
+ * 时长也记下来：报告原来是 `new Notice(多行文本, 15000)`，用户的反馈是"过一会才消失，等待时间过久"。
+ * 只记文本的话，"时长"这个缺陷在测试里**完全看不见** —— 冒烟里那条全局上界断言就是靠这个字段成立的。
+ * 省略时长时按 5000 记（真实 Obsidian 的默认值约 5 秒；`0` 表示常驻，这里如实保留 0）。
+ */
+class FakeNotice {
+  constructor(message, duration) {
+    noticeLog.push(String(message))
+    noticeDurations.push(typeof duration === 'number' ? duration : 5000)
+  }
+}
+
+/**
+ * 清空提示记录。
+ *
+ * **必须成对清空** `noticeLog` 与 `noticeDurations`：两个数组一一对应，
+ * 只清一个就会让错位发生 —— 末尾那条"所有提示都不超过 6000ms"的全局断言会读到别的提示的时长，
+ * 于是可能漏掉一条超时提示、也可能误报。这类错位是沉默的，只在很久以后才被发现。
+ */
+function clearNotices() {
+  noticeLog.length = 0
+  noticeDurations.length = 0
 }
 
 class FakeTFile {
@@ -646,6 +724,13 @@ class FakeSetting {
     const text = {
       value: '',
       placeholder: null,
+      /**
+       * `inputEl` 必须存在且是真假元素：真实的 TextPromptModal 会在它上面挂 keydown
+       * （"回车提交"就靠这个），`PlaceMarkerModal` 也一样。
+       * 之前假 Modal 的 `open()` 是空实现，这些对话框在冒烟里从未真的被构建过，
+       * 于是缺这一项也一直没暴露 —— 把 `open()` 改忠实之后立刻就炸了。
+       */
+      inputEl: makeEl({ tagName: 'input', className: 'text-input' }),
       setPlaceholder(value) {
         this.placeholder = value
         return this
@@ -702,10 +787,37 @@ class FakeSetting {
 
   addButton(callback) {
     const setting = this
+    /**
+     * 按钮桩要覆盖真实 `ButtonComponent` 里**插件实际用到的**那些链式方法。
+     * 缺一个（例如 `setCta`）就会在 `onOpen` 里抛错 —— 而这类错误只在
+     * "真的把对话框打开一次"时才会出现，所以过去一直没被发现。
+     */
     const button = {
       text: '',
+      disabled: false,
+      cta: false,
       setButtonText(value) {
         this.text = value
+        return this
+      },
+      setCta() {
+        this.cta = true
+        return this
+      },
+      setWarning() {
+        this.warning = true
+        return this
+      },
+      setDisabled(value) {
+        this.disabled = Boolean(value)
+        return this
+      },
+      setTooltip(value) {
+        this.tooltip = value
+        return this
+      },
+      setIcon(value) {
+        this.icon = value
         return this
       },
       onClick(handler) {
@@ -924,10 +1036,24 @@ const fakeObsidian = {
   Modal: class FakeModal {
     constructor(app) {
       this.app = app
-      this.contentEl = { empty() {}, createEl: () => ({}) }
+      /**
+       * `contentEl` 必须是**真的**假元素（有 children / createEl / setText …），
+       * 而不是 `{ empty() {}, createEl: () => ({}) }`。
+       * 报告面板要在里面建 `<pre>` 并写正文；用一个只会返回空对象的桩，
+       * 断言就只能看到 undefined —— 那是"桩太薄"造成的假失败，与实现无关。
+       */
+      this.contentEl = makeEl({ className: 'modal-content' })
     }
-    open() {}
-    close() {}
+    /**
+     * 如实调用 `onOpen` / `onClose`：真实 `Modal.open()` 会触发 `onOpen`。
+     * 桩里不调的话，面板的正文根本不会被构建 —— 于是"面板里的内容"这类断言全部测不到东西。
+     */
+    open() {
+      this.onOpen?.()
+    }
+    close() {
+      this.onClose?.()
+    }
   },
   Setting: FakeSetting,
   // 设置界面会 extends PluginSettingTab：桩里必须有这个类（否则类定义阶段就抛错）
@@ -1428,8 +1554,33 @@ async function runDiagnostics(app) {
   return { plugin, report }
 }
 
-/** 递归收集某个 class 的所有后代元素（按**完整 class 词**匹配，避免前缀误伤） */
-function collectByClass(root, className) {
+/**
+ * 捕获「报告面板」的内容。
+ *
+ * 地图状态报告与诊断报告现在走报告面板而不是长 `Notice`（用户反馈：弹窗盖住侧边栏按钮、
+ * 要等很久才消失、而且文字复制不出来）。于是断言不能再从 `noticeLog` 拿文本 ——
+ * 这里注入一个"只记下 options"的替身，并把**默认工厂**一并返回：
+ * 需要验证真实面板的按钮时，用默认工厂自己去造一个面板实例。
+ */
+function captureReports(plugin) {
+  const reports = []
+  const defaultFactory = plugin.reportModalFactory
+  plugin.setReportModalFactory((_app, options) => {
+    reports.push(options)
+    return { open() {} }
+  })
+  return {
+    reports,
+    /** 最近一次报告的正文（没有报告时返回空串，让断言能给出可读的失败信息） */
+    text: () => reports.at(-1)?.text ?? '',
+    last: () => reports.at(-1),
+    /** 恢复成真实面板（此后命令会真的造一个 ReportModal） */
+    restore: () => plugin.setReportModalFactory(defaultFactory),
+    defaultFactory,
+  }
+}
+
+/** 递归收集某个 class 的所有后代元素（按**完整 class 词**匹配，避免前缀误伤） */function collectByClass(root, className) {
   const out = []
   const walk = (node) => {
     if (typeof node.className === 'string' && node.className.split(/\s+/).includes(className)) out.push(node)
@@ -1624,7 +1775,11 @@ console.log('场景 1：真实结构与对抗性 tx/ty（tx/ty 故意不等于�
   check('运行时不施加偏差修正（差异在噪声内）', report.includes('不构成闭式关系有偏的证据'), report.match(/标定原点与闭式原点的差异[^\n]*/)?.[0] ?? '')
   check('对抗性 tx/ty 下中心公式被判为不可用', report.includes('❌ 中心公式与 posFromEvt 不一致'), report.match(/中心公式判定[^\n]*/)?.[0] ?? '')
   check('结论为可进入 Phase 1', report.includes('可进入 Phase 1'))
-  check('剪贴板不可用时回退写入 vault 文件', app.vault.files.has('FC-diagnostics.md'))
+  // 诊断命令现在**只**打开报告面板：不再自动复制剪贴板、也不再自动写库内文件。
+  // 那两件事是面板上的两个按钮（用户自己决定要不要做）—— 自动复制对"只想看一眼"的人是噪音，
+  // 自动写文件则在库里留下没人清理的 FC-diagnostics.md。
+  check('诊断命令不再自动写库内文件（写文件是面板上的按钮）', app.vault.files.has('FC-diagnostics.md') === false)
+  check('诊断命令不再自动写剪贴板', clipboardWrites.length === 0, clipboardWrites.join(' | ').slice(0, 80))
 }
 
 console.log('\n场景 1b：闭式关系被人为偏移时应判为「可能有系统偏差」（鉴别力对照）')
@@ -1820,17 +1975,35 @@ console.log('\n场景 9：地图状态命令（端到端走一遍命令路径）
 
   const status = plugin.commands.find((c) => c.id === 'map-status')
   if (!status) throw new Error('未注册 map-status 命令')
+  const capture = captureReports(plugin)
   const before = noticeLog.length
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 60))
-  const message = noticeLog.slice(before).join(' | ')
+  const message = capture.text()
+  check('状态报告打开了报告面板（而不是弹一条长提示）', capture.reports.length === 1, String(capture.reports.length))
   check('状态命令报出地图路径', message.includes('Maps/World.map.md'), message.slice(0, 120))
   check('状态命令报出地形格数', message.includes('地形 3 格'), message.slice(0, 160))
   check('状态命令报出地形分类', message.includes('forest×2') && message.includes('water×1'), message.slice(0, 160))
   check('状态命令报出文件体积', /文件 [\d.]+ KiB/.test(message))
   check('状态命令报出绑定状态而非「未绑定」', !message.includes('尚未绑定地图文档'), message.slice(0, 120))
+  check(
+    '报告不再经过 Notice（长文本与短提示是两条通道）',
+    noticeLog.slice(before).every((line) => !line.includes('地形 3 格')),
+    noticeLog.slice(before).join(' | '),
+  )
+  check(
+    '导出文件名基于地图基础名',
+    capture.last()?.fileName === 'Maps/World-状态报告.md',
+    String(capture.last()?.fileName),
+  )
+  check(
+    '报告面板拿到了导出回调（按钮才有事可做）',
+    typeof capture.last()?.onExport === 'function',
+    String(typeof capture.last()?.onExport),
+  )
+  capture.restore()
 
-  // 未绑定时应给出明确提示
+  // 未绑定时应给出明确提示（这一条仍然是短提示：它是一句话，不是报告）
   const other = makeApp(makeCanvas())
   const otherPlugin = await loadPlugin(other)
   const otherStatus = otherPlugin.commands.find((c) => c.id === 'map-status')
@@ -3091,12 +3264,13 @@ console.log('\n场景 18：名称字号的实测标定与用户可调（"字太�
   )
 
   // 状态命令要把实测字号报出来（下一轮反馈可以直接贴这个数字）
-  noticeLog.length = 0
+  const sizeCapture = captureReports(plugin)
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 60))
-  const statusText = noticeLog.join('\n')
+  const statusText = sizeCapture.text()
   check('状态命令报出名称字号', /名称字号：路径 \d+ px · 区域 \d+ px/.test(statusText), statusText.replace(/\n/g, ' | ').slice(0, 200))
   check('状态命令报出实测标定', /标定 1 CSS px = [\d.]+ 位图像素/.test(statusText), statusText.replace(/\n/g, ' | ').slice(0, 200))
+  sizeCapture.restore()
 
   plugin.onunload()
 }
@@ -3233,7 +3407,7 @@ console.log('\n场景 19：Base 自定义视图（注册、合并两个来源、
   check('并给出空状态提示而不是白屏', collectByClass(empty, 'fc-base-empty').length === 1)
 
   // ---- 生成起始 .base 文件 ----
-  noticeLog.length = 0
+  clearNotices()
   await runCommand(plugin, 'create-map-base')
   await new Promise((resolve) => setTimeout(resolve, 60))
   const basePath = 'Maps/World.base'
@@ -3244,7 +3418,7 @@ console.log('\n场景 19：Base 自定义视图（注册、合并两个来源、
   check('命令给出了创建的提示', noticeLog.some((line) => line.includes(basePath)), noticeLog.join(' | '))
 
   // 再执行一次不能覆盖已有文件
-  noticeLog.length = 0
+  clearNotices()
   await runCommand(plugin, 'create-map-base')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check('已存在时不覆盖', noticeLog.some((line) => line.includes('已存在同名 Base 文件')), noticeLog.join(' | '))
@@ -3257,7 +3431,7 @@ console.log('\n场景 19：Base 自定义视图（注册、合并两个来源、
     const legacy = await loadPlugin(legacyApp)
     check('旧版本上加载不报错', legacy.getBasesAvailable() === false, String(legacy.getBasesAvailable()))
     check('旧版本上 Base 视图未注册', legacy.basesViews.length === 0)
-    noticeLog.length = 0
+    clearNotices()
     await runCommand(legacy, 'create-map-base')
     check('旧版本上给出明确提示而不是静默失败', noticeLog.some((line) => line.includes('1.10.0+')), noticeLog.join(' | '))
     check('Canvas 功能不受影响（地图层仍可用）', typeof legacy.getLayerManager()?.enableForActiveCanvas === 'function')
@@ -3293,7 +3467,7 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
   await settleEvents()
 
   // ---- 未启用地图层时必须给出明确提示（而不是导出一个空文件）----
-  noticeLog.length = 0
+  clearNotices()
   await runCommand(plugin, 'export-map-svg')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check(
@@ -3308,7 +3482,7 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
   await new Promise((resolve) => setTimeout(resolve, 80))
   check('地图层已启用', layers.getDocument(canvasPath) !== null)
 
-  noticeLog.length = 0
+  clearNotices()
   openedLinks.length = 0
   await runCommand(plugin, 'export-map-svg')
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -3705,7 +3879,7 @@ console.log('\n场景 22：地图面板（侧边栏视图）与开发者模式�
   check('面板里也不再显示', buttonLabels().every((label) => !label.includes('诊断当前 Canvas')), buttonLabels().join(' | '))
 
   // ---- 点面板按钮 = 执行命令 ----
-  noticeLog.length = 0
+  clearNotices()
   const layerButton = () => buttonByLabel('启用/停用当前 Canvas 的地图层')
   check('地图层按钮可用', layerButton()?.disabled === false, String(layerButton()?.disabled))
   fireEvent(layerButton(), 'click')
@@ -4537,10 +4711,10 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   await plugin.setLayerVisible('paths', false)
   await plugin.setLayerVisible('labels', false)
   await plugin.setShowLegend(true)
-  noticeLog.length = 0
+  const layerCapture = captureReports(plugin)
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 30))
-  const statusText = noticeLog.join('\n')
+  const statusText = layerCapture.text()
   check(
     '状态命令报出当前隐藏了哪些层',
     statusText.includes('图层：') && statusText.includes('路径') && statusText.includes('名称'),
@@ -4555,10 +4729,10 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   await plugin.setLayerVisible('labels', true)
   // 网格在前面的设置页步骤里被关掉了：这里显式恢复，才能断言"全部显示"这句话
   await plugin.setLayerVisible('grid', true)
-  noticeLog.length = 0
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 30))
-  check('全部显示时状态命令这么说', noticeLog.join('\n').includes('图层：全部显示'), noticeLog.join('\n').slice(0, 200))
+  check('全部显示时状态命令这么说', layerCapture.text().includes('图层：全部显示'), layerCapture.text().slice(0, 200))
+  layerCapture.restore()
 
   // ---- 重开地图层：新建的工具条必须与设置一致 ----
   // 这是"两份状态"最容易露馅的地方：如果名称开关还存在每张画布的运行时状态里，
@@ -4665,7 +4839,7 @@ console.log('\n场景 26：PNG 导出（复用 SVG 几何 → 光栅化 → 两�
   )
 
   // ---- 未启用地图层：明确提示，且不产生文件 ----
-  noticeLog.length = 0
+  clearNotices()
   await runCommand(plugin, 'export-map-png')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check(
@@ -4682,7 +4856,7 @@ console.log('\n场景 26：PNG 导出（复用 SVG 几何 → 光栅化 → 两�
   // ---- 降级路径（不注入任何替身）----
   // 假环境有 Image 与 2D 上下文，但画布**没有 toBlob** —— 正是部分移动端 WebView 的样子。
   // 期望：给出可读原因、**不产生文件**（半个空图比没有文件更糟：用户会以为导出成功了）。
-  noticeLog.length = 0
+  clearNotices()
   openedLinks.length = 0
   await runCommand(plugin, 'export-map-png')
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -4702,7 +4876,7 @@ console.log('\n场景 26：PNG 导出（复用 SVG 几何 → 光栅化 → 两�
     createCanvas: (width, height) => ({ width, height, getContext: () => ({ drawImage() {} }) }),
     toBlob: async () => null,
   })
-  noticeLog.length = 0
+  clearNotices()
   await runCommand(plugin, 'export-map-png')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check(
@@ -4725,7 +4899,7 @@ console.log('\n场景 26：PNG 导出（复用 SVG 几何 → 光栅化 → 两�
     toBlob: async () => ({ arrayBuffer: async () => pngMagic.buffer.slice(0) }),
   })
 
-  noticeLog.length = 0
+  clearNotices()
   openedLinks.length = 0
   await runCommand(plugin, 'export-map-png')
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -4761,7 +4935,7 @@ console.log('\n场景 26：PNG 导出（复用 SVG 几何 → 光栅化 → 两�
 
   // ---- 恢复真实实现：注入点只该影响测试 ----
   plugin.setPngRasterizer(null)
-  noticeLog.length = 0
+  clearNotices()
   await runCommand(plugin, 'export-map-png')
   await new Promise((resolve) => setTimeout(resolve, 60))
   check(
@@ -4927,7 +5101,198 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
   plugin.onunload()
 }
 
+console.log('\n场景 28：报告面板（状态报告不再用长提示，而是可复制/可导出的面板）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const canvasPath = 'Maps/World.canvas'
+  const mapFile = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  // 地形要**落盘**：状态命令会重新读文件（不是读内存里的文档），
+  // 只改内存的话报告里会写着"地形 0 格"——第一版就是这样，连带让"报告没走 Notice"那条断言
+  // 变成了空断言（因为那一刻报告里根本没有"地形 1 格"这句话可找）。
+  const persisted = await store.load(mapFile)
+  persisted.document.terrain['0_0'] = { t: 'forest' }
+  await store.writeNow(mapFile, persisted.document, 'World', [canvasPath])
+  await settleEvents()
+
+  // 启用地图层并画一帧：报告里的「名称字号 / 实测标定」只有真的画过帧才有数字
+  // （没画过时它会如实写"本帧未绘制"——那也是正确行为，但用户记住的是有数字的那一版）
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  canvas.markViewportChanged()
+  flushFrames()
+
+  // ---- 命令侧：打开面板而不是弹长提示 ----
+  const capture = captureReports(plugin)
+  const before = noticeLog.length
+  runCommand(plugin, 'map-status')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const report = capture.last()
+  check('状态命令打开了报告面板', capture.reports.length === 1 && typeof report?.text === 'string', String(capture.reports.length))
+  check(
+    '报告正文包含用户记住的那两行（名称字号与实测标定）',
+    /名称字号：路径 \d+ px/.test(report?.text ?? '') && /标定 1 CSS px = [\d.]+ 位图像素/.test(report?.text ?? ''),
+    (report?.text ?? '').replace(/\n/g, ' | ').slice(0, 240),
+  )
+  check(
+    '报告正文也包含图层与图例（排查"东西不见了"的两行）',
+    (report?.text ?? '').includes('图层：') && (report?.text ?? '').includes('图例：'),
+    (report?.text ?? '').replace(/\n/g, ' | ').slice(0, 240),
+  )
+  check(
+    '这一操作没有留下任何长提示（用户抱怨的就是"等太久"）',
+    noticeLog
+      .slice(before)
+      .every((_line, index) => (noticeDurations[before + index] ?? 0) <= 6000),
+    JSON.stringify(noticeDurations.slice(before)),
+  )
+  check('报告没有走 Notice 通道', !noticeLog.slice(before).some((line) => line.includes('地形 1 格')), noticeLog.slice(before).join(' | '))
+
+  // ---- 真实面板：正文、复制、导出（用默认工厂造一个真面板，选项是命令刚传进去的那份） ----
+  capture.restore()
+  const realModal = capture.defaultFactory(app, report)
+  realModal.open()
+  const body = collectByClass(realModal.contentEl, 'fc-report-body')[0]
+  check('正文渲染在 <pre> 里（换行与缩进保留）', body !== undefined && body.tagName === 'PRE', String(body?.tagName))
+  check('pre 里的文本与报告完全一致（不截断）', body?.textContent === report.text, String(body?.textContent).slice(0, 120))
+  check(
+    '面板标题表明这是地图状态报告',
+    collectByClass(realModal.contentEl, 'fc-report-title')[0]?.textContent === '地图状态报告',
+    String(collectByClass(realModal.contentEl, 'fc-report-title')[0]?.textContent),
+  )
+  check(
+    '提示里写清了导出文件名与重名规则',
+    (collectByClass(realModal.contentEl, 'fc-report-hint')[0]?.textContent ?? '').includes('Maps/World-状态报告.md'),
+    String(collectByClass(realModal.contentEl, 'fc-report-hint')[0]?.textContent),
+  )
+
+  // 按钮通过 `Setting` 创建：一个 Setting 上挂了三个按钮（复制 / 导出 / 关闭），
+  // 所以要在**所有** setting 的按钮列表里找，而不是只看 `setting.button`（那是最后一个）。
+  const openFreshModal = () => {
+    FakeSetting.created.length = 0
+    const modal = capture.defaultFactory(app, report)
+    modal.open()
+    return modal
+  }
+  const buttonNamed = (fragment) =>
+    FakeSetting.created
+      .flatMap((setting) => setting.buttons ?? [])
+      .find((button) => (button.text ?? '').includes(fragment))
+
+  openFreshModal()
+
+  check('面板上有「复制」按钮', buttonNamed('复制') !== undefined)
+  check('面板上有「导出为库内文件」按钮', buttonNamed('导出为库内文件') !== undefined)
+  check('面板上有「关闭」按钮', buttonNamed('关闭') !== undefined)
+
+  clipboardWrites.length = 0
+  await buttonNamed('复制').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('复制按钮把正文写进了剪贴板', clipboardWrites.length === 1 && clipboardWrites[0] === report.text, `${clipboardWrites.length} 次`)
+  check(
+    '复制成功给的是短提示（不该再出现十几秒的弹窗）',
+    noticeDurations.at(-1) !== undefined && noticeDurations.at(-1) <= 4000,
+    String(noticeDurations.at(-1)),
+  )
+  check('提示说明了复制了多少字符', (noticeLog.at(-1) ?? '').includes(`${report.text.length} 字符`), String(noticeLog.at(-1)))
+
+  // 导出：真的写进假库，内容等于面板正文
+  await buttonNamed('导出为库内文件').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '导出按钮把报告写进了库内文件（内容等于正文）',
+    app.vault.files.get('Maps/World-状态报告.md') === report.text,
+    String(app.vault.files.get('Maps/World-状态报告.md')?.slice(0, 60)),
+  )
+  check('导出成功也给短提示并报出路径', (noticeLog.at(-1) ?? '').includes('Maps/World-状态报告.md'), String(noticeLog.at(-1)))
+
+  // 重名：加 -2，不覆盖已有文件（与 SVG/PNG 导出同一份命名规则）
+  await buttonNamed('导出为库内文件').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '重名时自动加 -2（不覆盖上一次的报告）',
+    app.vault.files.has('Maps/World-状态报告-2.md') && app.vault.files.get('Maps/World-状态报告.md') === report.text,
+    [...app.vault.files.keys()].filter((key) => key.startsWith('Maps/World-状态报告')).join(','),
+  )
+
+  // 剪贴板不可用：必须退化为"帮你选中 + 告诉我按什么键"，而不是静默失败
+  installClipboard(false)
+  const fallbackModal = openFreshModal()
+  await buttonNamed('复制').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '剪贴板不可用时给出可操作的退路（不是静默失败）',
+    /选中|手动/.test(noticeLog.at(-1) ?? ''),
+    String(noticeLog.at(-1)),
+  )
+  check('退路提示也是短提示', (noticeDurations.at(-1) ?? 0) <= 4000, String(noticeDurations.at(-1)))
+  installClipboard(true)
+
+  // 面板自身不该持有库知识：导出失败时它只负责把后端的原因讲出来
+  FakeSetting.created.length = 0
+  const failingModal = capture.defaultFactory(app, {
+    title: '失败样本',
+    text: 'x',
+    fileName: 'Maps/失败报告.md',
+    onExport: async () => {
+      throw new Error('磁盘满了')
+    },
+  })
+  failingModal.open()
+  await buttonNamed('导出为库内文件').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('导出失败时把后端的原因原样讲出来', (noticeLog.at(-1) ?? '').includes('磁盘满了'), String(noticeLog.at(-1)))
+
+  // ---- 面板打不开时的退路：报告不能消失（否则这次排查就白做了） ----
+  const consoleBefore = consoleLines.length
+  plugin.setReportModalFactory(() => {
+    throw new Error('面板构造失败')
+  })
+  runCommand(plugin, 'map-status')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  check(
+    '面板打不开时给出可读提示而不是静默失败',
+    (noticeLog.at(-1) ?? '').includes('控制台'),
+    String(noticeLog.at(-1)),
+  )
+  check(
+    '并且把报告正文打印到控制台（内容不会丢）',
+    consoleLines.slice(consoleBefore).some((line) => line.includes('地形 1 格')),
+    consoleLines.slice(consoleBefore).join(' | ').slice(0, 160),
+  )
+  capture.restore()
+
+  plugin.onunload()
+}
+
 console.log('')
+
+// ---------------------------------------------------------------- 全局回归
+// 用户的原话是"过一会才消失，等待时间过久"：这条断言盯住**上界**，
+// 而不是某一条具体的提示 —— 下次谁再写一个 15 秒的弹窗，这里会直接红。
+{
+  const offenders = noticeDurations
+    .map((duration, index) => ({ duration, message: noticeLog[index] ?? '' }))
+    .filter((item) => item.duration > 6000)
+  check(
+    '所有提示的时长都不超过 6000ms（与 main.ts 的 NOTICE_MAX_MS 一致）',
+    offenders.length === 0,
+    offenders
+      .slice(0, 3)
+      .map((item) => `${item.duration}ms：${item.message.replace(/\n/g, ' ').slice(0, 60)}`)
+      .join(' | '),
+  )
+  check(
+    '提示的时长都被如实记录（桩不能漏记，否则上一条断言会假通过）',
+    noticeDurations.length === noticeLog.length && noticeDurations.every((value) => typeof value === 'number'),
+    `${noticeDurations.length} vs ${noticeLog.length}`,
+  )
+}
+
 if (failures === 0) {
   console.log(`✓ 冒烟测试全部通过（${assertions} 条断言）`)
 } else {

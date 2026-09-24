@@ -28,6 +28,7 @@ import { MapLayerManager } from './render/MapLayerManager.ts'
 import { buildMapExportSvg } from './base/mapPreview.ts'
 import { exportBasePathFor, rasterizeSvgToPng, uniqueExportPath, type PngRasterDeps } from './base/pngExport.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
+import { ReportModal, type ReportModalFactory, type ReportModalOptions } from './ui/ReportModal.ts'
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type PluginAction } from './ui/MapPanel.ts'
 import {
   CartographerSettingTab,
@@ -71,6 +72,20 @@ export type PromptModalFactory = (
 const DIAGNOSTIC_FALLBACK_PATH = 'FC-diagnostics.md'
 const DEFAULT_MAP_FOLDER = 'Maps'
 /**
+ * 提示（`Notice`）的时长约定：**不超过 6000ms**。
+ *
+ * 用户的真实反馈："初次启动弹窗遮挡侧边栏的按钮，过一会才消失，等待时间过久。"
+ * 于是提示按**内容**分流，而不是按重要性：
+ *
+ * - **短提示 ≤6000ms**：成功、状态、可重试的失败 —— 剩下的都是 1–3 行，6 秒够读完；
+ * - **多行报告不进 Notice**：改用报告面板（`openReport`）—— 可看、可选中复制、可导出，
+ *   而且不会盖住右上角的侧边栏按钮。状态报告与诊断报告都走这条路。
+ *
+ * 冒烟里有一条**全局断言**盯着这个上界（任何场景结束后都不允许存在 >6000ms 的提示）：
+ * 下次谁再写一个 15 秒的弹窗，测试会直接红，而不是等用户来抱怨。
+ */
+const NOTICE_MAX_MS = 6000
+/**
  * 导出尺寸：SVG 与 PNG **共用同一组数字**。
  *
  * 为什么强调共用：PNG 是先导出 SVG 再光栅化的（见 `pngExport.ts`），
@@ -88,6 +103,14 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 命名对话框的工厂：默认用真实对话框，可被替换（自动化测试） */
   private promptModalFactory: PromptModalFactory = (app, options, onSubmit) =>
     new TextPromptModal(app, options, onSubmit)
+  /**
+   * 报告面板的工厂：默认用真实对话框，可被替换（自动化测试）。
+   *
+   * 报告（地图状态 / 诊断）从长 `Notice` 改成面板，是为了解决用户说的三件事：
+   * 弹窗盖住侧边栏按钮、等十几秒才消失、里面的文字复制不出来。
+   * 测试里替换成"只记下 options"的替身，就能直接断言报告正文，而不必去读界面。
+   */
+  private reportModalFactory: ReportModalFactory = (app, options) => new ReportModal(app, options)
   /**
    * PNG 光栅化的环境依赖（仅自动化测试注入；`null` = 用真实实现）。
    *
@@ -220,10 +243,10 @@ export default class ProjectKakiPlugin extends Plugin {
         run: () => {
           const result = this.layers?.toggleEditMode()
           if (!result?.ok) {
-            new Notice(`无法切换绘图模式：${result?.reason ?? '未知原因'}`, 8000)
+            new Notice(`无法切换绘图模式：${result?.reason ?? '未知原因'}`, NOTICE_MAX_MS)
             return
           }
-          new Notice(result.mode === 'paint' ? '已进入绘制模式：左键绘制，Esc 退出' : '已回到选择模式', 6000)
+          new Notice(result.mode === 'paint' ? '已进入绘制模式：左键绘制，Esc 退出' : '已回到选择模式', NOTICE_MAX_MS)
         },
       },
       {
@@ -240,7 +263,7 @@ export default class ProjectKakiPlugin extends Plugin {
         run: () => {
           const editor = activeEditor()
           if (!editor) {
-            new Notice('当前 Canvas 未启用地图层。', 6000)
+            new Notice('当前 Canvas 未启用地图层。', NOTICE_MAX_MS)
             return
           }
           new Notice(editor.undo() ? '已撤销一步地图编辑' : '没有可撤销的地图编辑', 4000)
@@ -260,7 +283,7 @@ export default class ProjectKakiPlugin extends Plugin {
         run: () => {
           const editor = activeEditor()
           if (!editor) {
-            new Notice('当前 Canvas 未启用地图层。', 6000)
+            new Notice('当前 Canvas 未启用地图层。', NOTICE_MAX_MS)
             return
           }
           new Notice(editor.redo() ? '已重做一步地图编辑' : '没有可重做的地图编辑', 4000)
@@ -384,7 +407,7 @@ export default class ProjectKakiPlugin extends Plugin {
     }
     const leaf = this.app.workspace.getRightLeaf(false)
     if (!leaf) {
-      new Notice('无法打开右侧边栏（可能被折叠了）。', 6000)
+      new Notice('无法打开右侧边栏（可能被折叠了）。', NOTICE_MAX_MS)
       return
     }
     await leaf.setViewState({ type: MAP_PANEL_VIEW_TYPE, active: true })
@@ -491,26 +514,26 @@ export default class ProjectKakiPlugin extends Plugin {
 
   private async createMapBase(): Promise<void> {
     if (!this.basesAvailable) {
-      new Notice('当前 Obsidian 不支持 Base 自定义视图（需要 1.10.0+）。', 8000)
+      new Notice('当前 Obsidian 不支持 Base 自定义视图（需要 1.10.0+）。', NOTICE_MAX_MS)
       return
     }
     const maps = this.store?.listMapFiles() ?? []
     if (maps.length === 0) {
-      new Notice('库里还没有地图文档：先用「创建地图并绑定到当前 Canvas」建一张。', 8000)
+      new Notice('库里还没有地图文档：先用「创建地图并绑定到当前 Canvas」建一张。', NOTICE_MAX_MS)
       return
     }
     const mapPath = maps[0]!.path
     const basePath = `${mapPath.replace(/\.map\.md$/i, '')}.base`
     if (this.app.vault.getAbstractFileByPath(basePath)) {
-      new Notice(`已存在同名 Base 文件，未覆盖：${basePath}`, 8000)
+      new Notice(`已存在同名 Base 文件，未覆盖：${basePath}`, NOTICE_MAX_MS)
       return
     }
     try {
       const created = await this.app.vault.create(basePath, buildStarterBaseFile(mapPath))
-      new Notice(`已创建 ${created.path}\n打开它，把视图类型切到「地图」。`, 10000)
+      new Notice(`已创建 ${created.path}\n打开它，把视图类型切到「地图」。`, NOTICE_MAX_MS)
     } catch (error) {
       console.error('[project-kaki] 创建 Base 文件失败', error)
-      new Notice(`创建 Base 文件失败：${error instanceof Error ? error.message : String(error)}`, 8000)
+      new Notice(`创建 Base 文件失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
     }
   }
 
@@ -518,13 +541,13 @@ export default class ProjectKakiPlugin extends Plugin {
     const handle = activeCanvasHandle(this.app)
     const canvasPath = handle?.file?.path
     if (!canvasPath || !this.layers) {
-      new Notice('请先打开一个已启用地图层的 Canvas。', 8000)
+      new Notice('请先打开一个已启用地图层的 Canvas。', NOTICE_MAX_MS)
       return
     }
     const mapPath = this.store?.mapFilePathForCanvas(canvasPath)
     const document = this.layers.getDocument(canvasPath)
     if (!mapPath || !document) {
-      new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', 8000)
+      new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', NOTICE_MAX_MS)
       return
     }
 
@@ -537,11 +560,11 @@ export default class ProjectKakiPlugin extends Plugin {
         exportPath,
         buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains()),
       )
-      new Notice(`已导出地图 SVG：${created.path}`, 8000)
+      new Notice(`已导出地图 SVG：${created.path}`, NOTICE_MAX_MS)
       void this.app.workspace.openLinkText(created.path, '', false)
     } catch (error) {
       console.error('[project-kaki] 导出 SVG 失败', error)
-      new Notice(`导出 SVG 失败：${error instanceof Error ? error.message : String(error)}`, 8000)
+      new Notice(`导出 SVG 失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
     }
   }
 
@@ -559,13 +582,13 @@ export default class ProjectKakiPlugin extends Plugin {
     const handle = activeCanvasHandle(this.app)
     const canvasPath = handle?.file?.path
     if (!canvasPath || !this.layers) {
-      new Notice('请先打开一个已启用地图层的 Canvas。', 8000)
+      new Notice('请先打开一个已启用地图层的 Canvas。', NOTICE_MAX_MS)
       return
     }
     const mapPath = this.store?.mapFilePathForCanvas(canvasPath)
     const document = this.layers.getDocument(canvasPath)
     if (!mapPath || !document) {
-      new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', 8000)
+      new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', NOTICE_MAX_MS)
       return
     }
 
@@ -580,15 +603,15 @@ export default class ProjectKakiPlugin extends Plugin {
         this.pngRasterDeps ?? {},
       )
       if (!result.ok) {
-        new Notice(`导出 PNG 失败：${result.reason}`, 10000)
+        new Notice(`导出 PNG 失败：${result.reason}`, NOTICE_MAX_MS)
         return
       }
       const created = await this.app.vault.createBinary(exportPath, await result.blob.arrayBuffer())
-      new Notice(`已导出地图 PNG：${created.path}`, 8000)
+      new Notice(`已导出地图 PNG：${created.path}`, NOTICE_MAX_MS)
       void this.app.workspace.openLinkText(created.path, '', false)
     } catch (error) {
       console.error('[project-kaki] 导出 PNG 失败', error)
-      new Notice(`导出 PNG 失败：${error instanceof Error ? error.message : String(error)}`, 8000)
+      new Notice(`导出 PNG 失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
     }
   }
 
@@ -821,6 +844,57 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
+   * 替换报告面板（自动化测试用；不改动则为真实的报告对话框）。
+   *
+   * 替换后仍可通过读回 `reportModalFactory` 拿到**默认实现**再自行实例化 ——
+   * 冒烟就是这么做"真实面板按钮"那几条断言的（注入替身拿正文，默认工厂拿真面板验按钮）。
+   */
+  setReportModalFactory(factory: ReportModalFactory): void {
+    this.reportModalFactory = factory
+  }
+
+  // ------------------------------------------------------------ 报告面板
+
+  /**
+   * 打开报告面板（地图状态报告与诊断报告共用）。
+   *
+   * 为什么不用 `Notice`：见 `ReportModal` 顶部注释 —— 多行文本在 Notice 里盖住右上角、
+   * 十几秒才消失、而且**选不中复制不了**。这里把"看/复制/导出"三件事一次给全，
+   * 只留一条 ≤4 秒的结果提示。
+   */
+  private openReport(options: ReportModalOptions): void {
+    const wired: ReportModalOptions =
+      options.fileName !== undefined
+        ? { ...options, onExport: (fileName, text) => this.exportReportFile(fileName, text) }
+        : options
+    try {
+      this.reportModalFactory(this.app, wired).open()
+    } catch (error) {
+      // 面板打不开时不能让报告消失：否则这次排查就白做了（把正文与控制台都留下）
+      console.error('[project-kaki] 打开报告面板失败', error)
+      console.log(options.text)
+      new Notice('无法打开报告面板，报告已打印到开发者控制台（Ctrl/Cmd+Shift+I）。', NOTICE_MAX_MS)
+    }
+  }
+
+  /**
+   * 把报告写到库内文件。
+   *
+   * 重名规则与 SVG / PNG 导出**共用同一份实现**（`uniqueExportPath`）：
+   * 三处各写一遍 `-2/-3` 的循环，迟早会分叉成三种行为。
+   * 这里用 `create` 而不是"存在就覆盖"：报告是越攒越多的东西，覆盖等于悄悄丢掉上一份。
+   */
+  private async exportReportFile(fileName: string, text: string): Promise<string> {
+    // 这里**不能**用 `exportBasePathFor`：它只认地图文档的 `.map.md`
+    // （`Maps/World.map.md` → `Maps/World`），而报告名本来就是 `xxx.md`，
+    // 传进去会得到 `xxx.md.md`。去扩展名这件事各按各的规则做，重名规则再共用。
+    const basePath = fileName.replace(/\.md$/i, '')
+    const path = uniqueExportPath(basePath, '.md', (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
+    await this.app.vault.create(path, text)
+    return path
+  }
+
+  /**
    * 注入 PNG 光栅化的环境依赖（自动化测试用；传 `null` 恢复真实实现）。
    *
    * 真实实现要 `Image` + `canvas.toBlob`，测试环境里跑不出来；而"成功时写入的字节对不对"
@@ -839,19 +913,19 @@ export default class ProjectKakiPlugin extends Plugin {
     const handle = activeCanvasHandle(this.app)
     const canvasPath = handle?.file?.path
     if (!handle || !canvasPath) {
-      new Notice('请先打开一个 .canvas 文件。', 8000)
+      new Notice('请先打开一个 .canvas 文件。', NOTICE_MAX_MS)
       return
     }
 
     if (layers.isEnabled(canvasPath)) {
       layers.disable(canvasPath)
-      new Notice(`已停用 ${canvasPath} 的地图层。`, 6000)
+      new Notice(`已停用 ${canvasPath} 的地图层。`, NOTICE_MAX_MS)
       return
     }
 
     const status = await layers.enable(handle)
     if (!status.attached) {
-      new Notice(`未能启用地图层：${status.reason ?? '未知原因'}`, 10000)
+      new Notice(`未能启用地图层：${status.reason ?? '未知原因'}`, NOTICE_MAX_MS)
       return
     }
 
@@ -864,7 +938,7 @@ export default class ProjectKakiPlugin extends Plugin {
         `本帧绘制：地形 ${stats?.lastCellCount ?? 0} 格 · 裁剪 ${stats?.lastCulledCells ?? 0} 格 · 网格 ${stats?.lastGridCells ?? 0} 格`,
         this.describeLabelSize(),
       ].join('\n'),
-      12000,
+      NOTICE_MAX_MS,
     )
   }
 
@@ -895,7 +969,7 @@ export default class ProjectKakiPlugin extends Plugin {
   private promptCreateMap(): void {
     const canvasPath = this.activeCanvasPath()
     if (canvasPath === null) {
-      new Notice('请先打开一个 .canvas 文件，再运行「创建地图并绑定到当前 Canvas」。', 8000)
+      new Notice('请先打开一个 .canvas 文件，再运行「创建地图并绑定到当前 Canvas」。', NOTICE_MAX_MS)
       return
     }
 
@@ -919,11 +993,11 @@ export default class ProjectKakiPlugin extends Plugin {
     if (!store) return
     try {
       const file = await store.createMap({ name, folder: DEFAULT_MAP_FOLDER, canvasPath })
-      new Notice(`已创建地图：${file.path}（已绑定 ${canvasPath}）`, 8000)
+      new Notice(`已创建地图：${file.path}（已绑定 ${canvasPath}）`, NOTICE_MAX_MS)
       await this.app.workspace.getLeaf(true).openFile(file)
     } catch (error) {
       console.error('[project-kaki] 创建地图失败', error)
-      new Notice(`创建地图失败：${error instanceof Error ? error.message : String(error)}`, 10000)
+      new Notice(`创建地图失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
     }
   }
 
@@ -938,7 +1012,7 @@ export default class ProjectKakiPlugin extends Plugin {
         totalLeaves === 0
           ? '当前没有 .canvas 视图。请打开一个 canvas 后重试。'
           : `检测到 ${totalLeaves} 个 canvas 叶子但只有 ${handles.length} 个已加载，请点击目标 canvas 后重试。`,
-        8000,
+        NOTICE_MAX_MS,
       )
       return
     }
@@ -948,21 +1022,21 @@ export default class ProjectKakiPlugin extends Plugin {
       const count = store.listMapFiles().length
       new Notice(
         `${canvasPath} 尚未绑定地图文档。\n运行「创建地图并绑定到当前 Canvas」新建一张（库内现有 ${count} 张地图）。`,
-        10000,
+        NOTICE_MAX_MS,
       )
       return
     }
 
     const abstract = this.app.vault.getAbstractFileByPath(mapPath)
     if (!(abstract instanceof TFile)) {
-      new Notice(`地图文档不存在或不是文件：${mapPath}`, 8000)
+      new Notice(`地图文档不存在或不是文件：${mapPath}`, NOTICE_MAX_MS)
       return
     }
 
     const loaded = await store.load(abstract)
     if (loaded.document === null) {
       const firstError = loaded.issues.find((issue) => issue.level === 'error')
-      new Notice(`地图加载失败：${firstError?.message ?? '未知原因'}\n详见开发者控制台。`, 12000)
+      new Notice(`地图加载失败：${firstError?.message ?? '未知原因'}\n详见开发者控制台。`, NOTICE_MAX_MS)
       console.log('[project-kaki] 地图加载问题：', loaded.issues)
       return
     }
@@ -983,8 +1057,11 @@ export default class ProjectKakiPlugin extends Plugin {
         })
         .join(' ') || '无'
 
-    new Notice(
-      [
+    // 报告进面板，不再用 15 秒的 Notice：那份文本是要**看**与**复制**的，
+    // 而 Notice 会盖住右上角的侧边栏按钮、等很久才消失、文字还选不中（用户的原始反馈）。
+    this.openReport({
+      title: '地图状态报告',
+      text: [
         `地图：${mapPath}`,
         `版本 v${loaded.document.version}${loaded.readOnly ? '（只读：版本高于本插件）' : ''}`,
         `网格：${loaded.document.grid.orientation} · 边长 ${loaded.document.grid.size}`,
@@ -999,8 +1076,9 @@ export default class ProjectKakiPlugin extends Plugin {
       ]
         .filter((line) => line.length > 0)
         .join('\n'),
-      15000,
-    )
+      // 导出文件名基于地图基础名：`Maps/Los.map.md` → `Maps/Los-状态报告.md`
+      fileName: `${exportBasePathFor(mapPath)}-状态报告.md`,
+    })
     if (loaded.issues.length > 0) console.log('[project-kaki] 地图问题：', loaded.issues)
   }
 
@@ -1026,36 +1104,29 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   // ------------------------------------------------------------ Phase 0 探针
+  /**
+   * 诊断当前 Canvas。
+   *
+   * 报告与状态报告走**同一个面板**（`openReport`）：这里不再自动复制剪贴板、也不再自动写文件 ——
+   * 那两件事现在是面板上的两个按钮，由用户决定要不要做、做到哪里。
+   * 理由：自动复制对"只想看一眼"的人是噪音，而自动写文件会在库里留下没人清理的 `FC-diagnostics.md`。
+   * 控制台那份日志保留：排查时它是最快的入口（`Ctrl/Cmd+Shift+I`）。
+   */
   private async runDiagnostics(): Promise<void> {
     const { handles } = findCanvasHandles(this.app)
     if (handles.length === 0) {
-      new Notice('没有已打开的 Canvas 文件：请先打开一个 .canvas，再运行诊断。', 8000)
+      new Notice('没有已打开的 Canvas 文件：请先打开一个 .canvas，再运行诊断。', NOTICE_MAX_MS)
       return
     }
 
     const report = buildDiagnosticReport(this.app)
     console.log(report)
-
-    try {
-      await navigator.clipboard.writeText(report)
-      new Notice(`诊断报告已复制到剪贴板（${report.length} 字符）。请整段贴回对话。`, 10000)
-      return
-    } catch {
-      // 剪贴板可能因权限不可用，回落到写入 vault 文件
-    }
-
-    try {
-      const existing = this.app.vault.getAbstractFileByPath(DIAGNOSTIC_FALLBACK_PATH)
-      if (existing instanceof TFile) {
-        await this.app.vault.modify(existing, report)
-      } else {
-        await this.app.vault.create(DIAGNOSTIC_FALLBACK_PATH, report)
-      }
-      new Notice(`剪贴板不可用，报告已写入 ${DIAGNOSTIC_FALLBACK_PATH}`, 10000)
-    } catch (err) {
-      console.error('[project-kaki] 写入诊断报告失败', err)
-      new Notice('无法复制或写入报告：请按 Ctrl/Cmd+Shift+I 打开开发者控制台，从日志中复制。', 12000)
-    }
+    this.openReport({
+      title: '诊断报告（Phase 0 探针）',
+      text: report,
+      // 沿用原来的固定文件名：老用户会去库里找这个名字
+      fileName: DIAGNOSTIC_FALLBACK_PATH,
+    })
   }
 
   private toggleViewportWatch(): void {
@@ -1071,16 +1142,16 @@ export default class ProjectKakiPlugin extends Plugin {
           (finalStatus.totalCount > 0
             ? '判定：markViewportChanged 可用于事件驱动重绘 ✅'
             : '判定：一次都没触发，需检查是否真的平移/缩放过 ❌'),
-        12000,
+        NOTICE_MAX_MS,
       )
       return
     }
 
     const status = startViewportWatch(this.app)
     if (!status.patched) {
-      new Notice(`监视启动失败：${status.message}`, 10000)
+      new Notice(`监视启动失败：${status.message}`, NOTICE_MAX_MS)
       return
     }
-    new Notice(`开始在 ${status.canvasPath} 上监视视口变化。\n现在去平移/缩放画布，然后再次运行本命令查看计数。`, 10000)
+    new Notice(`开始在 ${status.canvasPath} 上监视视口变化。\n现在去平移/缩放画布，然后再次运行本命令查看计数。`, NOTICE_MAX_MS)
   }
 }
