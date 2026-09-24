@@ -21,8 +21,8 @@ import {
 import { MAX_CUSTOM_TERRAINS, type CustomTerrain } from '../src/render/terrainCatalog.ts'
 
 const SAMPLE: CustomTerrain[] = [
-  { id: 'custom:marsh', label: '沼泽地', color: '#336655', glyph: 'swamp', imagePath: '' },
-  { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png' },
+  { id: 'custom:marsh', label: '沼泽地', color: '#336655', glyph: 'swamp', imagePath: '', mode: 'color' },
+  { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png', mode: 'image' },
 ]
 
 test('导出 → 序列化 → 解析：内容往返一致', () => {
@@ -129,10 +129,12 @@ test('全部条目都不可用时：报告第一条的原因（而不是返回�
 })
 
 test('合并：同 ID 保留用户现有的定义（导入是补充，不是替换）', () => {
-  const existing: CustomTerrain[] = [{ id: 'custom:marsh', label: '我的沼泽', color: '#000000', glyph: '', imagePath: 'Assets/mine.png' }]
+  const existing: CustomTerrain[] = [
+    { id: 'custom:marsh', label: '我的沼泽', color: '#000000', glyph: '', imagePath: 'Assets/mine.png', mode: 'image' },
+  ]
   const incoming: CustomTerrain[] = [
-    { id: 'custom:marsh', label: '别人的沼泽', color: '#ffffff', glyph: 'swamp', imagePath: '' },
-    { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: '' },
+    { id: 'custom:marsh', label: '别人的沼泽', color: '#ffffff', glyph: 'swamp', imagePath: '', mode: 'color' },
+    { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: '', mode: 'color' },
   ]
   const merged = mergeTerrains(existing, incoming)
   assert.deepEqual(merged.added, ['custom:reef'])
@@ -140,6 +142,7 @@ test('合并：同 ID 保留用户现有的定义（导入是补充，不是替�
   const marsh = merged.terrains.find((terrain) => terrain.id === 'custom:marsh')!
   assert.equal(marsh.label, '我的沼泽', '用户现有的定义不能被覆盖')
   assert.equal(marsh.imagePath, 'Assets/mine.png')
+  assert.equal(marsh.mode, 'image', '模式也是用户现有定义的一部分，不能被外来文件改掉')
   assert.match(merged.skipped[0]!.reason, /保留现有的/)
 })
 
@@ -150,10 +153,11 @@ test('合并：respect 上限，超出的条目被跳过并说明原因', () => 
     color: '#123456',
     glyph: '',
     imagePath: '',
+    mode: 'color' as const,
   }))
   const incoming: CustomTerrain[] = [
-    { id: 'custom:new1', label: '新一', color: '#123456', glyph: '', imagePath: '' },
-    { id: 'custom:new2', label: '新二', color: '#123456', glyph: '', imagePath: '' },
+    { id: 'custom:new1', label: '新一', color: '#123456', glyph: '', imagePath: '', mode: 'color' },
+    { id: 'custom:new2', label: '新二', color: '#123456', glyph: '', imagePath: '', mode: 'color' },
   ]
   const merged = mergeTerrains(existing, incoming)
   assert.equal(merged.terrains.length, MAX_CUSTOM_TERRAINS)

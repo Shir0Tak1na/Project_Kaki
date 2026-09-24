@@ -74,6 +74,9 @@ export function serializeResourceBundle(bundle: ResourceBundle): string {
       `"color": ${JSON.stringify(terrain.color)}`,
       `"glyph": ${JSON.stringify(terrain.glyph)}`,
       `"imagePath": ${JSON.stringify(terrain.imagePath)}`,
+      // 模式必须一起带走：否则"图片模式下配好的图"导入到别处可能被当成调色模式而画不出来。
+      // 旧格式没有这个字段，导入侧的迁移会按"有图就是图片模式"推断，所以加了它不会破坏兼容。
+      `"mode": ${JSON.stringify(terrain.mode)}`,
     ]
     const comma = index === bundle.terrains.length - 1 ? '' : ','
     lines.push(`    { ${fields.join(', ')} }${comma}`)

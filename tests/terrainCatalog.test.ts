@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import {
   CUSTOM_TERRAIN_PREFIX,
   DEFAULT_CUSTOM_TERRAIN_COLOR,
+  DEFAULT_CUSTOM_TERRAIN_MODE,
   MAX_CUSTOM_TERRAINS,
   checkTerrainImagePath,
   findCustomTerrain,
@@ -21,6 +22,7 @@ import {
   normalizeTerrainId,
   normalizeTerrainImagePath,
   normalizeTerrainLabel,
+  normalizeTerrainMode,
   resolveTerrainStyle,
   terrainCatalogSignature,
   terrainIdProblem,
@@ -37,6 +39,7 @@ const swamp = (over: Partial<CustomTerrain> = {}): CustomTerrain => ({
   color: '#556644',
   glyph: '',
   imagePath: '',
+  mode: 'color',
   ...over,
 })
 
@@ -224,7 +227,59 @@ test('目录签名：内容不变则相同，任一字段变化都会变（工�
   assert.notEqual(terrainCatalogSignature(base), terrainCatalogSignature([swamp({ label: '别的名字' })]))
   assert.notEqual(terrainCatalogSignature(base), terrainCatalogSignature([swamp({ imagePath: 'Assets/a.png' })]))
   assert.notEqual(terrainCatalogSignature(base), terrainCatalogSignature([swamp(), swamp({ id: 'custom:b' })]))
+  // 模式改变视觉表现（画图还是画颜色 + 字形），所以它必须进签名 —— 否则切换模式后图集不会重建，
+  // 用户看到的是"切了没反应"
+  assert.notEqual(
+    terrainCatalogSignature([swamp({ mode: 'color' })]),
+    terrainCatalogSignature([swamp({ mode: 'image' })]),
+  )
   assert.equal(terrainCatalogSignature([]), '')
+})
+
+/* ------------------------------------------------------------------ 模式 */
+
+test('模式：显式值原样保留，缺失/非法值按"有没有图片"推断', () => {
+  assert.equal(normalizeTerrainMode('color', 'Assets/a.png'), 'color', '显式选了调色就听用户的')
+  assert.equal(normalizeTerrainMode('image', ''), 'image', '显式选了图片即使还没配图也保持图片模式')
+  assert.equal(normalizeTerrainMode(undefined, 'Assets/a.png'), 'image', '旧数据：配了图 → 迁移成图片模式')
+  assert.equal(normalizeTerrainMode(undefined, ''), 'color', '旧数据：没配图 → 调色模式')
+  assert.equal(normalizeTerrainMode('nonsense', 'Assets/a.png'), 'image', '非法值也走同一条推断，不静默降级成调色')
+  assert.equal(normalizeTerrainMode(null, ''), 'color')
+  assert.equal(normalizeTerrainMode(42, 'Assets/a.png'), 'image')
+})
+
+test('迁移端到端：data.json 里只有 imagePath 的旧条目 → 图片模式', () => {
+  const list = normalizeCustomTerrains([{ id: 'reef', label: '暗礁', color: '#2f6f8f', imagePath: 'Assets/reef.png' }])
+  assert.equal(list.length, 1)
+  assert.equal(list[0]!.mode, 'image')
+  assert.equal(list[0]!.imagePath, 'Assets/reef.png', '路径不能被迁移弄丢')
+  assert.equal(list[0]!.mode === 'image' && resolveTerrainStyle('custom:reef', list).imagePath, 'Assets/reef.png')
+})
+
+test('解析：调色模式下**不把图片交出去**（绘制层因此绝不会去画图）', () => {
+  const colorMode = [swamp({ mode: 'color', imagePath: 'Assets/a.png' })]
+  const style = resolveTerrainStyle('custom:swamp2', colorMode)
+  assert.equal(style.imagePath, '', '调色模式下 imagePath 必须为空')
+  assert.equal(style.base, '#556644', '颜色照常交出去')
+  assert.deepEqual(style.glyph, GENERIC_TERRAIN_GLYPH, '字形照常交出去')
+  assert.equal(style.unknown, false, '它不是"未知地形"，只是选了另一种模式')
+
+  const imageMode = [swamp({ mode: 'image', imagePath: 'Assets/a.png' })]
+  assert.equal(resolveTerrainStyle('custom:swamp2', imageMode).imagePath, 'Assets/a.png')
+})
+
+test('切换模式不丢另一个字段的值（来回切不会白配一遍）', () => {
+  // 这一条钉的是"存着备用"这个承诺：模式只决定画什么，不负责清空别的字段
+  const list = normalizeCustomTerrains([
+    { id: 'reef', label: '暗礁', mode: 'image', imagePath: 'Assets/reef.png', color: '#2f6f8f', glyph: 'swamp' },
+  ])
+  const terrain = list[0]!
+  assert.equal(terrain.mode, 'image')
+  const switched = validateCustomTerrainInput({ ...terrain, mode: 'color' })
+  assert.equal(switched.ok, true)
+  assert.equal(switched.ok === true && switched.terrain.imagePath, 'Assets/reef.png', '切到调色后图片路径仍要留着')
+  assert.equal(switched.ok === true && switched.terrain.glyph, 'swamp', '字形也还在')
+  assert.equal(resolveTerrainStyle('custom:reef', switched.ok === true ? [switched.terrain] : []).imagePath, '', '但这一帧不画图')
 })
 
 test('新增校验：ID 或图片路径不合法时拒绝，并且不返回半成品', () => {
@@ -243,6 +298,12 @@ test('新增校验：ID 或图片路径不合法时拒绝，并且不返回半�
     color: '#123456',
     glyph: '',
     imagePath: 'Assets/a.png',
+    mode: 'image',
   })
+
+  // 新建时不给模式 + 不给图片 → 默认调色（最不容易失败的那一种）
+  const created = validateCustomTerrainInput({ id: 'swamp3' })
+  assert.equal(created.ok === true && created.terrain.mode, DEFAULT_CUSTOM_TERRAIN_MODE)
+  assert.equal(DEFAULT_CUSTOM_TERRAIN_MODE, 'color')
   assert.ok(CUSTOM_TERRAIN_PREFIX.length > 0)
 })

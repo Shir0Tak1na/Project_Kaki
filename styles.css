@@ -415,6 +415,58 @@
   font-size: var(--font-ui-smaller);
 }
 
+/* ---- 设置页：自定义地形的「调色 / 图片」模式分段控件 ---- */
+
+.fc-terrain-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 4px;
+}
+
+.fc-terrain-mode-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.fc-terrain-mode-group {
+  display: flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.fc-terrain-mode-button {
+  padding: 2px 12px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  /* 两段之间一条分隔线，让"两选一"这件事在视觉上成立 */
+  border-left: 1px solid var(--background-modifier-border);
+}
+
+.fc-terrain-mode-button:first-child {
+  border-left: none;
+}
+
+.fc-terrain-mode-button:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* 选中的那一段：底色 + 强调色文字，不能只靠边框粗细区分 */
+.fc-terrain-mode-button.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
 /* 侧边栏很窄：整个面板用紧凑的单行按钮，描述走悬停提示 */
 .fc-panel-root {
   padding: 8px 10px 14px;

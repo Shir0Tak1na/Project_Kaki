@@ -68,17 +68,33 @@ const MAX_LABEL_LENGTH = 24
 /** 未指定颜色时的出厂色：中性灰蓝，和 9 种内置色都不撞 */
 export const DEFAULT_CUSTOM_TERRAIN_COLOR = '#8fa3b0'
 
+/**
+ * 自定义地形的两种模式。
+ *
+ * 为什么要**显式**存一个模式，而不是继续靠"有图片就画图片"推断：
+ * 1. 用户看不出"两个都填会怎样"，也看不出自己现在处于哪种状态（这是实测反馈）；
+ * 2. 想画成"颜色 + 字形"时，只能把图片路径**删掉** —— 而删掉就丢了那条路径，
+ *    改主意时得重新找图。显式模式让"用哪套视觉"和"配了哪些值"互不牵连：
+ *    切回图片模式时，之前选的图还在。
+ */
+export type CustomTerrainMode = 'color' | 'image'
+
+/** 新建时的默认模式：调色不依赖任何外部资源，最不容易失败 */
+export const DEFAULT_CUSTOM_TERRAIN_MODE: CustomTerrainMode = 'color'
+
 export interface CustomTerrain {
   /** 完整 ID（含 `custom:` 前缀）—— **就是写进地图文件的 `t` 值** */
   id: string
   /** 显示名（工具条与设置页用）；改它不影响已存数据 */
   label: string
-  /** 六边形底色 */
+  /** 六边形底色（两种模式都保留：图片模式下它是回退色，也是图片底下的垫色） */
   color: string
   /** 叠哪种字形：内置类型 ID（借用它的字形）或 `''`（通用图元） */
   glyph: string
-  /** 库内图片路径（相对库根）；`''` = 不用图片，只画颜色 + 字形 */
+  /** 库内图片路径（相对库根）；**仅在 `mode === 'image'` 时参与绘制** */
   imagePath: string
+  /** 用哪套视觉：调色（颜色 + 字形）还是图片 */
+  mode: CustomTerrainMode
 }
 
 /** 绘制层真正消费的地形视觉（内置、自定义、未知三种情况被抹平成同一个形状） */
@@ -201,6 +217,23 @@ export function normalizeTerrainImagePath(raw: unknown): string {
   return checkTerrainImagePath(raw).path
 }
 
+/* --------------------------------------------------------------- 模式 */
+
+/**
+ * 收敛模式，并**迁移旧数据**。
+ *
+ * 旧版本没有 `mode` 字段，只有 `imagePath`。迁移规则：**配了图片就按图片模式**，
+ * 否则调色模式 —— 这样老用户升级后看到的画面与升级前**完全一致**（这正是迁移该有的效果）。
+ *
+ * 非法值走**同一条推断**，而不是默认成 `'color'`：
+ * 若把"配了图但 mode 写坏了"降级成调色模式，用户会看到"图明明配着却不显示"，
+ * 而界面上一切正常 —— 那是最难自查的一类问题。
+ */
+export function normalizeTerrainMode(raw: unknown, imagePath: string): CustomTerrainMode {
+  if (raw === 'color' || raw === 'image') return raw
+  return imagePath.length > 0 ? 'image' : 'color'
+}
+
 /* --------------------------------------------------------------- 集合 */
 
 function normalizeOneTerrain(raw: unknown): CustomTerrain | null {
@@ -208,13 +241,16 @@ function normalizeOneTerrain(raw: unknown): CustomTerrain | null {
   const source = raw as Record<string, unknown>
   const id = normalizeTerrainId(source.id)
   if (id === null) return null
+  // 先算图片路径、再定模式：模式的迁移推断就建立在"有没有图片"上
+  const imagePath = normalizeTerrainImagePath(source.imagePath)
   return {
     id,
     label: normalizeTerrainLabel(source.label, id),
     color: normalizeColor(source.color, DEFAULT_CUSTOM_TERRAIN_COLOR),
     // 字形只接受内置类型名；其余（含 null / 未知字符串）退化为通用图元
     glyph: isBuiltinTerrain(source.glyph) ? source.glyph : '',
-    imagePath: normalizeTerrainImagePath(source.imagePath),
+    imagePath,
+    mode: normalizeTerrainMode(source.mode, imagePath),
   }
 }
 
@@ -281,7 +317,9 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
       base: terrain.color,
       outline: FALLBACK_TERRAIN_OUTLINE,
       glyph: glyphFor(terrain.glyph),
-      imagePath: terrain.imagePath,
+      // 调色模式下**不把图片路径交出去**：绘制层拿不到它就绝不会去画图片，
+      // 于是"模式"这件事只需要在这里判断一次，而不是散落到每一处绘制代码里。
+      imagePath: terrain.mode === 'image' ? terrain.imagePath : '',
       builtin: false,
       unknown: false,
     }
@@ -322,7 +360,9 @@ export function terrainLabelOf(id: string, custom: readonly CustomTerrain[] = []
  * 所以只需覆盖所有会改变视觉的字段。
  */
 export function terrainCatalogSignature(custom: readonly CustomTerrain[] = []): string {
-  return custom.map((terrain) => `${terrain.id}|${terrain.label}|${terrain.color}|${terrain.glyph}|${terrain.imagePath}`).join(';')
+  return custom
+    .map((terrain) => `${terrain.id}|${terrain.label}|${terrain.color}|${terrain.glyph}|${terrain.imagePath}|${terrain.mode}`)
+    .join(';')
 }
 
 /** 一份自定义地形记录的自检（设置页保存前用它决定"能不能收"） */
@@ -332,6 +372,7 @@ export function validateCustomTerrainInput(input: {
   color?: unknown
   glyph?: unknown
   imagePath?: unknown
+  mode?: unknown
 }): { ok: true; terrain: CustomTerrain } | { ok: false; problem: string } {
   const id = normalizeTerrainId(input.id)
   if (id === null) return { ok: false, problem: terrainIdProblem(input.id) ?? 'ID 不合法' }
@@ -345,6 +386,7 @@ export function validateCustomTerrainInput(input: {
       color: normalizeColor(input.color, DEFAULT_CUSTOM_TERRAIN_COLOR),
       glyph: isBuiltinTerrain(input.glyph) ? input.glyph : '',
       imagePath: image.path,
+      mode: normalizeTerrainMode(input.mode, image.path),
     },
   }
 }

@@ -10,6 +10,8 @@ import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises
 import path from 'node:path'
 import process from 'node:process'
 
+import { assertBundleIsFresh } from './lib/bundleFreshness.mjs'
+
 const PLUGIN_ID = 'project-kaki'
 /**
  * 改过名的旧插件目录。部署时会：
@@ -33,6 +35,10 @@ async function exists(filePath) {
 }
 
 async function main() {
+  // 门禁：产物必须比源码新。部署一份**过期的构建**是最难受的一种情况 ——
+  // 用户在真实 Obsidian 里验证的是旧代码，而且他无从知道（详见 lib/bundleFreshness.mjs 的说明）。
+  assertBundleIsFresh({ root: repoRoot, action: '部署' })
+
   if (!(await exists(path.join(repoRoot, 'main.js')))) {
     console.error('✗ 找不到 main.js —— 请先运行 npm run build')
     process.exitCode = 1

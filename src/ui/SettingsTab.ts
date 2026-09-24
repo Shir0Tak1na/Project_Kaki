@@ -21,13 +21,26 @@ import { PATH_STYLES, REGION_PRESETS } from '../render/shapeStyle.ts'
 import {
   CUSTOM_TERRAIN_PREFIX,
   DEFAULT_CUSTOM_TERRAIN_COLOR,
+  DEFAULT_CUSTOM_TERRAIN_MODE,
   MAX_CUSTOM_TERRAINS,
   checkTerrainImagePath,
   terrainIdProblem,
+  type CustomTerrainMode,
 } from '../render/terrainCatalog.ts'
 import { listTerrainStyles } from '../render/terrainStyle.ts'
 import { LAYER_KEYS, LAYER_LABELS, isLayerVisible, type LayerKey } from '../render/layerVisibility.ts'
 import { isDefaultPathColors, isDefaultRegionColors } from '../render/stylePalette.ts'
+
+/**
+ * 自定义地形的两种模式（设置页的分段控件用）。
+ *
+ * 提示文字写清"这种模式依赖什么、失败了会怎样" —— 用户选模式时真正要知道的是这个，
+ * 而不是"color / image 两个词的英文含义"。
+ */
+const TERRAIN_MODE_OPTIONS: ReadonlyArray<{ mode: CustomTerrainMode; label: string; hint: string }> = [
+  { mode: 'color', label: '调色', hint: '只用颜色 + 字形：不依赖任何外部资源，最不容易失败' },
+  { mode: 'image', label: '图片', hint: '用库内的一张图片；图片缺失或解不开时回退到颜色 + 字形' },
+]
 
 /**
  * 数据模型在 `settingsModel.ts`（纯函数、不 import obsidian，因此可单测）。
@@ -263,20 +276,44 @@ export class CartographerSettingTab extends PluginSettingTab {
     containerEl.createEl('div', {
       cls: 'fc-settings-note',
       text:
-        '自定义地形会出现在画布工具条里（内置 9 种之后），可以只用一个颜色 + 字形，' +
-        '也可以关联库内的一张图片。ID 是写进地图文件的值（形如 custom:swamp2）——' +
+        '自定义地形会出现在画布工具条里（内置 9 种之后）。每条有两种模式：' +
+        '「调色」只用颜色 + 字形（不依赖任何外部资源），「图片」用库内的一张图片' +
+        '（图片加载失败时回退到颜色 + 字形）。ID 是写进地图文件的值（形如 custom:swamp2）——' +
         '显示名随时可以改，不影响已经画好的格子；反过来，删掉某个地形也不会删掉地图上的格子，' +
         '那些格子会变成回退样式（灰色菱形）并保留在文件里。',
     })
 
     settings.customTerrains.forEach((terrain, index) => {
+      // ---- 模式：两选一 ----
+      // 放在这一条的最上面：它决定下面显示哪些字段，用户得先知道自己在哪种模式里。
+      // 刻意不用 Setting 的控件区（那些是给"一个字段"用的），而是自己搭一行两个按钮 ——
+      // 分段控件要能看出"当前选的是哪个"，这与"点一下就执行"的按钮语义不同。
+      const modeRow = containerEl.createEl('div', { cls: 'fc-terrain-mode' })
+      modeRow.createEl('span', { cls: 'fc-terrain-mode-title', text: `地形 ${index + 1} · ${terrain.label}` })
+      const modeGroup = modeRow.createEl('div', { cls: 'fc-terrain-mode-group' })
+      for (const option of TERRAIN_MODE_OPTIONS) {
+        const button = modeGroup.createEl('button', { cls: 'fc-terrain-mode-button' })
+        button.dataset.mode = option.mode
+        button.dataset.index = String(index)
+        if (terrain.mode === option.mode) button.addClass('is-active')
+        button.textContent = option.label
+        button.title = option.hint
+        button.addEventListener('click', () => {
+          if (terrain.mode === option.mode) return
+          // 只改模式：其余字段原样带着走（见 main.ts 的 updateCustomTerrain），
+          // 所以来回切不会丢配置 —— 切回图片模式时之前选的图还在。
+          void this.plugin.updateCustomTerrain(index, { mode: option.mode }).then(() => this.display())
+        })
+      }
+
+      const imageMode = terrain.mode === 'image'
       new Setting(containerEl)
-        .setName(`地形 ${index + 1} · ${terrain.label}`)
+        .setName(`　└ 名称与颜色 · ${terrain.label}`)
         .setDesc(
           `写入地图文件的 ID：${terrain.id}（不可修改 —— 改它等于换一种地形）。` +
-            (terrain.imagePath.length > 0
-              ? `图片：${terrain.imagePath}（图片缺失时自动回退到颜色 + 字形）`
-              : '当前只用颜色 + 字形（未设置图片）。'),
+            (imageMode
+              ? '当前模式：图片 —— 颜色是「图片加载失败时的回退色」，也是图片底下的垫色。'
+              : '当前模式：调色 —— 只用颜色 + 字形，不依赖任何外部资源。'),
         )
         .addText((text) =>
           text
@@ -298,20 +335,32 @@ export class CartographerSettingTab extends PluginSettingTab {
           }),
         )
 
-      new Setting(containerEl)
-        .setName(`　└ 字形与图片 · ${terrain.label}`)
-        .setDesc('字形：借用某种内置地形的图元；「通用」= 三个点。图片：库内路径，例如 Assets/forest.png')
-        .addDropdown((dropdown) => {
-          dropdown.addOption('', '通用')
-          for (const style of listTerrainStyles()) dropdown.addOption(style.type, style.label)
-          dropdown.setValue(terrain.glyph)
-          dropdown.onChange((value) => {
-            void this.plugin.updateCustomTerrain(index, { glyph: value })
+      if (!imageMode) {
+        // 调色模式：只显示字形。图片那一栏**不显示** —— 用户说的是"看不出两个都填会怎样"，
+        // 那么就该让当前模式下不可能填错的东西根本不出现。
+        new Setting(containerEl)
+          .setName(`　└ 字形 · ${terrain.label}`)
+          .setDesc('字形：借用某种内置地形的图元；「通用」= 三个点。想用自己的图片请把上面的模式切到「图片」。')
+          .addDropdown((dropdown) => {
+            dropdown.addOption('', '通用')
+            for (const style of listTerrainStyles()) dropdown.addOption(style.type, style.label)
+            dropdown.setValue(terrain.glyph)
+            dropdown.onChange((value) => {
+              void this.plugin.updateCustomTerrain(index, { glyph: value })
+            })
           })
-        })
+        return
+      }
+
+      new Setting(containerEl)
+        .setName(`　└ 图片 · ${terrain.label}`)
+        .setDesc(
+          '库内路径，例如 Assets/forest.png；也可以点右边的按钮从库里挑。' +
+            (terrain.imagePath.length === 0 ? '还没选图片：这一格会退回到颜色 + 字形。' : ''),
+        )
         .addText((text) =>
           text
-            .setPlaceholder('图片路径（留空 = 不用图片）')
+            .setPlaceholder('图片路径（留空 = 退回到颜色 + 字形）')
             .setValue(terrain.imagePath)
             .onChange((value) => {
               const check = checkTerrainImagePath(value)
@@ -347,7 +396,6 @@ export class CartographerSettingTab extends PluginSettingTab {
                   })
                   .catch((error: unknown) => {
                     // 不吞异常：重绘失败时用户看到的是"点了没反应"，而真相只有控制台知道。
-                    // 这条 catch 是**实测逼出来的** —— 冒烟里提示行为空，正是因为它被 `void` 吞掉了。
                     console.error('[project-kaki] 选择图片后刷新设置页失败', error)
                     this.setNoteText(
                       `图片已设置，但设置页刷新失败：${error instanceof Error ? error.message : String(error)}（重新打开设置页即可看到新值）`,
@@ -363,12 +411,14 @@ export class CartographerSettingTab extends PluginSettingTab {
     const atLimit = settings.customTerrains.length >= MAX_CUSTOM_TERRAINS
     const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
     this.noteEl = note
-    const pending: { id: string; label: string; color: string; glyph: string; imagePath: string } = {
+    const pending: { id: string; label: string; color: string; glyph: string; imagePath: string; mode: CustomTerrainMode } = {
       id: '',
       label: '',
       color: DEFAULT_CUSTOM_TERRAIN_COLOR,
       glyph: '',
       imagePath: '',
+      // 新建默认「调色」：不依赖任何外部资源，最不容易失败；想用图片建好之后切一下即可
+      mode: DEFAULT_CUSTOM_TERRAIN_MODE,
     }
 
     new Setting(containerEl)

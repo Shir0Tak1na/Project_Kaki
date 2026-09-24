@@ -16,6 +16,9 @@
  *   - 没有打开 Canvas 时的降级提示。
  *
  * 运行：node scripts/build.mjs && node scripts/smoke.mjs [--verbose]
+ *
+ * ⚠️ 不先构建会被**拒绝运行**（见下面的"产物新鲜度门禁"）：冒烟加载的是打包产物，
+ * 拿旧产物跑出来的"失败"不是真的失败。
  */
 
 import fs from 'node:fs'
@@ -28,9 +31,19 @@ import { extractFrontmatterBlock, isMapFileContent, parseFrontmatter } from '../
 import { summarizeMapDocument } from '../src/data/mapDocument.ts'
 import { worldToAxial } from '../src/core/hex.ts'
 import { snapToCellCenter } from '../src/render/markerPlacement.ts'
+import { assertBundleIsFresh } from './lib/bundleFreshness.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
 const verbose = process.argv.includes('--verbose')
+
+/* ------------------------------------------------------- 产物新鲜度门禁 */
+
+/**
+ * 拒绝在"陈旧产物"上运行 —— 门禁实现在 `scripts/lib/bundleFreshness.mjs`，
+ * 因为 `scripts/deploy.mjs` 要防同一件事（而且那边的后果更难受：用户在真实 Obsidian 里
+ * 验证一份过期构建）。两次发作的历史见 `docs/ENGINEERING-NOTES.md` §5.17。
+ */
+assertBundleIsFresh({ root, action: '冒烟测试' })
 
 /** Phase 0 实测数值（Obsidian 1.13.7） */
 const REAL = {
@@ -4206,6 +4219,26 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     clickAt({ x, y })
     flushFrames()
   }
+  /**
+   * 把某条自定义地形切到指定模式。
+   *
+   * 模式控件是"地形 N · 显示名"那一行右侧的两个按钮（`dataset.mode`）。
+   * 换了模式之后设置页会整页重绘，所以这里切完再 `openSettings()` 一次，
+   * 调用方拿到的才是新控件（旧对象是过期的 —— 这个坑本项目已经踩过）。
+   */
+  const switchMode = async (label, mode) => {
+    openSettings()
+    const container = plugin.settingTabs[0].containerEl
+    const row = collectByClass(container, 'fc-terrain-mode').find((candidate) =>
+      (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
+    )
+    const button = collectByClass(row ?? container, 'fc-terrain-mode-button').find((candidate) => candidate.dataset.mode === mode)
+    // 用 fireEvent 而不是 element.click()：假 DOM 的元素本身没有 click()，
+    // 只有假 Setting 的控件对象才有（那是桩提供的便利方法）
+    if (button !== undefined) fireEvent(button, 'click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    openSettings()
+  }
 
   // ---------------------------------------------------------- 设置界面：新增
   openSettings()
@@ -4272,8 +4305,13 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   )
 
   // 图片路径：合法 → 存盘（反斜杠归一化）；非法 → 就地报错且不写盘
+  // 注意：要先切到「图片」模式 —— 调色模式下图片那一栏**根本不存在**（这是设计要求：
+  // 当前模式下不可能填错的东西就该不出现）。
+  await switchMode('礁石', 'image')
+  await switchMode('幽灵地', 'image')
+  await switchMode('破碎地', 'image')
   openSettings()
-  const reefRow = settingNamed('字形与图片 · 礁石')
+  const reefRow = settingNamed('图片 · 礁石')
   await reefRow.texts[0].type('Assets\\marsh.png')
   check(
     '图片路径写进设置（Windows 反斜杠被统一为正斜杠）',
@@ -4281,7 +4319,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(plugin.getSettings().customTerrains[1]),
   )
   openSettings()
-  const ghostRow = settingNamed('字形与图片 · 幽灵地')
+  const ghostRow = settingNamed('图片 · 幽灵地')
   await ghostRow.texts[0].type('Assets/does-not-exist.png')
   check(
     '指向不存在文件的路径**合法**（存不存在只有加载器知道），照样写进设置 —— 回退由绘制层负责',
@@ -4289,7 +4327,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(plugin.getSettings().customTerrains[2]),
   )
   openSettings()
-  const brokenRow = settingNamed('字形与图片 · 破碎地')
+  const brokenRow = settingNamed('图片 · 破碎地')
   await brokenRow.texts[0].type('Assets/broken.png')
   check(
     '存在但解不开的图片路径也照样写进设置（解不开是运行期的事）',
@@ -4297,7 +4335,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(plugin.getSettings().customTerrains[3]),
   )
   openSettings()
-  const reefRow2 = settingNamed('字形与图片 · 礁石')
+  const reefRow2 = settingNamed('图片 · 礁石')
   await reefRow2.texts[0].type('http://example.com/a.png')
   check(
     '非法图片路径被拒绝并就地给出原因',
@@ -4306,8 +4344,8 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   )
   check(
     '字形下拉框列出「通用」+ 内置 9 种（借字形是个可选项，不是隐藏功能）',
-    (settingNamed('字形与图片 · 礁石')?.dropdown?.options?.length ?? 0) === 10,
-    JSON.stringify(settingNamed('字形与图片 · 礁石')?.dropdown?.options?.map((option) => option.value)),
+    (settingNamed('字形 · 沼泽地')?.dropdown?.options?.length ?? 0) === 10,
+    JSON.stringify(settingNamed('字形 · 沼泽地')?.dropdown?.options?.map((option) => option.value)),
   )
 
   // ---------------------------------------------------------- 工具条
@@ -4418,7 +4456,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   app.vault.files.set('Assets/reef2.png', '<png-bytes-2>')
   loadableImageUrls.add(resourceUrlFor('Assets/reef2.png'))
   openSettings()
-  await settingNamed('字形与图片 · 礁石').texts[0].type('Assets/reef2.png')
+  await settingNamed('图片 · 礁石').texts[0].type('Assets/reef2.png')
   check(
     '设置里换成了新路径',
     plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:reef')?.imagePath === 'Assets/reef2.png',
@@ -4497,7 +4535,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
 
   // ---------------------------------------------------------- 删除定义：数据不受影响
   openSettings()
-  await settingNamed('地形 1 · 沼泽地').button.click()
+  await settingNamed('名称与颜色 · 沼泽地').button.click()
   check(
     '删除后设置里没有它了',
     plugin.getSettings().customTerrains.length === 3 && !plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:marsh'),
@@ -5356,13 +5394,39 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
     return FakeSetting.created
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  const imageRow = () => settingNamed('字形与图片 · 沼泽地')
+  /**
+   * 这一条地形新建后默认是「调色」模式，而调色模式下**不显示图片那一栏** ——
+   * 所以想选图必须先切到「图片」模式（这正是模式控件存在的意义）。
+   */
+  const switchMode = async (label, mode) => {
+    openSettings()
+    const container = plugin.settingTabs[0].containerEl
+    const row = collectByClass(container, 'fc-terrain-mode').find((candidate) =>
+      (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
+    )
+    const button = collectByClass(row ?? container, 'fc-terrain-mode-button').find((candidate) => candidate.dataset.mode === mode)
+    // 用 fireEvent 而不是 element.click()：假 DOM 的元素本身没有 click()，
+    // 只有假 Setting 的控件对象才有（那是桩提供的便利方法）
+    if (button !== undefined) fireEvent(button, 'click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    openSettings()
+  }
+  const imageRow = () => settingNamed('图片 · 沼泽地')
   const allNotes = () => collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').map((el) => el.textContent ?? '')
   const noteText = () => allNotes().at(-1) ?? ''
   const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
   const imagePathInSettings = () => plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:marsh')?.imagePath
 
   openSettings()
+  check('默认是「调色」模式（新建时的默认值：不依赖任何外部资源）', plugin.getSettings().customTerrains[0]?.mode === 'color', String(plugin.getSettings().customTerrains[0]?.mode))
+  check(
+    '调色模式下**没有**图片那一栏（当前模式下不可能填错的东西就不该出现）',
+    imageRow() === undefined && settingNamed('字形 · 沼泽地') !== undefined,
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
+  )
+
+  await switchMode('沼泽地', 'image')
+  check('切到图片模式后设置里记的是图片模式', plugin.getSettings().customTerrains[0]?.mode === 'image', String(plugin.getSettings().customTerrains[0]?.mode))
   check('自定义地形那一行有「从库中选择…」按钮', imageRow()?.button !== undefined)
   check(
     '手打的输入框还在（两条路都要通：有人就喜欢粘贴路径）',
@@ -5495,6 +5559,199 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   check('被拒的输入不会写进设置', imagePathInSettings() === 'Assets/手动粘贴.PNG', String(imagePathInSettings()))
 
   plugin.onunload()
+}
+
+console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）与旧数据迁移')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  app.vault.files.set('Assets/reef.png', '<png-bytes>')
+  loadableImageUrls.add(resourceUrlFor('Assets/reef.png'))
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  plugin.setPromptModalFactory((_app, options, onSubmit) => {
+    onSubmit('')
+    return { open() {} }
+  })
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const doc = () => layers.getDocument(canvasPath)
+  /** 当前覆盖层画布（每次插件实例挂载后都要重新取：新实例会插自己的一张） */
+  const overlayCtxNow = () => {
+    const element = canvas.canvasEl.children[0].children[0]
+    attachFaithfulRect(element, canvas)
+    return element._ctx
+  }
+  let ctx = overlayCtxNow()
+  /** 本场景开始前的图集数（`createdCanvasContexts` 跨场景共享，断言必须只数自己新建的那些） */
+  const atlasBaseline = createdCanvasContexts.length
+  const atlasesSince = (baseline = atlasBaseline) => createdCanvasContexts.slice(baseline)
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const clickAt = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+  }
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const terrainOf = () => plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:reef')
+  const modeRow = (label) =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-terrain-mode').find((candidate) =>
+      (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
+    )
+  const modeButton = (label, mode) =>
+    collectByClass(modeRow(label) ?? plugin.settingTabs[0].containerEl, 'fc-terrain-mode-button').find(
+      (candidate) => candidate.dataset.mode === mode,
+    )
+  const switchMode = async (label, mode) => {
+    openSettings()
+    // 用 fireEvent 而不是 element.click()：假 DOM 的元素本身没有 click()，
+    // 只有假 Setting 的控件对象才有（那是桩提供的便利方法）
+    const button = modeButton(label, mode)
+    if (button !== undefined) fireEvent(button, 'click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    openSettings()
+  }
+  /** 从某个基线之后新建的、贴过图片的图集（`createdCanvasContexts` 是跨场景共享的，必须切片） */
+  const atlasesWithImage = (baseline) =>
+    createdCanvasContexts.slice(baseline).filter((candidate) => candidate.images.some((entry) => entry.source?.__isFakeImage))
+
+  // ---- 显式模式：两条路都填过时，模式决定画哪个 ----
+  await plugin.addCustomTerrain({ id: 'reef', label: '礁石', color: '#2f6f8f', imagePath: 'Assets/reef.png', mode: 'color' })
+  await settleEvents()
+  check(
+    '显式选了「调色」：即使配了图也保持调色模式（模式不是靠"有没有图"推断出来的）',
+    terrainOf()?.mode === 'color' && terrainOf()?.imagePath === 'Assets/reef.png',
+    JSON.stringify(terrainOf()),
+  )
+
+  // ---- 画一格（用工具条上的自定义地形按钮，走真实交互路径）----
+  openSettings()
+  check('每条自定义地形都有模式控件（两选一）', modeRow('礁石') !== undefined)
+  check(
+    '模式控件的两个选项是「调色」与「图片」，且当前选中的是调色',
+    collectByClass(modeRow('礁石'), 'fc-terrain-mode-button').map((button) => button.dataset.mode).join(',') === 'color,image' &&
+      modeButton('礁石', 'color')?.classList.contains('is-active') === true &&
+      modeButton('礁石', 'image')?.classList.contains('is-active') === false,
+    collectByClass(modeRow('礁石'), 'fc-terrain-mode-button')
+      .map((button) => `${button.dataset.mode}:${button.classList.contains('is-active')}`)
+      .join(' '),
+  )
+  check(
+    '调色模式下显示字形、不显示图片（当前模式下不可能填错的东西就不出现）',
+    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('字形 · 礁石')) &&
+      !FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 礁石')),
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
+  )
+
+  const customButton = () => collectByClass(wrapper, 'fc-toolbar-terrain')[9]
+  check('工具条上出现了自定义地形的按钮（排在内置 9 种之后）', customButton() !== undefined)
+  fireEvent(customButton(), 'click')
+  editor.setMode('paint')
+  editor.setTool('brush')
+  clickAt({ x: -400, y: -200 })
+  flushFrames()
+  check('文件里存的是自定义 ID', Object.values(doc().terrain).some((cell) => cell.t === 'custom:reef'), JSON.stringify(doc().terrain))
+
+  // ---- 调色模式：图片配着也不画 ----
+  const baselineColor = createdCanvasContexts.length
+  let calls = frame()
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  flushFrames()
+  check(
+    '调色模式下那一帧不把图片贴进图集（配了图也不画）',
+    atlasesWithImage(baselineColor).length === 0,
+    `新建的图集数=${createdCanvasContexts.length - baselineColor}`,
+  )
+  check(
+    '调色模式下画的是这个地形自己的颜色（地形格子画在离屏图集里，所以要查图集的填充色）',
+    atlasesSince().some((atlas) => atlas.fills.some((fill) => fill.fillStyle === '#2f6f8f')),
+    `新建的图集数=${atlasesSince().length} 填充色=${JSON.stringify([...new Set(atlasesSince().flatMap((atlas) => atlas.fills.map((fill) => fill.fillStyle)))])}`,
+  )
+
+  // ---- 切到图片模式：同一帧起改成画图片 ----
+  const baselineImage = createdCanvasContexts.length
+  await switchMode('礁石', 'image')
+  check('切换后设置里是图片模式，并且已落盘', terrainOf()?.mode === 'image' && JSON.parse(plugin._data ?? '{}')?.customTerrains?.[0]?.mode === 'image', `${terrainOf()?.mode} / ${JSON.parse(plugin._data ?? '{}')?.customTerrains?.[0]?.mode}`)
+  check(
+    '图片模式下显示图片那一栏、不再显示字形（同一件事只在一个地方配置）',
+    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 礁石')) &&
+      !FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('字形 · 礁石')),
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
+  )
+  frame()
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  flushFrames()
+  check(
+    '切到图片模式后，那一帧真的把图片贴进了图集（模式改变视觉，所以图集必须重建）',
+    atlasesWithImage(baselineImage).length > 0,
+    `新建的图集数=${createdCanvasContexts.length - baselineImage}`,
+  )
+
+  // ---- 切回调色：不能丢配置 ----
+  const baselineBack = createdCanvasContexts.length
+  await switchMode('礁石', 'color')
+  check(
+    '切回调色后图片路径仍然留在设置里（来回切不会白配一遍）',
+    terrainOf()?.mode === 'color' && terrainOf()?.imagePath === 'Assets/reef.png',
+    JSON.stringify(terrainOf()),
+  )
+  frame()
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  flushFrames()
+  check('切回调色后那一帧又不再画图片', atlasesWithImage(baselineBack).length === 0, `新建的图集数=${createdCanvasContexts.length - baselineBack}`)
+
+  // 等防抖落盘：迁移那一段要让新的插件实例从**文件**里读到这一格
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  const saved = plugin._data
+  plugin.onunload()
+
+  // ---- 旧数据迁移：只有 imagePath、没有 mode（老版本写出来的 data.json）----
+  const legacyData = JSON.stringify({
+    ...JSON.parse(saved ?? '{}'),
+    customTerrains: [{ id: 'custom:reef', label: '礁石', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png' }],
+  })
+  const PluginClass = loadBundleAsCjs()
+  const legacy = new PluginClass(app, { id: 'project-kaki' })
+  legacy._data = legacyData
+  await legacy.onload()
+  check(
+    '旧 data.json（没有 mode 字段）被迁移成图片模式，路径没有被弄丢',
+    legacy.getSettings().customTerrains[0]?.mode === 'image' && legacy.getSettings().customTerrains[0]?.imagePath === 'Assets/reef.png',
+    JSON.stringify(legacy.getSettings().customTerrains[0]),
+  )
+  runCommand(legacy, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  ctx = overlayCtxNow()
+  const baselineLegacy = createdCanvasContexts.length
+  ctx.resetCalls()
+  canvas.markViewportChanged()
+  flushFrames()
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  flushFrames()
+  check(
+    '迁移之后那一帧按图片绘制（端到端证据：不是只改了设置字段）',
+    atlasesWithImage(baselineLegacy).length > 0,
+    `新建的图集数=${createdCanvasContexts.length - baselineLegacy}`,
+  )
+  legacy.onunload()
 }
 
 if (failures === 0) {
