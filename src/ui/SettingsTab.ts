@@ -336,11 +336,15 @@ export class CartographerSettingTab extends PluginSettingTab {
         )
 
       if (!imageMode) {
-        // 调色模式：只显示字形。图片那一栏**不显示** —— 用户说的是"看不出两个都填会怎样"，
-        // 那么就该让当前模式下不可能填错的东西根本不出现。
+        // 调色模式：显示字形。
+        //
+        // ⚠️ 这里曾经在显示完字形后直接 `return` —— 结果是**图片那一栏连入口都不渲染**，
+        // 用户实测反馈"没有看到图片导入按钮"。「当前模式用不到的字段不显示」这条做过了头：
+        // **用户找不到入口，就等于这个功能不存在**。现在图片那一栏始终渲染（见下面），
+        // 调色模式下点它还会自动把模式切过去 —— 一次点击到位。
         new Setting(containerEl)
           .setName(`　└ 字形 · ${terrain.label}`)
-          .setDesc('字形：借用某种内置地形的图元；「通用」= 三个点。想用自己的图片请把上面的模式切到「图片」。')
+          .setDesc('字形：借用某种内置地形的图元；「通用」= 三个点。想用自己的图片见下面那一栏。')
           .addDropdown((dropdown) => {
             dropdown.addOption('', '通用')
             for (const style of listTerrainStyles()) dropdown.addOption(style.type, style.label)
@@ -349,13 +353,14 @@ export class CartographerSettingTab extends PluginSettingTab {
               void this.plugin.updateCustomTerrain(index, { glyph: value })
             })
           })
-        return
       }
 
       new Setting(containerEl)
         .setName(`　└ 图片 · ${terrain.label}`)
         .setDesc(
-          '库内路径，例如 Assets/forest.png；也可以点右边的按钮从库里挑。' +
+          (imageMode
+            ? '库内路径，例如 Assets/forest.png；也可以点右边的按钮从库里挑。'
+            : '当前是「调色」模式：这一栏还不会生效。点右边的按钮会**自动切到「图片」模式**并选择库内图片；直接在这里填一个合法路径也一样。') +
             (terrain.imagePath.length === 0 ? '还没选图片：这一格会退回到颜色 + 字形。' : ''),
         )
         .addText((text) =>
@@ -369,7 +374,11 @@ export class CartographerSettingTab extends PluginSettingTab {
                 this.setNoteText(`图片路径不可用：${check.problem}`)
                 return
               }
-              void this.plugin.updateCustomTerrain(index, { imagePath: check.path })
+              // 填了图片路径的意图是明确的：顺手把模式切过去，否则用户会以为"填了没反应"
+              // （调色模式下图片本来就不参与绘制）。
+              const next: { imagePath: string; mode?: CustomTerrainMode } = { imagePath: check.path }
+              if (!imageMode && check.path.length > 0) next.mode = 'image'
+              void this.plugin.updateCustomTerrain(index, next)
               this.setNoteText('')
             }),
         )
@@ -378,31 +387,46 @@ export class CartographerSettingTab extends PluginSettingTab {
             // 手打输入框保留在上面：有人就是习惯粘贴路径，两条路都通。
             // 选择器只列**校验会接受的**图片（白名单同源，见 assetFiles.ts），
             // 所以这里再校验一次只是兜底 —— 真出现不合法，说明两处白名单分叉了，必须说出来。
-            this.plugin.pickImageFile({
-              title: `选择「${terrain.label}」的图片`,
-              onChoose: (path) => {
-                const check = checkTerrainImagePath(path)
-                if (check.problem.length > 0) {
-                  this.setNoteText(`图片路径不可用：${check.problem}`)
-                  return
-                }
-                void this.plugin
-                  .updateCustomTerrain(index, { imagePath: check.path })
-                  .then(() => {
-                    // 顺序要紧：`display()` 会重建提示行，所以提示必须写在重绘**之后**，
-                    // 否则那句话刚写上去就被冲掉了（用户只会看到"点了没反应"）。
-                    this.display()
-                    this.setNoteText(`已选择图片：${check.path}`)
-                  })
-                  .catch((error: unknown) => {
-                    // 不吞异常：重绘失败时用户看到的是"点了没反应"，而真相只有控制台知道。
-                    console.error('[project-kaki] 选择图片后刷新设置页失败', error)
-                    this.setNoteText(
-                      `图片已设置，但设置页刷新失败：${error instanceof Error ? error.message : String(error)}（重新打开设置页即可看到新值）`,
-                    )
-                  })
-              },
-            })
+            //
+            // 调色模式下点这个按钮要**先切模式**：用户点"选图片"就是想要图片，
+            // 让他先去点一下上面的分段控件是多余的摩擦（而且他很可能根本找不到）。
+            const ensureImageMode = imageMode
+              ? Promise.resolve()
+              : this.plugin.updateCustomTerrain(index, { mode: 'image' }).then(() => {
+                  this.display()
+                })
+            void ensureImageMode
+              .then(() =>
+                this.plugin.pickImageFile({
+                  title: `选择「${terrain.label}」的图片`,
+                  onChoose: (path) => {
+                    const check = checkTerrainImagePath(path)
+                    if (check.problem.length > 0) {
+                      this.setNoteText(`图片路径不可用：${check.problem}`)
+                      return
+                    }
+                    void this.plugin
+                      .updateCustomTerrain(index, { imagePath: check.path })
+                      .then(() => {
+                        // 顺序要紧：`display()` 会重建提示行，所以提示必须写在重绘**之后**，
+                        // 否则那句话刚写上去就被冲掉了（用户只会看到"点了没反应"）。
+                        this.display()
+                        this.setNoteText(`已选择图片：${check.path}`)
+                      })
+                      .catch((error: unknown) => {
+                        // 不吞异常：重绘失败时用户看到的是"点了没反应"，而真相只有控制台知道。
+                        console.error('[project-kaki] 选择图片后刷新设置页失败', error)
+                        this.setNoteText(
+                          `图片已设置，但设置页刷新失败：${error instanceof Error ? error.message : String(error)}（重新打开设置页即可看到新值）`,
+                        )
+                      })
+                  },
+                }),
+              )
+              .catch((error: unknown) => {
+                console.error('[project-kaki] 切换到图片模式失败', error)
+                this.setNoteText(`切换到「图片」模式失败：${error instanceof Error ? error.message : String(error)}`)
+              })
           }),
         )
     })

@@ -5420,9 +5420,14 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   openSettings()
   check('默认是「调色」模式（新建时的默认值：不依赖任何外部资源）', plugin.getSettings().customTerrains[0]?.mode === 'color', String(plugin.getSettings().customTerrains[0]?.mode))
   check(
-    '调色模式下**没有**图片那一栏（当前模式下不可能填错的东西就不该出现）',
-    imageRow() === undefined && settingNamed('字形 · 沼泽地') !== undefined,
+    '调色模式下**也有**图片那一栏（用户实测反馈"没有看到图片导入按钮" —— 找不到入口就等于没有这个功能）',
+    imageRow() !== undefined && imageRow()?.button !== undefined && settingNamed('字形 · 沼泽地') !== undefined,
     JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
+  )
+  check(
+    '调色模式下那一栏的说明写清当前状态与后果（点按钮会切到图片模式）',
+    (imageRow()?.info.desc ?? '').includes('调色') && (imageRow()?.info.desc ?? '').includes('图片'),
+    String(imageRow()?.info.desc),
   )
 
   await switchMode('沼泽地', 'image')
@@ -5477,6 +5482,41 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
     allNotes().some((text) => text.includes('Assets/forest.png')),
     noteDiag(),
   )
+
+  // ---- 关键回归：调色模式下点「从库中选择…」必须先自动切到图片模式 ----
+  // 用户实测反馈"没有看到图片导入按钮"，根因就是调色模式下那一栏根本不渲染。
+  // 现在入口永远可见，而且点它要**一次点击到位**（先切模式再选图），
+  // 而不是让用户先去点上面的分段控件。
+  await switchMode('沼泽地', 'color')
+  check('前提：已切回调色模式', plugin.getSettings().customTerrains[0]?.mode === 'color', String(plugin.getSettings().customTerrains[0]?.mode))
+  const fromColorMode = makePickerDouble('Assets/地形/reef.svg')
+  plugin.setImagePickerFactory(fromColorMode.factory)
+  await imageRow().button.click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('调色模式下点按钮：选择器照样被打开（入口不再被藏起来）', fromColorMode.calls.length === 1, String(fromColorMode.calls.length))
+  check(
+    '并且模式被自动切成了「图片」（否则用户会以为"选了没反应"，因为调色模式下图片不参与绘制）',
+    plugin.getSettings().customTerrains[0]?.mode === 'image',
+    String(plugin.getSettings().customTerrains[0]?.mode),
+  )
+  check(
+    '选中的路径也写进去了',
+    imagePathInSettings() === 'Assets/地形/reef.svg',
+    String(imagePathInSettings()),
+  )
+
+  // 反向：调色模式下**直接填**一个合法路径，也要自动切模式
+  await switchMode('沼泽地', 'color')
+  plugin.setImagePickerFactory(null)
+  openSettings()
+  await imageRow().text.type('Assets/forest.png')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '调色模式下直接填路径 → 自动切到图片模式（填图片路径的意图是明确的）',
+    plugin.getSettings().customTerrains[0]?.mode === 'image',
+    String(plugin.getSettings().customTerrains[0]?.mode),
+  )
+
   // 重绘后再读（`display()` 会重建整页的 Setting，旧对象是过期的，必须重新取）
   openSettings()
   check(
@@ -5655,9 +5695,9 @@ console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）�
       .join(' '),
   )
   check(
-    '调色模式下显示字形、不显示图片（当前模式下不可能填错的东西就不出现）',
+    '调色模式下同时显示字形与图片入口（图片入口永远可见 —— 藏起来用户就找不到）',
     FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('字形 · 礁石')) &&
-      !FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 礁石')),
+      FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 礁石')),
     JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
   )
 
