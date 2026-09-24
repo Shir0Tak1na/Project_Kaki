@@ -18,8 +18,8 @@
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
-- 单元测试：287 个通过
-- 冒烟测试：32 个场景、652 条断言全部通过
+- 单元测试：299 个通过
+- 冒烟测试：32 个场景、711 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - 最近验证命令（**在本沙箱里 `npm run <script>` 可能报 `spawn EPERM`，直接跑 `node ...` 最稳**）：
 
@@ -213,8 +213,8 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 - 插件 ID 是 `project-kaki`；**不要**再改它（改了要同步 `manifest.json` + `scripts/deploy.mjs` + `scripts/smoke.mjs` 里的字面量，
   并给用户做目录与启用项迁移）。同理不要改那三个写在用户文件里的持久化标识，见本文开头的警告。
 - 每次修改 UI 后都要跑 `npm run build`、`npm test`、`node scripts/smoke.mjs`，并部署到测试库后给用户可判伪的手动验证清单。
-- 文档中的测试数量必须和实际输出同步。当前基线是 `287 / 652`（单元测试 / 冒烟断言，32 个冒烟场景），
-  两者都能自己数出来：`node --test --test-isolation=none` 的**汇总行**（`ℹ tests 287`）、
+- 文档中的测试数量必须和实际输出同步。当前基线是 `299 / 711`（单元测试 / 冒烟断言，32 个冒烟场景），
+  两者都能自己数出来：`node --test --test-isolation=none` 的**汇总行**（`ℹ tests 299`）、
   `node scripts/smoke.mjs` 的末行。
   ⚠️ **去读汇总行，不要目测**：这条基线曾被写错成 278，原因是用 dot reporter 的点数"数行数"。
 - **改完源码不重新构建是跑不动的**：`smoke.mjs` 与 `deploy.mjs` 启动时都会检查"产物是否比 `src/` 新"，
