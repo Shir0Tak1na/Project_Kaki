@@ -17,13 +17,14 @@
  */
 
 import type { Point } from '../core/hex.ts'
-import { MARKER_ICONS, type MarkerIcon } from '../data/mapDocument.ts'
+import { MARKER_ICONS, type MarkerId } from '../data/mapDocument.ts'
+import { CUSTOM_MARKER_PREFIX } from '../render/markerCatalog.ts'
 
 export interface NoteMapProps {
   /** 世界坐标；解析失败或未提供时为 null */
   point: Point | null
   /** 标记图标（缺失时为 null，由调用方决定默认值） */
-  icon: MarkerIcon | null
+  icon: MarkerId | null
   /** 分组/着色用的地区名 */
   region: string | null
   /** 原始的坐标文本/结构（诊断与提示用） */
@@ -32,7 +33,7 @@ export interface NoteMapProps {
   invalid: boolean
 }
 
-const DEFAULT_ICON: MarkerIcon = 'town'
+const DEFAULT_ICON: MarkerId = 'town'
 
 /** 把任意值转成字符串（兼容 Bases 的 Value：它们都实现了 toString） */
 function toText(value: unknown): string {
@@ -110,12 +111,24 @@ export function parseCoordinateValue(value: unknown): Point | null {
   return x === null || y === null ? null : { x, y }
 }
 
-/** 把图标名收敛成受支持的图标（未知名字退化为默认图标，而不是拒绝整条记录） */
-export function normalizeMarkerIcon(value: unknown): MarkerIcon | null {
+/**
+ * 把图标名收敛成受支持的图标（未知名字退化为默认图标，而不是拒绝整条记录）。
+ *
+ * 除了内置 9 种，还接受 `custom:` 命名空间下的自定义标记：笔记里写
+ * `map-type: custom:lighthouse` 与地图文件里写同样的值是一个意思。
+ *
+ * 为什么这里**不像地图文档那样保留任意未知值**：地图文件是我们要写回去的，
+ * 改写它等于不可逆地删用户的数据；而笔记的 frontmatter 本插件只读不写，
+ * 所以没有丢数据的风险，反倒是"一个拼错的 map-type 悄悄变成一个神秘图标"更难查。
+ */
+export function normalizeMarkerIcon(value: unknown): MarkerId | null {
   const text = toText(value).trim().toLowerCase()
   if (text.length === 0) return null
   const found = MARKER_ICONS.find((icon) => icon === text)
-  return found ?? null
+  if (found !== undefined) return found
+  // 自定义标记：只认前缀形状，不检查"设置里有没有定义"（那是绘制层与设置的事，
+  // 定义暂时缺失时绘制层会画回退视觉，而这里拒收只会让用户的笔记突然少一个标记）
+  return text.startsWith(CUSTOM_MARKER_PREFIX) && text.length > CUSTOM_MARKER_PREFIX.length ? text : null
 }
 
 export function parseNoteMapProps(values: {
@@ -138,6 +151,6 @@ export function parseNoteMapProps(values: {
 }
 
 /** 笔记缺 `map-type` 时的默认图标 */
-export function iconOrDefault(props: NoteMapProps): MarkerIcon {
+export function iconOrDefault(props: NoteMapProps): MarkerId {
   return props.icon ?? DEFAULT_ICON
 }

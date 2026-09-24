@@ -171,6 +171,17 @@ class FakeImage {
     this._src = ''
     /** 供断言：这张图是"真的被画上去"还是只是被构造了 */
     this.__isFakeImage = true
+    // ---- 元素面 ----
+    // 真实浏览器里 `createElement('img')` 返回的对象**既是图片也是元素**：
+    // 标记层会给它设 class/alt/draggable、用 addEventListener 注册 error，切回字形时还要 remove() 它。
+    // 桩里缺这些成员的表现是"真实浏览器里正常、冒烟里抛 TypeError"—— 那种失败最容易被误读成实现有问题，
+    // 所以这里按真实 DOM 补齐（同 §5.25：桩必须如实复刻被用到的能力）。
+    this.tagName = 'IMG'
+    this.className = ''
+    this.alt = ''
+    this.draggable = true
+    this.parentNode = null
+    this._listeners = new Map()
     // 按创建顺序登记：测试用"最后被创建的那张图"来分辨"换图之后画的是不是新的那张"
     FakeImage.instances.push(this)
   }
@@ -185,9 +196,36 @@ class FakeImage {
       // `data:` 地址是浏览器**原生就能解码**的（PNG 导出就是喂给它一张 SVG 的 data URL），
       // 所以这里必须按"加载成功"处理：否则导出会在"图片解码"这一步就失败，
       // 而真正要覆盖的那条降级路径（假画布没有 toBlob）永远走不到。
-      if (this._src.startsWith('data:') || loadableImageUrls.has(this._src)) this.onload?.()
-      else this.onerror?.(new Error(`图片不存在：${this._src}`))
+      if (this._src.startsWith('data:') || loadableImageUrls.has(this._src)) {
+        this.onload?.()
+        this.dispatchEvent({ type: 'load' })
+      } else {
+        const error = new Error(`图片不存在：${this._src}`)
+        this.onerror?.(error)
+        this.dispatchEvent({ type: 'error' })
+      }
     }, 0)
+  }
+
+  addEventListener(type, handler) {
+    if (!this._listeners.has(type)) this._listeners.set(type, new Set())
+    this._listeners.get(type).add(handler)
+  }
+
+  removeEventListener(type, handler) {
+    this._listeners.get(type)?.delete(handler)
+  }
+
+  dispatchEvent(event) {
+    for (const handler of [...(this._listeners.get(event.type) ?? [])]) handler(event)
+    return true
+  }
+
+  /** 真实元素从父节点上摘掉自己（标记层切回字形时会调用） */
+  remove() {
+    const parent = this.parentNode
+    if (parent && typeof parent.removeChild === 'function') parent.removeChild(this)
+    this.parentNode = null
   }
 }
 globalThis.Image = globalThis.Image ?? FakeImage
@@ -741,6 +779,17 @@ class FakeSetting {
 
   setDesc(desc) {
     this.info.desc = desc
+    /**
+     * 真实的 `Setting.setDesc` 会建一个 `.setting-item-description` 元素，
+     * 而且**插件可以往它里面追加内容**（自定义标记的图片预览就是这么挂上去的）。
+     * 桩里缺 `descEl` 的表现是"真实 Obsidian 一切正常、冒烟里抛 TypeError" ——
+     * 那类失败最难读（看起来像实现坏了，其实是桩少了一个成员），所以如实补上。
+     */
+    if (!this.descEl) {
+      this.descEl = makeEl({ tagName: 'div', className: 'setting-item-description' })
+      this.containerEl.appendChild(this.descEl)
+    }
+    this.descEl.textContent = String(desc ?? '')
     return this
   }
 
@@ -4258,8 +4307,10 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     return FakeSetting.created
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  /** 设置页底部那一行"就地提示"（自定义地形区自己维护的那条） */
-  const noteText = () => collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').at(-1)?.textContent ?? ''
+  /** 设置页底部那一行"就地提示"（按 `dataset.fcNote` 取 —— 设置页现在有两节各一条） */
+  const noteText = () =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'terrain')
+      ?.textContent ?? ''
   /** 画一笔地形（世界坐标） */
   const paintAt = (x, y) => {
     editor.setMode('paint')
@@ -5461,7 +5512,10 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   }
   const imageRow = () => settingNamed('图片 · 沼泽地')
   const allNotes = () => collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').map((el) => el.textContent ?? '')
-  const noteText = () => allNotes().at(-1) ?? ''
+  /** 地形那一节的就地提示（按 `dataset.fcNote` 取：设置页有两节，各有一条提示行） */
+  const noteText = () =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'terrain')
+      ?.textContent ?? ''
   const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
   const imagePathInSettings = () => plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:marsh')?.imagePath
 
@@ -6472,6 +6526,428 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
   doc().regions.push(...regionsBackup)
 
   capture.restore()
+  plugin.onunload()
+}
+
+console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放置对话框 → 画布 DOM → 文件 → 回退）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  // 一张能加载的图 + 一张"文件在库里但解不开"的图（后者覆盖回退路径）
+  app.vault.files.set('Assets/lighthouse.png', '<png-bytes>')
+  loadableImageUrls.add(resourceUrlFor('Assets/lighthouse.png'))
+  // 故意用 files.set 而不是 setContent：后者会登记资源地址（= 能加载成功），
+  // 而这里要的正是"文件在库里、但浏览器解不开"这条分支
+  app.vault.files.set('Assets/gone.png', 'this-is-not-an-image')
+
+  const plugin = await loadPlugin(app)
+  // 真实的放置对话框工厂要在替换之前抓下来：`setPlaceModalFactory` 会把插件里那个字段换掉，
+  // 之后 `plugin.placeModalFactory` 拿到的就是我们自己的替身（那个只有 open，没有 close）
+  const realPlaceFactory = plugin.placeModalFactory
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const file = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+
+  // 文件里先放一个"本机设置里没有"的图标：它必须被**保留**并在画布上画出回退视觉。
+  // 这条走的是完整的 文件 → 解析 → 画布 路径（单测覆盖的是解析层本身）。
+  const seeded = await store.load(file)
+  seeded.document.markers.push({ id: 'm-foreign', label: '外来标记', p: [-300, -160], icon: 'spaceship' })
+  await store.writeNow(file, seeded.document, 'World', [canvasPath])
+  await settleEvents()
+
+  plugin.setPromptModalFactory((_app, options, onSubmit) => {
+    onSubmit('')
+    return { open() {} }
+  })
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const doc = () => layers.getDocument(canvasPath)
+  const markerLayerEl = () => collectByClass(wrapper, 'fc-marker-layer')[0]
+  const markerElFor = (id) => collectByClass(markerLayerEl(), 'fc-marker').find((el) => el.dataset.fcId === id)
+  const iconElFor = (id) => collectByClass(markerElFor(id), 'fc-marker-icon')[0]
+  /** 该标记的图标框里挂着的图片元素（图片模式才应该非空） */
+  const imagesIn = (id) => (iconElFor(id)?.children ?? []).filter((child) => child.__isFakeImage === true)
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  /** 自定义标记区底部那一行就地提示（按 `dataset.fcNote` 取，见 SettingsTab） */
+  const markerNoteText = () =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'marker')
+      ?.textContent ?? ''
+  const markerRow = (label) =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-terrain-mode').find((candidate) =>
+      (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
+    )
+  const markerModeButton = (label, mode) =>
+    collectByClass(markerRow(label) ?? plugin.settingTabs[0].containerEl, 'fc-terrain-mode-button').find(
+      (candidate) => candidate.dataset.mode === mode,
+    )
+  const switchMarkerMode = async (label, mode) => {
+    openSettings()
+    const button = markerModeButton(label, mode)
+    if (button !== undefined) fireEvent(button, 'click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    openSettings()
+  }
+  const iconButtons = () => collectByClass(wrapper, 'fc-toolbar-icon')
+  const frame = () => {
+    canvas.markViewportChanged()
+    flushFrames()
+  }
+
+  // ---------------------------------------------------------- 设置界面：新增
+  openSettings()
+  const addMarkerSetting = settingNamed('新增自定义标记')
+  check('设置页有「新增自定义标记」一节', addMarkerSetting !== undefined)
+  check(
+    '新增区有 ID 与显示名两个控件',
+    (addMarkerSetting?.texts?.length ?? 0) === 2,
+    `texts=${addMarkerSetting?.texts?.length}`,
+  )
+  check(
+    '新增区的说明里写清了 ID 规则与自动前缀',
+    (addMarkerSetting?.info.desc ?? '').includes('custom:'),
+    addMarkerSetting?.info.desc,
+  )
+
+  // 非法 ID：当场给原因，且**不能**写进设置
+  await addMarkerSetting.texts[0].type('Bad Id!')
+  check('非法标记 ID 就地给出可读原因', markerNoteText().includes('ID'), markerNoteText())
+  await addMarkerSetting.button.click()
+  check(
+    '非法 ID 点「新增」不会写进设置',
+    plugin.getSettings().customMarkers.length === 0,
+    JSON.stringify(plugin.getSettings().customMarkers),
+  )
+
+  // 合法 ID：新增成功
+  await addMarkerSetting.texts[0].type('LightHouse')
+  await addMarkerSetting.texts[1].type('灯塔')
+  await addMarkerSetting.button.click()
+  const addedMarkers = plugin.getSettings().customMarkers
+  check(
+    '新增的自定义标记 ID 收敛为 custom:lighthouse（小写 + 自动前缀）',
+    addedMarkers.length === 1 && addedMarkers[0].id === 'custom:lighthouse',
+    JSON.stringify(addedMarkers),
+  )
+  check(
+    '显示名与 ID 分离存储，且默认是「字形」模式',
+    addedMarkers[0]?.label === '灯塔' && addedMarkers[0]?.mode === 'glyph',
+    JSON.stringify(addedMarkers[0]),
+  )
+  check(
+    '自定义标记已落盘（真实 JSON 往返）',
+    JSON.parse(plugin._data ?? '{}')?.customMarkers?.[0]?.id === 'custom:lighthouse',
+    String(plugin._data).slice(0, 200),
+  )
+
+  // 重复 ID 必须被拒绝
+  openSettings()
+  const addDupMarker = settingNamed('新增自定义标记')
+  await addDupMarker.texts[0].type('LIGHTHOUSE')
+  await addDupMarker.button.click()
+  check(
+    '重复 ID（大小写不同）被拒绝',
+    plugin.getSettings().customMarkers.length === 1,
+    JSON.stringify(plugin.getSettings().customMarkers),
+  )
+
+  // 第二个标记：用来走图片模式（含"从字形切到图片"的自动切换）
+  openSettings()
+  const addMarker2 = settingNamed('新增自定义标记')
+  await addMarker2.texts[0].type('beacon')
+  await addMarker2.texts[1].type('灯标')
+  await addMarker2.button.click()
+  check('两个自定义标记都在设置里', plugin.getSettings().customMarkers.length === 2, JSON.stringify(plugin.getSettings().customMarkers.map((m) => m.id)))
+
+  // 字形一栏与图片一栏在**两种模式下都要在**（藏起来用户就找不到入口 —— 实测反馈过）
+  openSettings()
+  check(
+    '字形模式下同时显示字形与图片入口',
+    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('字形 · 灯塔')) &&
+      FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 灯塔')),
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
+  )
+  check(
+    '每条自定义标记都有模式控件（两选一），当前选中的是字形',
+    markerModeButton('灯塔', 'glyph')?.classList.contains('is-active') === true &&
+      markerModeButton('灯塔', 'image')?.classList.contains('is-active') === false,
+    String(markerRow('灯塔')?.textContent),
+  )
+  // 字形下拉：给「灯塔」借用 tower 的字形（设置页里真的选一次）
+  openSettings()
+  const glyphSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('字形 · 灯塔'))
+  check('字形那一栏是下拉框', glyphSetting?.dropdown !== undefined)
+  check(
+    '字形下拉里有「通用」与全部内置图标',
+    (glyphSetting?.dropdown?.options ?? []).length === 10 &&
+      glyphSetting?.dropdown?.options?.[0]?.value === '' &&
+      (glyphSetting?.dropdown?.options ?? []).some((option) => option.value === 'tower'),
+    JSON.stringify(glyphSetting?.dropdown?.options),
+  )
+  await glyphSetting.dropdown.select('tower')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '选完字形后设置里记的是它（且已落盘）',
+    plugin.getSettings().customMarkers[0]?.icon === 'tower' &&
+      JSON.parse(plugin._data ?? '{}')?.customMarkers?.[0]?.icon === 'tower',
+    JSON.stringify(plugin.getSettings().customMarkers[0]),
+  )
+
+  // ---------------------------------------------------------- 工具条
+  check(
+    '工具条出现内置 9 种 + 2 个自定义标记',
+    iconButtons().length === 11,
+    iconButtons().map((button) => button.title).join(','),
+  )
+  check(
+    '自定义标记排在内置之后，且带 is-custom（一眼能区分）',
+    iconButtons().slice(9).every((button) => button.classList.contains('is-custom')) &&
+      iconButtons().slice(0, 9).every((button) => !button.classList.contains('is-custom')),
+    iconButtons().map((button) => `${button.title}:${button.classList.contains('is-custom')}`).join(' '),
+  )
+  check(
+    '自定义标记按钮的悬停提示里带着完整 ID（界面上要能分清哪个是哪个）',
+    iconButtons()[9]?.title?.includes('custom:lighthouse'),
+    String(iconButtons()[9]?.title),
+  )
+  check(
+    '自定义标记按钮上带显示名（字形可能只是通用圆点，光看图分不出来）',
+    collectByClass(iconButtons()[9], 'fc-toolbar-icon-glyph').length === 1 &&
+      (iconButtons()[9]?.children.some((child) => child.textContent === '灯塔') ?? false),
+    String(iconButtons()[9]?.textContent),
+  )
+
+  // ---------------------------------------------------------- 画布：外来图标被保留并回退
+  frame()
+  const foreignIcon = iconElFor('m-foreign')
+  check('地图里未知图标的标记仍然被画出来（不丢弃、不消失）', foreignIcon !== undefined)
+  check(
+    '未知图标画的是回退字形（circle-dot），而不是随机图标',
+    foreignIcon?.dataset.icon === 'circle-dot',
+    String(foreignIcon?.dataset.icon),
+  )
+  check(
+    '未知图标在文档里仍然是原值（改写成 town = 下次保存就永久改了用户数据）',
+    doc().markers.find((marker) => marker.id === 'm-foreign')?.icon === 'spaceship',
+    JSON.stringify(doc().markers.map((marker) => marker.icon)),
+  )
+
+  // ---------------------------------------------------------- 放置对话框（真实那一个）
+  const placeModalOptions = []
+  plugin.setPlaceModalFactory((_app, options) => {
+    placeModalOptions.push(options)
+    // 模拟用户在图标下拉里选了自定义标记
+    options.onSubmit({ label: '白色灯塔', icon: 'custom:lighthouse', link: '' })
+    return { open() {} }
+  })
+  editor.setMode('paint')
+  editor.setTool('marker')
+  const clickAt = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+  }
+  clickAt({ x: -300, y: 120 })
+  frame()
+  const placed = doc().markers.find((marker) => marker.label === '白色灯塔')
+  check(
+    '放置的标记写进文件的是自定义 ID',
+    placed?.icon === 'custom:lighthouse',
+    JSON.stringify(doc().markers.map((marker) => marker.icon)),
+  )
+  check(
+    '放置对话框拿到了当前自定义标记（下拉里才会有它们）',
+    placeModalOptions.at(-1)?.getCustomMarkers?.().length === 2,
+    String(placeModalOptions.at(-1)?.getCustomMarkers?.().length),
+  )
+
+  // 真对话框：下拉里必须列出内置与自定义，且值一律是原始 ID
+  const placeOptions = placeModalOptions.at(-1)
+  const realPlaceModal = realPlaceFactory(app, { ...placeOptions, initialIcon: 'custom:gone' })
+  FakeSetting.created.length = 0
+  realPlaceModal.open()
+  const placeDropdown = FakeSetting.created.flatMap((setting) => setting.dropdowns ?? []).at(-1)
+  check(
+    '放置对话框的图标下拉里有内置 9 种与自定义标记',
+    (placeDropdown?.options ?? []).some((option) => option.value === 'city') &&
+      (placeDropdown?.options ?? []).filter((option) => option.value === 'custom:lighthouse').length === 1 &&
+      (placeDropdown?.options ?? []).filter((option) => option.value === 'custom:beacon').length === 1,
+    JSON.stringify(placeDropdown?.options),
+  )
+  check(
+    '自定义标记在下拉里用的是显示名，值是原始 ID（界面文字与数据解耦）',
+    placeDropdown?.options?.find((option) => option.value === 'custom:beacon')?.label === '灯标',
+    JSON.stringify(placeDropdown?.options?.find((option) => option.value === 'custom:beacon')),
+  )
+  check(
+    '当前图标已被删掉时下拉里补一个「未知」项（否则 setValue 会静默落回第一项，看着像"图标自己换了"）',
+    (placeDropdown?.options ?? []).some((option) => option.value === 'custom:gone' && /未知/.test(option.label)) &&
+      (placeDropdown?.options ?? []).length === 12,
+    JSON.stringify(placeDropdown?.options),
+  )
+  realPlaceModal.close()
+
+  // ---------------------------------------------------------- 画布 DOM：字形模式
+  const glyphIcon = iconElFor(placed?.id)
+  check(
+    '自定义标记在画布上画出借来的字形（字形模式）',
+    glyphIcon?.dataset.icon === 'tower-control',
+    String(glyphIcon?.dataset.icon),
+  )
+  check('字形模式下不挂图片元素', imagesIn(placed?.id).length === 0, String(imagesIn(placed?.id).length))
+
+  // ---------------------------------------------------------- 切到图片模式
+  openSettings()
+  const beaconImageText = FakeSetting.created
+    .filter((setting) => (setting.info.name ?? '').includes('图片 · 灯标'))
+    .flatMap((setting) => setting.texts ?? [])[0]
+  await beaconImageText.type('Assets/lighthouse.png')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const beacon = () => plugin.getSettings().customMarkers.find((marker) => marker.id === 'custom:beacon')
+  check(
+    '填了图片路径就自动切到图片模式（否则用户会以为"填了没反应"）',
+    beacon()?.mode === 'image' && beacon()?.imagePath === 'Assets/lighthouse.png',
+    JSON.stringify(beacon()),
+  )
+  check(
+    '工具条跟着更新（按目录签名重建，不需要重开画布）',
+    iconButtons().length === 11 && imagesIn(placed?.id).length === 0,
+    String(iconButtons().length),
+  )
+
+  // 放一个用自定义图片图标的标记
+  editor.setMode('paint')
+  editor.setTool('marker')
+  plugin.setPlaceModalFactory((_app, options) => {
+    options.onSubmit({ label: '灯标一号', icon: 'custom:beacon', link: '' })
+    return { open() {} }
+  })
+  clickAt({ x: 120, y: 120 })
+  frame()
+  const beaconMarker = doc().markers.find((marker) => marker.label === '灯标一号')
+  const beaconIconEl = iconElFor(beaconMarker?.id)
+  check(
+    '图片模式的自定义标记在画布上画的是图片（`<img>` 挂在图标框里）',
+    imagesIn(beaconMarker?.id).length === 1,
+    `children=${JSON.stringify((beaconIconEl?.children ?? []).map((child) => child.className ?? child.tagName))}`,
+  )
+  check(
+    '图片的 src 来自库资源地址（渲染层不认识 vault，地址是注入进去的）',
+    imagesIn(beaconMarker?.id)[0]?.src === resourceUrlFor('Assets/lighthouse.png'),
+    String(imagesIn(beaconMarker?.id)[0]?.src),
+  )
+  check(
+    '图片元素带 fc-marker-image 类（CSS 里靠它做等比缩放，不拉伸）',
+    imagesIn(beaconMarker?.id)[0]?.className === 'fc-marker-image',
+    String(imagesIn(beaconMarker?.id)[0]?.className),
+  )
+  check(
+    '图片不可被浏览器原生拖拽（否则按住标记拖动会变成拖图片，指针链断掉）',
+    imagesIn(beaconMarker?.id)[0]?.draggable === false,
+    String(imagesIn(beaconMarker?.id)[0]?.draggable),
+  )
+  check(
+    '图片模式下字形被清掉（两套视觉不能叠着画）',
+    beaconIconEl?.dataset.icon === undefined && (beaconIconEl?.textContent ?? '') === '',
+    `${String(beaconIconEl?.dataset.icon)} / ${String(beaconIconEl?.textContent)}`,
+  )
+
+  // ---------------------------------------------------------- 图片加载失败 → 回退字形
+  const warnBaseline = warnLog.length
+  openSettings()
+  const beaconImageText2 = FakeSetting.created
+    .filter((setting) => (setting.info.name ?? '').includes('图片 · 灯标'))
+    .flatMap((setting) => setting.texts ?? [])[0]
+  await beaconImageText2.type('Assets/gone.png')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  frame()
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  frame()
+  check(
+    '图片解不开时回退到字形（标记不会因为图挂了就消失）',
+    imagesIn(beaconMarker?.id).length === 0 && iconElFor(beaconMarker?.id)?.dataset.icon === 'circle-dot',
+    `${String(iconElFor(beaconMarker?.id)?.dataset.icon)} / images=${imagesIn(beaconMarker?.id).length}`,
+  )
+  const failWarnings = warnLog.slice(warnBaseline).filter((line) => line.includes('标记图片加载失败'))
+  check('失败必须在控制台留下可读原因', failWarnings.length === 1, warnLog.slice(warnBaseline).join(' | '))
+  check('坏路径只尝试一次（不在每帧重复撞 404）', failWarnings.length === 1, String(failWarnings.length))
+  const fakeImagesAfterFail = FakeImage.instances.filter((image) => image.src === resourceUrlFor('Assets/gone.png')).length
+  frame()
+  frame()
+  check(
+    '后续帧不再新建图片元素（否则每帧一次 404 + 每帧一条日志）',
+    FakeImage.instances.filter((image) => image.src === resourceUrlFor('Assets/gone.png')).length === fakeImagesAfterFail,
+    `${fakeImagesAfterFail} → ${FakeImage.instances.filter((image) => image.src === resourceUrlFor('Assets/gone.png')).length}`,
+  )
+
+  // ---------------------------------------------------------- 切回字形：图片元素必须被摘掉
+  await switchMarkerMode('灯标', 'glyph')
+  const beaconAfterSwitch = beacon()
+  check(
+    '切回字形后图片路径仍然留着（来回切不会白配一遍）',
+    beaconAfterSwitch?.mode === 'glyph' && beaconAfterSwitch?.imagePath === 'Assets/gone.png',
+    JSON.stringify(beaconAfterSwitch),
+  )
+  frame()
+  check(
+    '切回字形后 `<img>` 被真的摘掉，且字形画回来',
+    imagesIn(beaconMarker?.id).length === 0 && iconElFor(beaconMarker?.id)?.dataset.icon === 'circle-dot',
+    `${String(iconElFor(beaconMarker?.id)?.dataset.icon)} / images=${imagesIn(beaconMarker?.id).length}`,
+  )
+
+  // ---------------------------------------------------------- 删除定义：数据不动，画布回退
+  openSettings()
+  const deleteSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('名称 · 灯塔'))
+  const beforeDeleteIcons = iconButtons().length
+  await deleteSetting.buttons.find((button) => button.text === '删除').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '删除定义后设置里没有它了',
+    !plugin.getSettings().customMarkers.some((marker) => marker.id === 'custom:lighthouse'),
+    JSON.stringify(plugin.getSettings().customMarkers.map((marker) => marker.id)),
+  )
+  check('工具条按钮跟着减少', iconButtons().length === beforeDeleteIcons - 1, `${beforeDeleteIcons} → ${iconButtons().length}`)
+  frame()
+  check(
+    '被删掉定义的标记仍然画在画布上（回退字形，而不是消失）',
+    iconElFor(placed?.id)?.dataset.icon === 'circle-dot',
+    String(iconElFor(placed?.id)?.dataset.icon),
+  )
+  check(
+    '地图文件里的自定义 ID 没被改动',
+    doc().markers.find((marker) => marker.id === placed?.id)?.icon === 'custom:lighthouse',
+    JSON.stringify(doc().markers.map((marker) => marker.icon)),
+  )
+
+  // ---------------------------------------------------------- 落盘往返：外来 ID 必须原样写回
+  store.scheduleSave(file, doc(), 'World', [canvasPath])
+  await store.flush()
+  await settleEvents()
+  const savedText = app.vault.files.get(file.path) ?? ''
+  check('落盘后的文件里仍然有外来图标名', savedText.includes('spaceship'), savedText.match(/"icon":[^,}]*/g)?.join(' ') ?? '')
+  check('落盘后的文件里仍然有自定义 ID', savedText.includes('custom:lighthouse'), savedText.match(/"icon":[^,}]*/g)?.join(' '))
+  const reloaded = await store.load(file)
+  check(
+    '重新解析后图标一个都没变（这轮往返就是"保存会不会删数据"的答案）',
+    reloaded.document?.markers.find((marker) => marker.id === 'm-foreign')?.icon === 'spaceship' &&
+      reloaded.document?.markers.find((marker) => marker.id === placed?.id)?.icon === 'custom:lighthouse',
+    JSON.stringify(reloaded.document?.markers.map((marker) => marker.icon)),
+  )
+  check(
+    '重新解析时外来图标会给出可读告警（用户排查时看得见）',
+    reloaded.issues.some((issue) => issue.level === 'warning' && issue.message.includes('已保留') && issue.message.includes('spaceship')),
+    JSON.stringify(reloaded.issues.map((issue) => issue.message)),
+  )
+
   plugin.onunload()
 }
 

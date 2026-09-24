@@ -16,8 +16,17 @@
 
 import { PluginSettingTab, Setting, type App } from 'obsidian'
 import type ProjectKakiPlugin from '../main.ts'
-import { PATH_TYPES } from '../data/mapDocument.ts'
+import { MARKER_ICONS, PATH_TYPES } from '../data/mapDocument.ts'
 import { PATH_STYLES, REGION_PRESETS } from '../render/shapeStyle.ts'
+import {
+  CUSTOM_MARKER_PREFIX,
+  DEFAULT_CUSTOM_MARKER_MODE,
+  MAX_CUSTOM_MARKERS,
+  markerIdProblem,
+  type CustomMarkerMode,
+} from '../render/markerCatalog.ts'
+import { ICON_LABELS } from './PlaceMarkerModal.ts'
+import { resolveVaultResourceUrl } from '../base/vaultResource.ts'
 import {
   CUSTOM_TERRAIN_PREFIX,
   DEFAULT_CUSTOM_TERRAIN_COLOR,
@@ -40,6 +49,16 @@ import { isDefaultPathColors, isDefaultRegionColors } from '../render/stylePalet
 const TERRAIN_MODE_OPTIONS: ReadonlyArray<{ mode: CustomTerrainMode; label: string; hint: string }> = [
   { mode: 'color', label: '调色', hint: '只用颜色 + 字形：不依赖任何外部资源，最不容易失败' },
   { mode: 'image', label: '图片', hint: '用库内的一张图片；图片缺失或解不开时回退到颜色 + 字形' },
+]
+
+/**
+ * 自定义标记的两种模式（与 `TERRAIN_MODE_OPTIONS` 同构，措辞按标记的场景写）。
+ *
+ * 提示里点明"另一套视觉仍然保留、切回去还在" —— 用户最怕的是"切一下就把配好的东西弄没了"。
+ */
+const MARKER_MODE_OPTIONS: ReadonlyArray<{ mode: CustomMarkerMode; label: string; hint: string }> = [
+  { mode: 'glyph', label: '字形', hint: '借用内置图标的形状：不依赖任何外部资源；之前选的图片会保留，切回来还在' },
+  { mode: 'image', label: '图片', hint: '用库内的一张图片；图片丢失或打不开时回退到字形，标记不会消失' },
 ]
 
 /**
@@ -70,6 +89,8 @@ export class CartographerSettingTab extends PluginSettingTab {
   private readonly plugin: ProjectKakiPlugin
   /** 自定义地形区底部那一行就地提示（错误原因等）；每次 `display()` 重新绑定 */
   private noteEl: HTMLElement | null = null
+  /** 自定义标记区底部那一行就地提示（与地形那行分开，见 `setMarkerNoteText`） */
+  private markerNoteEl: HTMLElement | null = null
 
   constructor(app: App, plugin: ProjectKakiPlugin) {
     super(app, plugin)
@@ -233,6 +254,7 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
 
     this.renderCustomTerrains(containerEl, settings)
+    this.renderCustomMarkers(containerEl, settings)
 
     new Setting(containerEl)
       .setName('地图面板')
@@ -453,6 +475,9 @@ export class CartographerSettingTab extends PluginSettingTab {
     // ---- 新建 ----
     const atLimit = settings.customTerrains.length >= MAX_CUSTOM_TERRAINS
     const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
+    // 打个标记：设置页现在有**两处**就地提示（地形一节与标记一节），
+    // 自动化测试必须能分辨自己读到的是哪一条 —— 靠"取最后一个"的写法会在加一节之后静默读错。
+    note.dataset.fcNote = 'terrain'
     this.noteEl = note
     const pending: { id: string; label: string; color: string; glyph: string; imagePath: string; mode: CustomTerrainMode } = {
       id: '',
@@ -514,8 +539,249 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
   }
 
+  /**
+   * 自定义标记图标：列表 + 新建。
+   *
+   * 与「自定义地形」一节逐字同构（那边解释了为什么每条都要露完整 ID、
+   * 为什么错误就地显示而不是弹 Notice）。标记这边多两件事：
+   * 1. 图片模式下**直接把图预览出来** —— 图标是给人看的，让用户靠路径字符串判断"选对没有"是不合理的；
+   * 2. 字形那一栏在图片模式下也照常渲染（用户实测反馈过"找不到入口就等于功能不存在"）。
+   */
+  private renderCustomMarkers(containerEl: HTMLElement, settings: CartographerSettings): void {
+    containerEl.createEl('h3', { text: '自定义标记' })
+    containerEl.createEl('div', {
+      cls: 'fc-settings-note',
+      text:
+        '自定义标记会出现在画布工具条的图标组里（内置 9 种之后），以及放置标记对话框的图标下拉里。' +
+        '每条有两种模式：「字形」借用某个内置图标的形状（不依赖任何外部资源），' +
+        '「图片」用库内的一张图片（图片丢失或打不开时回退到字形，标记不会因此消失）。' +
+        'ID 是写进地图文件的值（形如 custom:lighthouse）—— 显示名随时可改，不影响已经放好的标记；' +
+        '反过来，删掉某个标记也不会删掉地图上的标记，它们会变成回退图标并保留在文件里。' +
+        '笔记的 frontmatter 里也可以直接写 map-type: custom:lighthouse。',
+    })
+
+    settings.customMarkers.forEach((marker, index) => {
+      // ---- 模式：两选一 ----
+      // 与地形同一套分段控件：要能一眼看出当前处于哪种模式。切模式**只改模式**，
+      // 另一个字段原样保留（所以来回切不会白配一遍）。
+      const modeRow = containerEl.createEl('div', { cls: 'fc-terrain-mode' })
+      modeRow.createEl('span', { cls: 'fc-terrain-mode-title', text: `标记 ${index + 1} · ${marker.label}` })
+      const modeGroup = modeRow.createEl('div', { cls: 'fc-terrain-mode-group' })
+      for (const option of MARKER_MODE_OPTIONS) {
+        const button = modeGroup.createEl('button', { cls: 'fc-terrain-mode-button' })
+        button.dataset.mode = option.mode
+        button.dataset.index = String(index)
+        if (marker.mode === option.mode) button.addClass('is-active')
+        button.textContent = option.label
+        button.title = option.hint
+        button.addEventListener('click', () => {
+          if (marker.mode === option.mode) return
+          void this.plugin.updateCustomMarker(index, { mode: option.mode }).then(() => this.display())
+        })
+      }
+
+      const imageMode = marker.mode === 'image'
+      new Setting(containerEl)
+        .setName(`　└ 名称 · ${marker.label}`)
+        .setDesc(
+          `写入地图文件的 ID：${marker.id}（不可修改 —— 改它等于换一种标记）。` +
+            (imageMode ? '当前模式：图片。' : '当前模式：字形。'),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('显示名（例如 灯塔）')
+            .setValue(marker.label)
+            .onChange((value) => {
+              void this.plugin.updateCustomMarker(index, { label: value })
+            }),
+        )
+        .addButton((button) =>
+          button.setButtonText('删除').onClick(() => {
+            void this.plugin.removeCustomMarker(index)
+            this.display()
+          }),
+        )
+
+      // 字形栏：两种模式下都渲染。图片模式下它是"图片加载不出来时的回退"，
+      // 也正因为如此，它必须能改（否则用户无法控制回退时长什么样）。
+      new Setting(containerEl)
+        .setName(`　└ 字形 · ${marker.label}`)
+        .setDesc(
+          imageMode
+            ? '当前是「图片」模式：字形只在图片丢失或打不开时兜底显示。'
+            : '借用某个内置图标的形状；「通用」= 一个圆点。想用自己的图片见下面那一栏。',
+        )
+        .addDropdown((dropdown) => {
+          dropdown.addOption('', '通用（圆点）')
+          for (const icon of MARKER_ICONS) dropdown.addOption(icon, ICON_LABELS[icon])
+          dropdown.setValue(marker.icon)
+          dropdown.onChange((value) => {
+            void this.plugin.updateCustomMarker(index, { icon: value })
+          })
+        })
+
+      // 图片栏：始终渲染（调色模式下点它/填路径都会自动切到图片模式）。
+      const imageSetting = new Setting(containerEl)
+        .setName(`　└ 图片 · ${marker.label}`)
+        .setDesc(
+          (imageMode
+            ? '库内路径，例如 Assets/lighthouse.png；也可以点右边的按钮从库里挑。'
+            : '当前是「字形」模式：这一栏还不会生效。点右边的按钮会**自动切到「图片」模式**并选择库内图片；直接在这里填一个合法路径也一样。') +
+            (marker.imagePath.length === 0 ? '还没选图片：这个标记会退回字形。' : ''),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('图片路径（留空 = 退回字形）')
+            .setValue(marker.imagePath)
+            .onChange((value) => {
+              const check = checkTerrainImagePath(value)
+              if (check.problem.length > 0) {
+                // 路径不合法就地提示，并且**不写进设置**（否则绘制层每帧都要处理一个坏路径）
+                this.setMarkerNoteText(`图片路径不可用：${check.problem}`)
+                return
+              }
+              // 填了图片路径的意图是明确的：顺手把模式切过去，否则用户会以为"填了没反应"
+              const next: { imagePath: string; mode?: CustomMarkerMode } = { imagePath: check.path }
+              if (!imageMode && check.path.length > 0) next.mode = 'image'
+              void this.plugin.updateCustomMarker(index, next)
+              this.setMarkerNoteText('')
+            }),
+        )
+        .addButton((button) =>
+          button.setButtonText('从库中选择…').onClick(() => {
+            // 同地形：手打输入框保留在上面，两条路都通。
+            // 字形模式下要先切模式 —— 用户点"选图片"就是想要图片。
+            const ensureImageMode = imageMode
+              ? Promise.resolve()
+              : this.plugin.updateCustomMarker(index, { mode: 'image' }).then(() => {
+                  this.display()
+                })
+            void ensureImageMode
+              .then(() =>
+                this.plugin.pickImageFile({
+                  title: `选择「${marker.label}」的图标图片`,
+                  onChoose: (path) => {
+                    const check = checkTerrainImagePath(path)
+                    if (check.problem.length > 0) {
+                      this.setMarkerNoteText(`图片路径不可用：${check.problem}`)
+                      return
+                    }
+                    void this.plugin
+                      .updateCustomMarker(index, { imagePath: check.path })
+                      .then(() => {
+                        // 顺序要紧：`display()` 会重建提示行，所以提示必须写在重绘**之后**
+                        this.display()
+                        this.setMarkerNoteText(`已选择图片：${check.path}`)
+                      })
+                      .catch((error: unknown) => {
+                        console.error('[project-kaki] 选择标记图片后刷新设置页失败', error)
+                        this.setMarkerNoteText(
+                          `图片已设置，但设置页刷新失败：${error instanceof Error ? error.message : String(error)}（重新打开设置页即可看到新值）`,
+                        )
+                      })
+                  },
+                }),
+              )
+              .catch((error: unknown) => {
+                console.error('[project-kaki] 切换标记到图片模式失败', error)
+                this.setMarkerNoteText(`切换到「图片」模式失败：${error instanceof Error ? error.message : String(error)}`)
+              })
+          }),
+        )
+
+      // 预览：只有真的拿到资源地址才画图。拿不到就不画（绝不显示破图），
+      // 并且把原因写清楚 —— 用户看到的应当是"这张图现在取不到"，而不是一个灰框。
+      if (imageMode && marker.imagePath.length > 0) {
+        const url = resolveVaultResourceUrl(this.app, marker.imagePath)
+        if (url.length > 0) {
+          const preview = imageSetting.descEl.createEl('div', { cls: 'fc-marker-preview' })
+          const img = preview.createEl('img', { cls: 'fc-marker-preview-image' })
+          img.src = url
+          img.alt = ''
+          preview.createEl('span', {
+            cls: 'fc-settings-note',
+            text: `当前图片：${marker.imagePath}（画布上按原比例缩放，不拉伸）`,
+          })
+        } else {
+          imageSetting.setDesc(
+            `${imageSetting.descEl.textContent ?? ''}（当前取不到这张图的资源地址：文件可能已被移动或删除，画布上会退回字形）`,
+          )
+        }
+      }
+    })
+
+    // ---- 新建 ----
+    const atLimit = settings.customMarkers.length >= MAX_CUSTOM_MARKERS
+    const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
+    note.dataset.fcNote = 'marker'
+    this.markerNoteEl = note
+    const pending: { id: string; label: string; icon: string; imagePath: string; mode: CustomMarkerMode } = {
+      id: '',
+      label: '',
+      icon: '',
+      imagePath: '',
+      // 新建默认「字形」：不依赖任何外部资源，最不容易失败
+      mode: DEFAULT_CUSTOM_MARKER_MODE,
+    }
+
+    new Setting(containerEl)
+      .setName('新增自定义标记')
+      .setDesc(
+        atLimit
+          ? `已达上限（${MAX_CUSTOM_MARKERS} 个）`
+          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+              `前缀 ${CUSTOM_MARKER_PREFIX} 会自动补上，避免与内置 9 种重名。` +
+              '建好之后可以在上面切模式、选字形或图片。',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('ID（例如 lighthouse）')
+          .setValue('')
+          .onChange((value) => {
+            pending.id = value
+            // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
+            this.setMarkerNoteText(value.trim().length === 0 ? '' : (markerIdProblem(value) ?? ''))
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('显示名（留空 = 用 ID）')
+          .setValue('')
+          .onChange((value) => {
+            pending.label = value
+          }),
+      )
+      .addButton((button) =>
+        button.setButtonText('新增').onClick(() => {
+          const problem = markerIdProblem(pending.id)
+          if (problem !== null) {
+            this.setMarkerNoteText(problem)
+            return
+          }
+          void this.plugin.addCustomMarker(pending).then((result) => {
+            if (!result.ok) {
+              this.setMarkerNoteText(result.problem)
+              return
+            }
+            this.setMarkerNoteText('')
+            this.display()
+          })
+        }),
+      )
+  }
+
   /** 设置页里那一行就地提示（错误原因、保存结果） */
   private setNoteText(text: string): void {
     if (this.noteEl) this.noteEl.textContent = text
+  }
+
+  /**
+   * 自定义标记区底部那一行提示。
+   *
+   * 与地形那行**分开**：两节同屏，共用一个元素的话，地形那边的报错会显示在标记这一节下面，
+   * 用户按着提示去找，看到的位置和出问题的位置对不上。
+   */
+  private setMarkerNoteText(text: string): void {
+    if (this.markerNoteEl) this.markerNoteEl.textContent = text
   }
 }

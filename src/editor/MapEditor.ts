@@ -20,7 +20,7 @@ import type {
   MapMarker,
   MapPath,
   MapRegion,
-  MarkerIcon,
+  MarkerId,
   PathType,
   TerrainCell,
   TerrainId,
@@ -116,7 +116,8 @@ export interface EditorStatus {
   tool: EditorTool
   /** 当前地形 ID（内置 9 种之一，或用户自定义的 `custom:xxx`） */
   terrainType: TerrainId
-  markerIcon: MarkerIcon
+  /** 当前标记图标（内置 9 种之一，或用户自定义的 `custom:xxx`） */
+  markerIcon: MarkerId
   pathType: PathType
   regionColor: string
   brushRadius: number
@@ -138,7 +139,7 @@ export class MapEditor {
   mode: EditorMode = 'select'
   tool: EditorTool = 'brush'
   terrainType: TerrainId = 'forest'
-  markerIcon: MarkerIcon = 'town'
+  markerIcon: MarkerId = 'town'
   pathType: PathType = 'river'
   /**
    * 区域预设色下标（工具栏上点第几个色块）。
@@ -248,7 +249,7 @@ export class MapEditor {
     this.options.onStateChanged?.()
   }
 
-  setMarkerIcon(icon: MarkerIcon): void {
+  setMarkerIcon(icon: MarkerId): void {
     if (this.markerIcon === icon) return
     this.markerIcon = icon
     this.options.onStateChanged?.()
@@ -397,7 +398,7 @@ export class MapEditor {
    * 位置**吸附到格心**：六边形地图上标记落在格心比落在任意像素位置更符合直觉，
    * 而且顺手吸收了 `posFromEvt` 的 1 CSS px 量化误差。
    */
-  addMarkerAt(world: Point, data: { label: string; icon: MarkerIcon; link?: string; desc?: string; color?: string }): string | null {
+  addMarkerAt(world: Point, data: { label: string; icon: MarkerId; link?: string; desc?: string; color?: string }): string | null {
     const document_ = this.options.getDocument()
     if (!document_) return null
 

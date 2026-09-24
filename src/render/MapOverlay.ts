@@ -137,6 +137,14 @@ export interface MapOverlayOptions {
    */
   loadTerrainImage?: (path: string) => Promise<CanvasImageSource | null>
   /**
+   * 库内图片路径 → `<img src>` 地址（自定义标记的图片模式用）。
+   *
+   * 与 `loadTerrainImage` 同一条铁律的另一半：渲染层不认识 vault，地址从这里注入。
+   * 区别是它必须**同步**（DOM 赋值当场要地址），所以取不到时返回 `''`，
+   * 由标记层回退成图标字形。缺省时图片模式不生效 —— 只画字形。
+   */
+  resolveImageSrc?: (path: string) => string
+  /**
    * 图层可见性（用户设置；缺省 = 全部显示）。
    *
    * **六个层都只从这一个口子读**（`grid` 与 `labels` 也一样）：
@@ -552,6 +560,7 @@ export class MapOverlay {
         ...(this.options.onEntityDragEnd ? { onDragEnd: this.options.onEntityDragEnd } : {}),
         ...(this.options.onEntityDragCancel ? { onDragCancel: this.options.onEntityDragCancel } : {}),
         ...(this.options.hasIcon ? { hasIcon: this.options.hasIcon } : {}),
+        ...(this.options.resolveImageSrc ? { resolveImageSrc: this.options.resolveImageSrc } : {}),
       })
       this.stats.markerLayerAttached = true
     }

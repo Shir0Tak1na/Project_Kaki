@@ -61,6 +61,20 @@ export const MARKER_ICONS: readonly MarkerIcon[] = [
   'tower',
 ]
 
+/**
+ * 标记图标标识。
+ *
+ * 刻意**不是** `MarkerIcon` 的字面量联合，理由与 `TerrainId` 完全相同：文件里可能出现
+ * - 内置 9 种（`city` …）；
+ * - 本插件的自定义标记（`custom:xxx`，由用户在设置里定义）；
+ * - 别的库/别的版本写下的、本机设置里没有的 ID。
+ *
+ * 第三种必须能**原样通读通写**：把不认识的图标名替换成 `town`，用户一保存就永久改写了
+ * 自己的数据（而且没有任何报错）。所以这里放宽成字符串，回退视觉由绘制层负责
+ * （见 `markerCatalog.ts` 的 `resolveMarkerStyle`）。
+ */
+export type MarkerId = string
+
 export type PathType = 'river' | 'road' | 'trade-route' | 'border'
 export const PATH_TYPES: readonly PathType[] = ['river', 'road', 'trade-route', 'border']
 
@@ -88,7 +102,7 @@ export interface MapMarker {
   id: string
   label: string
   p: [number, number]
-  icon: MarkerIcon
+  icon: MarkerId
   c?: string
   link?: string
   desc?: string
@@ -340,6 +354,50 @@ function parseArrayField<T>(
   return out
 }
 
+/**
+ * 见 `isStorableTerrainId`：解析层只判断"能不能存成字符串"，不判断"认不认识"。
+ *
+ * 严格规则（前缀 + `^[a-z][a-z0-9_-]{1,31}$`）只用于用户新建自定义标记，
+ * 见 `markerCatalog.ts` 的 `markerIdProblem`。
+ */
+function isStorableMarkerId(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  if (value.length === 0 || value.length > 64) return false
+  // eslint-disable-next-line no-control-regex
+  return !/[\s\u0000-\u001f\u007f]/.test(value)
+}
+
+/**
+ * 读取标记图标标识。
+ *
+ * **不认识的图标名一律保留**（只告警）：把未知值改写成内置 `town`，
+ * 等于用户一保存就永久抹掉自己（或别的插件）写下的图标，且不可逆。
+ * 绘制层对未知 ID 有回退视觉（`resolveMarkerStyle` 永远返回非空），所以保留是安全的。
+ *
+ * 只对"既不是内置、也不在 `custom:` 命名空间"的 ID 告警：解析层读不到用户设置，
+ * 无权判断某个 `custom:xxx` 是否已定义；"自定义标记被用户删掉了"由绘制层告警。
+ */
+function readMarkerId(value: unknown, path: string, issues: MapDocumentIssue[]): MarkerId {
+  if (isStorableMarkerId(value)) {
+    if (!MARKER_ICONS.includes(value as MarkerIcon) && !value.startsWith('custom:')) {
+      issues.push({
+        level: 'warning',
+        path: `${path}.icon`,
+        message: `未知图标 ${JSON.stringify(value)}，已保留（按回退样式绘制；内置图标：${MARKER_ICONS.join('/')}）`,
+      })
+    }
+    return value
+  }
+  if (value !== undefined) {
+    issues.push({
+      level: 'warning',
+      path: `${path}.icon`,
+      message: `图标标识 ${JSON.stringify(value)} 不是合法字符串，已回退为 town`,
+    })
+  }
+  return 'town'
+}
+
 function parseMarker(raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]): MapMarker | null {
   const id = isNonEmptyString(raw.id) ? raw.id : null
   const label = isNonEmptyString(raw.label) ? raw.label : null
@@ -348,12 +406,7 @@ function parseMarker(raw: Record<string, unknown>, path: string, issues: MapDocu
     issues.push({ level: 'warning', path, message: '标记缺少 id / label / 有效坐标 p，已跳过' })
     return null
   }
-  let icon: MarkerIcon = 'town'
-  if (typeof raw.icon === 'string' && MARKER_ICONS.includes(raw.icon as MarkerIcon)) {
-    icon = raw.icon as MarkerIcon
-  } else if (raw.icon !== undefined) {
-    issues.push({ level: 'warning', path: `${path}.icon`, message: `未知图标 ${JSON.stringify(raw.icon)}，已回退为 town` })
-  }
+  const icon = readMarkerId(raw.icon, path, issues)
   const marker: MapMarker = { id, label, p, icon }
   if (isNonEmptyString(raw.c)) marker.c = raw.c
   if (isNonEmptyString(raw.link)) marker.link = raw.link

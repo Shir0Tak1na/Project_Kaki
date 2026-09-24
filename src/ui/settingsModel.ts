@@ -14,6 +14,8 @@
 
 import type { CustomTerrain } from '../render/terrainCatalog.ts'
 import { normalizeCustomTerrains } from '../render/terrainCatalog.ts'
+import type { CustomMarker } from '../render/markerCatalog.ts'
+import { normalizeCustomMarkers } from '../render/markerCatalog.ts'
 import type { LayerVisibility } from '../render/layerVisibility.ts'
 import { DEFAULT_LAYER_VISIBILITY, layerVisibilityFromLegacy } from '../render/layerVisibility.ts'
 import type { PathColorMap, StylePalette } from '../render/stylePalette.ts'
@@ -48,6 +50,14 @@ export interface CartographerSettings {
    */
   customTerrains: CustomTerrain[]
   /**
+   * 用户自定义标记图标（内置 9 种之外的）。
+   *
+   * 与 `customTerrains` 完全同构：`id`（形如 `custom:lighthouse`）就是写进地图文件的
+   * `markers[].icon` 的值，显示名与数据解耦；删掉定义不会删掉地图上的标记
+   * （它们退化成回退视觉，数据仍在文件里）。
+   */
+  customMarkers: CustomMarker[]
+  /**
    * 图层可见性（地形 / 网格 / 区域 / 路径 / 标记 / 名称）。
    *
    * 为什么放在设置里而不是写进地图文件：图层是"我现在想看到什么"，
@@ -66,6 +76,7 @@ export const DEFAULT_SETTINGS: CartographerSettings = {
   regionColors: defaultRegionColors(),
   labelFontFamily: '',
   customTerrains: [],
+  customMarkers: [],
   layers: DEFAULT_LAYER_VISIBILITY,
   showLegend: false,
 }
@@ -109,6 +120,8 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     labelFontFamily: normalizeFontFamily(source.labelFontFamily),
     // 自定义地形逐条独立校验：data.json 被手工改坏时只丢坏的那一条，其余照常可用
     customTerrains: normalizeCustomTerrains(source.customTerrains),
+    // 同上：自定义标记也逐条独立校验
+    customMarkers: normalizeCustomMarkers(source.customMarkers),
     // 图层：**只有这一份状态**（网格也在里面，不再有并列的 showGrid 字段）。
     // `source.showGrid` 只作为**迁移输入**读一次：早期只有这一个开关，
     // 老用户把它关掉过的话必须变成"隐藏网格"，不能因为换代就把他的选择丢掉。

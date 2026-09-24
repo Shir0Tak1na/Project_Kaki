@@ -11,7 +11,8 @@
 
 import { axialToWorld, type GridSpec, type Point } from '../core/hex.ts'
 import { worldToClient, type ClientProjection } from '../core/projection.ts'
-import type { MapDocument, MapLabel, MapMarker, MarkerIcon } from '../data/mapDocument.ts'
+import type { MapDocument, MapLabel, MapMarker, MarkerIcon, MarkerId } from '../data/mapDocument.ts'
+import { resolveMarkerStyle, type CustomMarker } from './markerCatalog.ts'
 
 /** 标记图标的显示字号与尺寸（屏幕像素，恒定不随缩放变化） */
 export const MARKER_ICON_SIZE = 18
@@ -35,7 +36,17 @@ export interface MarkerPlacement {
   x: number
   y: number
   label: string
-  icon?: MarkerIcon
+  icon?: MarkerId
+  /**
+   * 已解析的 Lucide 图标名（由 `resolveMarkerStyle` 抹平内置/自定义/未知三种情况）。
+   *
+   * 为什么解析结果随 placement 一起传下去，而不是让渲染层自己去查目录：
+   * 渲染层每帧都要问一次"这个 ID 画成什么"，让它自己持有设置就会多出一份**可能过期**的状态
+   * （设置页删掉一个自定义标记后，画布要么不更新，要么得再写一套订阅）。
+   */
+  iconName?: string
+  /** 已解析的图片路径；**非空表示要画图片**（调色/字形模式在这里就已经被抹成空串） */
+  iconImage?: string
   color?: string
   link?: string
   description?: string
@@ -60,6 +71,8 @@ export interface BuildPlacementsOptions {
   viewportRect: ViewportRect
   /** 裁剪留白（屏幕像素） */
   margin?: number
+  /** 当前自定义标记（每帧现读设置；缺省 = 只有内置 9 种） */
+  customMarkers?: readonly CustomMarker[]
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -91,12 +104,17 @@ export function buildPlacements(options: BuildPlacementsOptions): MarkerPlacemen
   const { document, projection, viewportRect } = options
   const margin = options.margin ?? MARKER_CULL_MARGIN
   const scale = projection.scale
+  const customMarkers = options.customMarkers ?? []
   const out: MarkerPlacement[] = []
 
   for (const marker of document.markers) {
     const world = { x: marker.p[0], y: marker.p[1] }
     const screen = worldToViewport(projection, viewportRect, world)
     if (!inViewport(screen, viewportRect, margin)) continue
+    // 图标在这里**解析一次**：内置 / 自定义 / 未知三种情况被抹平成同一个形状，
+    // 渲染层拿到的是"画什么"，而不是"去查什么"（与地形图集同一套分工）。
+    // 每帧都重新解析，所以设置页改完标记定义之后，下一个重绘帧就生效。
+    const style = resolveMarkerStyle(marker.icon, customMarkers)
     const placement: MarkerPlacement = {
       id: marker.id,
       kind: 'marker',
@@ -104,6 +122,8 @@ export function buildPlacements(options: BuildPlacementsOptions): MarkerPlacemen
       y: screen.y,
       label: marker.label,
       icon: marker.icon,
+      iconName: style.iconName,
+      iconImage: style.imagePath,
       world,
     }
     if (marker.c !== undefined) placement.color = marker.c
@@ -184,6 +204,9 @@ export function defaultMarkerIcon(): MarkerIcon {
  *
  * ⚠️ Lucide 的图标名跨版本可能变化。渲染层会先用 `getIcon()` 校验：
  * 取不到就退回一个中性圆点，而不是**什么都不显示** —— 图标缺失不应该让标记"消失"。
+ *
+ * 入参是**任意 ID 字符串**（不是 `MarkerIcon` 联合）：自定义标记与未知 ID 也会走到这里，
+ * 表里没有就落到 `circle-dot`，于是调用方不必先判断"这是不是内置的"。
  */
 export const MARKER_ICON_LUCIDE: Record<MarkerIcon, string> = {
   city: 'building-2',
@@ -197,8 +220,8 @@ export const MARKER_ICON_LUCIDE: Record<MarkerIcon, string> = {
   tower: 'tower-control',
 }
 
-export function lucideIconFor(icon: MarkerIcon): string {
-  return MARKER_ICON_LUCIDE[icon] ?? 'circle-dot'
+export function lucideIconFor(icon: string): string {
+  return (MARKER_ICON_LUCIDE as Record<string, string | undefined>)[icon] ?? 'circle-dot'
 }
 
 export type { MapLabel, MapMarker }

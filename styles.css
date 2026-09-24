@@ -84,6 +84,22 @@
   height: 18px;
 }
 
+/*
+ * 图片模式的自定义标记。
+ *
+ * `object-fit: contain` 是关键：图片是用户自己挑的，比例五花八门，
+ * 拉伸填满会把圆形徽记压成椭圆。宁可留白也不能变形。
+ * `pointer-events: none` + 代码里的 draggable=false：否则按住图片拖动会触发
+ * 浏览器原生的"拖拽图片"手势，指针事件链当场断掉（表现为标记拖不动）。
+ */
+.fc-marker-image {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
 /* 图标名在当前 Lucide 版本里不存在时的降级：画一个圆点，而不是什么都不显示 */
 .fc-marker-icon.fc-icon-fallback::after {
   content: '';
@@ -242,6 +258,46 @@
 .fc-toolbar-icon-glyph svg {
   width: 15px;
   height: 15px;
+}
+
+/* 图片模式的自定义标记：工具条上直接显示用户那张图（等比缩放，绝不变形）。
+   标记那一组同样可能很长（内置 9 种 + 最多 60 个自定义标记），所以也要能折行与滚动。 */
+.fc-toolbar-icon-group {
+  flex-wrap: wrap;
+  max-width: 100%;
+  max-height: 32vh;
+  overflow-y: auto;
+}
+
+.fc-toolbar-icon-image {
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+/* 自定义标记与内置标记一眼区分（字形可能是通用的圆点，光看图分不出来） */
+.fc-toolbar-icon.is-custom {
+  border-style: dashed;
+}
+
+/* 设置页里的图片预览：让用户直接看到"这张图长什么样"，而不是靠路径字符串判断选对没有 */
+.fc-marker-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.fc-marker-preview-image {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  padding: 2px;
 }
 
 /* ---- 面板里的图层开关（六层：地形/网格/区域/路径/标记/名称） ---- */

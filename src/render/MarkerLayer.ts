@@ -30,6 +30,13 @@ export interface MarkerLayerOptions {
   onDragCancel?: () => void
   /** 注入图标校验（测试用；默认用 obsidian 的 getIcon） */
   hasIcon?: (name: string) => boolean
+  /**
+   * 把库内图片路径换成可放进 `<img src>` 的地址（真实环境用 `vault.getResourcePath`）。
+   *
+   * 为什么由上层注入：本层不认识 vault，也不该认识 —— 于是它可以在单测与冒烟里
+   * 用假 DOM 直接跑。缺省时图片模式**不生效**（回退字形），而不是给出一个坏 URL。
+   */
+  resolveImageSrc?: (path: string) => string
 }
 
 /** 超过这个位移才算拖动（与放置时的点击判定共用同一阈值语义） */
@@ -42,6 +49,12 @@ interface LayerEntry {
   labelEl: HTMLElement | null
   /** 已应用的图标名，避免每帧重复设置 */
   appliedIcon: string | null
+  /** 当前挂着的图片元素（图片模式）；字形模式一律为 null */
+  iconImg: HTMLImageElement | null
+  /** 已应用的图片路径（比较用；与 `appliedIcon` 一起构成"这一帧视觉要不要改"） */
+  appliedImage: string | null
+  /** 最近一次请求的字形名：图片加载失败时用它回退，而不必再拿一次 placement */
+  glyph: string
 }
 
 interface DragState {
@@ -64,6 +77,13 @@ export class MarkerLayer {
   /** 图层可见性（与"有没有标记"是两件事，见 setVisible） */
   private visible = true
   private destroyed = false
+  /**
+   * 加载失败的标记图片路径。
+   *
+   * 一个坏路径只告警一次、只尝试一次：否则坏图会变成"每帧一次 404 + 每帧一条日志"，
+   * 用户的控制台被刷屏，而画面没有任何变化。与地形图集那边的 `terrainImageState` 同一用意。
+   */
+  private readonly failedImages = new Set<string>()
 
   constructor(options: MarkerLayerOptions) {
     this.options = options
@@ -159,13 +179,22 @@ export class MarkerLayer {
       root.append(iconEl, labelEl)
       this.container.appendChild(root)
       this.attachInteraction(root, placement.id)
-      return { kind: 'marker', root, iconEl, labelEl, appliedIcon: null }
+      return { kind: 'marker', root, iconEl, labelEl, appliedIcon: null, iconImg: null, appliedImage: null, glyph: '' }
     }
 
     root.className = 'fc-label'
     this.container.appendChild(root)
     this.attachInteraction(root, placement.id)
-    return { kind: 'label', root, iconEl: null, labelEl: root, appliedIcon: null }
+    return {
+      kind: 'label',
+      root,
+      iconEl: null,
+      labelEl: root,
+      appliedIcon: null,
+      iconImg: null,
+      appliedImage: null,
+      glyph: '',
+    }
   }
 
   /**
@@ -256,19 +285,14 @@ export class MarkerLayer {
     else delete entry.root.dataset.fcLink
 
     if (placement.kind === 'marker') {
-      const lucide = lucideIconFor(placement.icon ?? 'town')
-      if (entry.appliedIcon !== lucide && entry.iconEl) {
-        const available = this.options.hasIcon ? this.options.hasIcon(lucide) : getIcon(lucide) !== null
-        if (available) {
-          setIcon(entry.iconEl, lucide)
-          entry.iconEl.classList.remove('fc-icon-fallback')
-        } else {
-          // 图标名在本地 Lucide 版本里不存在：退回中性圆点，而不是什么都不画
-          entry.iconEl.textContent = ''
-          entry.iconEl.classList.add('fc-icon-fallback')
-        }
-        entry.appliedIcon = lucide
-      }
+      // `iconName` 由 `buildPlacements` 解析好（内置 / 自定义 / 未知三种情况已抹平）；
+      // 缺省时退回内置映射，是为了让"手工构造 placement"的调用方（测试、旧路径）行为不变。
+      entry.glyph = placement.iconName ?? lucideIconFor(placement.icon ?? 'town')
+      const image = placement.iconImage ?? ''
+      // 已知加载不出来的图片**不再重试**：否则每帧都会新建一个 `<img>` 去撞同一个 404，
+      // 白烧 CPU 与网络，而且用户看到的还是同一个回退字形。
+      if (image.length > 0 && !this.failedImages.has(image)) this.applyMarkerImage(entry, image)
+      else this.applyMarkerGlyph(entry, entry.glyph)
       if (entry.labelEl) entry.labelEl.textContent = placement.label
       if (placement.color) entry.root.style.setProperty('--fc-marker-color', placement.color)
       else entry.root.style.removeProperty('--fc-marker-color')
@@ -282,6 +306,89 @@ export class MarkerLayer {
     else entry.root.style.removeProperty('color')
     entry.root.classList.toggle('is-bold', placement.bold === true)
     entry.root.classList.toggle('is-italic', placement.italic === true)
+  }
+
+  /**
+   * 画字形（Lucide 图标）。
+   *
+   * 会先摘掉可能挂着的 `<img>`：图片模式与字形模式是**互斥**的两套视觉，
+   * 叠在一起会变成"图标画在图片上"。切回字形时必须真的把图片元素删掉。
+   */
+  private applyMarkerGlyph(entry: LayerEntry, lucide: string): void {
+    if (entry.iconImg !== null) {
+      entry.iconImg.remove()
+      entry.iconImg = null
+      entry.appliedImage = null
+      // 图片刚被摘掉，字形需要重新画一遍（`appliedIcon` 记的是更早那次的状态）
+      entry.appliedIcon = null
+    }
+    if (entry.appliedIcon === lucide || entry.iconEl === null) return
+    const available = this.options.hasIcon ? this.options.hasIcon(lucide) : getIcon(lucide) !== null
+    if (available) {
+      setIcon(entry.iconEl, lucide)
+      entry.iconEl.classList.remove('fc-icon-fallback')
+    } else {
+      // 图标名在本地 Lucide 版本里不存在：退回中性圆点，而不是什么都不画
+      entry.iconEl.textContent = ''
+      entry.iconEl.classList.add('fc-icon-fallback')
+    }
+    entry.appliedIcon = lucide
+  }
+
+  /**
+   * 画图片（自定义标记的"图片"模式）。
+   *
+   * 同一路径不重建元素：`<img>` 一旦被替换，浏览器会重新解码一次图片，
+   * 而这是**每帧**都会走到的路径。
+   */
+  private applyMarkerImage(entry: LayerEntry, path: string): void {
+    if (entry.iconImg !== null && entry.appliedImage === path) return
+    const iconEl = entry.iconEl
+    if (iconEl === null) return
+    const resolve = this.options.resolveImageSrc
+    if (resolve === undefined) {
+      // 没有注入解析器（例如单测里没给）：宁可画字形，也不要给出一个坏 URL 变成破图
+      this.applyMarkerGlyph(entry, entry.glyph)
+      return
+    }
+    entry.iconImg?.remove()
+    // 字形必须清掉：`setIcon` 塞进去的 SVG 会与 `<img>` 同时占位，两张图叠在一起。
+    // `dataset.icon` 也要一起删：那个属性记的是"这个元素现在显示哪个图标"，
+    // 留着它就等于让一个已经不成立的描述继续挂在 DOM 上（debug 时最容易被它骗）。
+    iconEl.textContent = ''
+    if (iconEl.dataset) delete iconEl.dataset.icon
+    iconEl.classList.remove('fc-icon-fallback')
+    entry.appliedIcon = null
+
+    const doc = iconEl.ownerDocument ?? globalThis.document
+    const img = doc.createElement('img')
+    img.className = 'fc-marker-image'
+    img.alt = ''
+    // 不设 draggable=false 的话，按住标记拖动会被浏览器当成"拖拽图片"，
+    // 指针事件链当场断掉 —— 表现是"带图片的标记拖不动，图标标记却正常"。
+    img.draggable = false
+    img.addEventListener('error', () => {
+      // 只处理**当前**这张图：慢加载的旧图报错时，条目可能早就切回字形了
+      if (entry.iconImg !== img) return
+      this.failMarkerImage(entry, path)
+    })
+    img.src = resolve(path)
+    iconEl.appendChild(img)
+    entry.iconImg = img
+    entry.appliedImage = path
+  }
+
+  /** 图片加载失败：告警一次，然后回退到字形（标记绝不能因为图挂了就消失） */
+  private failMarkerImage(entry: LayerEntry, path: string): void {
+    entry.iconImg?.remove()
+    entry.iconImg = null
+    entry.appliedImage = null
+    entry.appliedIcon = null
+    if (!this.failedImages.has(path)) {
+      this.failedImages.add(path)
+      console.warn(`[project-kaki] 标记图片加载失败，已回退为图标字形：${path}`)
+    }
+    this.applyMarkerGlyph(entry, entry.glyph)
   }
 
   private removeEntry(id: string, entry: LayerEntry): void {

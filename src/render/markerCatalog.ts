@@ -14,6 +14,7 @@
 
 import { MARKER_ICONS, type MarkerIcon } from '../data/mapDocument.ts'
 import { lucideIconFor } from './markerPlacement.ts'
+import { checkTerrainImagePath } from './terrainCatalog.ts'
 
 /**
  * 自定义标记 ID 的前缀。
@@ -40,15 +41,30 @@ const MAX_LABEL_LENGTH = 24
 /** 未知 ID / 没有可用图标时的回退：`circle-dot` 是既有映射表里就在用的有效名字 */
 export const FALLBACK_MARKER_ICON_NAME = 'circle-dot'
 
+/**
+ * 自定义标记的两种模式。
+ *
+ * 与自定义地形同一条理由（那里是 `CustomTerrainMode`，此处是它的镜像）：
+ * 靠"有图片就画图片"来推断，用户既看不出"两个都填会怎样"、也看不出自己现在处于哪种状态；
+ * 而且想切回字形时只能**删掉图片路径** —— 删掉就丢了那条路径，改主意时得重新找图。
+ * 显式模式让"用哪套视觉"与"配了哪些值"互不牵连：切回图片模式时之前选的图还在。
+ */
+export type CustomMarkerMode = 'glyph' | 'image'
+
+/** 新建时的默认模式：字形不依赖任何外部资源，最不容易失败 */
+export const DEFAULT_CUSTOM_MARKER_MODE: CustomMarkerMode = 'glyph'
+
 export interface CustomMarker {
   /** 完整 ID（含 `custom:` 前缀）—— **就是写进地图文件的 `icon` 值** */
   id: string
   /** 显示名（工具条与设置页用）；改它不影响已存数据 */
   label: string
-  /** 借用哪个内置图标的字形；`''` = 用通用图钉（回退名） */
+  /** 借用哪个内置图标的字形；`''` = 用通用图钉（回退名）。**两种模式下都保留** */
   icon: string
-  /** 库内图片路径（相对库根）；`''` = 只用图标字形 */
+  /** 库内图片路径（相对库根）；**仅在 `mode === 'image'` 时参与绘制** */
   imagePath: string
+  /** 用哪套视觉：字形（借用内置图标）还是图片 */
+  mode: CustomMarkerMode
 }
 
 /** 绘制层真正消费的标记视觉（内置、自定义、未知三种情况被抹平成同一个形状） */
@@ -102,6 +118,23 @@ export function normalizeMarkerLabel(raw: unknown, id: string): string {
   return text.length > MAX_LABEL_LENGTH ? text.slice(0, MAX_LABEL_LENGTH) : text
 }
 
+/* --------------------------------------------------------------- 模式 */
+
+/**
+ * 收敛模式，并**迁移旧数据**。
+ *
+ * 与 `normalizeTerrainMode` 逐字同一条规则（两处必须保持一致，否则同一个 `data.json`
+ * 里地形与标记会对"配了图但没写模式"给出不同答案）：旧数据只有 `imagePath`，
+ * **配了图片就按图片模式**，否则字形模式 —— 升级后看到的画面与升级前完全一致。
+ *
+ * 非法值走**同一条推断**，而不是默认成 `'glyph'`：把"配了图但 mode 写坏了"降级成字形模式，
+ * 用户会看到"图明明配着却不显示"而界面一切正常 —— 那是最难自查的一类问题。
+ */
+export function normalizeMarkerMode(raw: unknown, imagePath: string): CustomMarkerMode {
+  if (raw === 'glyph' || raw === 'image') return raw
+  return imagePath.length > 0 ? 'image' : 'glyph'
+}
+
 /* --------------------------------------------------------------- 集合 */
 
 function normalizeOneMarker(raw: unknown): CustomMarker | null {
@@ -109,14 +142,17 @@ function normalizeOneMarker(raw: unknown): CustomMarker | null {
   const source = raw as Record<string, unknown>
   const id = normalizeMarkerId(source.id)
   if (id === null) return null
+  // 先算图片路径、再定模式：模式的迁移推断就建立在"有没有图片"上（同 normalizeOneTerrain）
+  const imagePath = checkTerrainImagePath(source.imagePath).path
   return {
     id,
     label: normalizeMarkerLabel(source.label, id),
     // 字形只接受内置图标名；其余（含 null / 未知字符串）退化为通用图钉
     icon: isBuiltinMarkerIcon(source.icon) ? source.icon : '',
-    // 图片路径的形状校验与地形共用同一套规则（在 wiring 时接上 checkTerrainImagePath，
-    // 这里先只保证是字符串：真正的路径校验属于 `terrainCatalog` 的职责，不重复实现）
-    imagePath: typeof source.imagePath === 'string' ? source.imagePath.trim().replace(/\\/g, '/') : '',
+    // 图片路径的形状校验与地形**共用同一个函数**（扩展名白名单、反斜杠统一成 `/`）：
+    // 两处各写一套的话，"地形接受了这张图、标记却不接受"会变成没法解释的行为差异
+    imagePath,
+    mode: normalizeMarkerMode(source.mode, imagePath),
   }
 }
 
@@ -168,7 +204,9 @@ export function resolveMarkerStyle(id: string, custom: readonly CustomMarker[] =
       id,
       label: marker.label,
       iconName: marker.icon.length > 0 ? lucideIconFor(marker.icon as MarkerIcon) : FALLBACK_MARKER_ICON_NAME,
-      imagePath: marker.imagePath,
+      // 字形模式下**不把图片路径交出去**：绘制层拿不到它就绝不会去画图片，
+      // 于是"模式"这件事只需要在这里判断一次，而不是散落到每一处绘制代码里（同 resolveTerrainStyle）。
+      imagePath: marker.mode === 'image' ? marker.imagePath : '',
       builtin: false,
       unknown: false,
     }
@@ -200,7 +238,7 @@ export function markerLabelOf(id: string, custom: readonly CustomMarker[] = []):
  * 与地形图集同一思路（`terrainCatalogSignature`），避免每个标记都重建 DOM。
  */
 export function markerCatalogSignature(custom: readonly CustomMarker[] = []): string {
-  return custom.map((marker) => `${marker.id}|${marker.label}|${marker.icon}|${marker.imagePath}`).join(';')
+  return custom.map((marker) => `${marker.id}|${marker.label}|${marker.icon}|${marker.imagePath}|${marker.mode}`).join(';')
 }
 
 /** 设置页保存前用它决定"能不能收" */
@@ -209,16 +247,22 @@ export function validateCustomMarkerInput(input: {
   label?: unknown
   icon?: unknown
   imagePath?: unknown
+  mode?: unknown
 }): { ok: true; marker: CustomMarker } | { ok: false; problem: string } {
   const id = normalizeMarkerId(input.id)
   if (id === null) return { ok: false, problem: markerIdProblem(input.id) ?? 'ID 不合法' }
+  // 图片路径为什么**在这里**就拒绝、而不是留到绘制时回退：设置页需要一句可读的原因
+  // （"只支持 png / jpg …"），而绘制层的回退只是兜底，不会告诉用户哪里写错了
+  const image = checkTerrainImagePath(input.imagePath)
+  if (image.problem.length > 0) return { ok: false, problem: image.problem }
   return {
     ok: true,
     marker: {
       id,
       label: normalizeMarkerLabel(input.label, id),
       icon: isBuiltinMarkerIcon(input.icon) ? input.icon : '',
-      imagePath: typeof input.imagePath === 'string' ? input.imagePath.trim().replace(/\\/g, '/') : '',
+      imagePath: image.path,
+      mode: normalizeMarkerMode(input.mode, image.path),
     },
   }
 }

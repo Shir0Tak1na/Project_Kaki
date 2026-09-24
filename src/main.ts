@@ -71,6 +71,7 @@ import {
   type CustomTerrain,
 } from './render/terrainCatalog.ts'
 import type { PathType } from './data/mapDocument.ts'
+import { MAX_CUSTOM_MARKERS, validateCustomMarkerInput, type CustomMarker } from './render/markerCatalog.ts'
 import { TextPromptModal, type TextPromptOptions } from './ui/TextPromptModal.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
@@ -168,6 +169,7 @@ export default class ProjectKakiPlugin extends Plugin {
       // 样式（路径/区域颜色、名称字体族）：地图层每帧现读，改完设置立刻生效
       getStylePalette: () => this.getStylePalette(),
       getCustomTerrains: () => this.getCustomTerrains(),
+      getCustomMarkers: () => this.getCustomMarkers(),
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
       // 工具条上的按钮通过下面两个 setter 写回设置。
       getLayers: () => this.pluginSettings.layers,
@@ -833,6 +835,89 @@ export default class ProjectKakiPlugin extends Plugin {
     this.pluginSettings = {
       ...this.pluginSettings,
       customTerrains: this.pluginSettings.customTerrains.filter((_terrain, i) => i !== index),
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
+  /** 当前自定义标记（地图层、工具条、放置对话框都现读它） */
+  getCustomMarkers(): readonly CustomMarker[] {
+    return this.pluginSettings.customMarkers
+  }
+
+  /**
+   * 新增一个自定义标记。
+   *
+   * 与 `addCustomTerrain` 逐字同构：校验全在 `validateCustomMarkerInput` 里（纯函数），
+   * 这里只落盘 + 通知渲染层。重名会被拒绝并给出可读原因 ——
+   * **同一个 ID 两条定义**会让"画上去是哪个图标"变成说不清的问题。
+   */
+  async addCustomMarker(input: {
+    id: unknown
+    label?: unknown
+    icon?: unknown
+    imagePath?: unknown
+    mode?: unknown
+  }): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const result = validateCustomMarkerInput(input)
+    if (!result.ok) return result
+    if (this.pluginSettings.customMarkers.some((marker) => marker.id === result.marker.id)) {
+      return { ok: false, problem: `已经有一个标记用了 ID ${result.marker.id}` }
+    }
+    if (this.pluginSettings.customMarkers.length >= MAX_CUSTOM_MARKERS) {
+      return { ok: false, problem: `最多 ${MAX_CUSTOM_MARKERS} 个自定义标记` }
+    }
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      customMarkers: [...this.pluginSettings.customMarkers, result.marker],
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+    return { ok: true }
+  }
+
+  /**
+   * 改一个自定义标记（按下标定位，因为 ID 不可改）。
+   *
+   * 只接受"补丁"，且**只切模式时其余字段原样带着走** ——
+   * 于是"字形 ↔ 图片"来回切不会丢配置（切回去时之前选的图还在）。
+   */
+  async updateCustomMarker(
+    index: number,
+    patch: { label?: unknown; icon?: unknown; imagePath?: unknown; mode?: unknown },
+  ): Promise<void> {
+    const current = this.pluginSettings.customMarkers[index]
+    if (!current) return
+    const next = validateCustomMarkerInput({
+      id: current.id,
+      label: patch.label !== undefined ? patch.label : current.label,
+      icon: patch.icon !== undefined ? patch.icon : current.icon,
+      imagePath: patch.imagePath !== undefined ? patch.imagePath : current.imagePath,
+      mode: patch.mode !== undefined ? patch.mode : current.mode,
+    })
+    if (!next.ok) {
+      console.warn(`[project-kaki] 自定义标记 ${current.id} 的修改被拒绝：${next.problem}`)
+      return
+    }
+    const list = [...this.pluginSettings.customMarkers]
+    list[index] = next.marker
+    this.pluginSettings = { ...this.pluginSettings, customMarkers: list }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
+  /**
+   * 删除一个自定义标记。
+   *
+   * **不动地图数据**：地图上已经用了这个图标的标记仍然留在文件里，只是画成回退视觉。
+   * 与删除自定义地形同一条承诺（见各文档里的"认不出 ≠ 丢弃"）。
+   */
+  async removeCustomMarker(index: number): Promise<void> {
+    const current = this.pluginSettings.customMarkers[index]
+    if (!current) return
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      customMarkers: this.pluginSettings.customMarkers.filter((_marker, i) => i !== index),
     }
     await this.saveData(this.pluginSettings)
     this.layers?.setStylePalette()

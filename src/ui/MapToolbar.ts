@@ -9,11 +9,11 @@
  */
 
 import { setIcon } from 'obsidian'
-import { MARKER_ICONS, PATH_TYPES, type MarkerIcon, type PathType } from '../data/mapDocument.ts'
+import { PATH_TYPES, type MarkerIcon, type MarkerId, type PathType } from '../data/mapDocument.ts'
 import type { EditorStatus, EditorTool, MapEditor } from '../editor/MapEditor.ts'
 import type { GeometryMode } from '../core/hexEdges.ts'
 import { listResolvedTerrainStyles, terrainCatalogSignature, type CustomTerrain } from '../render/terrainCatalog.ts'
-import { lucideIconFor } from '../render/markerPlacement.ts'
+import { listResolvedMarkerStyles, markerCatalogSignature, type CustomMarker } from '../render/markerCatalog.ts'
 import { REGION_PRESETS } from '../render/shapeStyle.ts'
 import { defaultPathColors, defaultRegionColors, resolvePathStyle, type PathColorMap } from '../render/stylePalette.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
@@ -48,6 +48,18 @@ export interface MapToolbarOptions {
    * 而它在用户改设置时才会发生，不会进入每帧路径。
    */
   getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 用户自定义标记图标（来自插件设置）。
+   *
+   * 与自定义地形逐字同理：按钮数量会随设置变化，所以目录签名变了要重建那一组。
+   */
+  getCustomMarkers?: () => readonly CustomMarker[]
+  /**
+   * 库内图片路径 → `<img src>` 地址（图片模式的自定义标记，按钮上直接显示用户那张图）。
+   *
+   * 缺省时不显示图片、退回借来的字形 —— 与绘制层同一套回退，绝不显示破图。
+   */
+  resolveImageSrc?: (path: string) => string
   /**
    * 切换"名称"图层（路径与区域的名称标注）。
    *
@@ -108,7 +120,9 @@ export class MapToolbar {
   private readonly terrainButtons = new Map<string, HTMLButtonElement>()
   /** 上一次构建地形按钮时的目录签名：变了才重建 DOM */
   private terrainSignature = ''
-  private readonly iconButtons = new Map<MarkerIcon, HTMLButtonElement>()
+  /** 上一次构建图标按钮时的目录签名：变了才重建 DOM */
+  private markerSignature = ''
+  private readonly iconButtons = new Map<MarkerId, HTMLButtonElement>()
   private readonly pathButtons = new Map<PathType, HTMLButtonElement>()
   private readonly regionButtons = new Map<number, HTMLButtonElement>()
   /** 色块元素：设置里改了颜色后，刷新时原地改背景色（不重建 DOM） */
@@ -168,24 +182,10 @@ export class MapToolbar {
     this.rebuildTerrainButtons()
     this.root.appendChild(this.terrainGroup)
 
-    // 标记图标选择（仅标记工具下显示）
+    // 标记图标选择（仅标记工具下显示）：内置 9 种 + 用户自定义（排在后面）
     this.iconGroup = doc.createElement('div')
     this.iconGroup.className = 'fc-toolbar-group fc-toolbar-icon-group'
-    for (const icon of MARKER_ICONS) {
-      const button = doc.createElement('button')
-      button.className = 'fc-toolbar-button fc-toolbar-icon'
-      button.title = ICON_LABELS[icon]
-      const iconEl = doc.createElement('span')
-      iconEl.className = 'fc-toolbar-icon-glyph'
-      setIcon(iconEl, lucideIconFor(icon))
-      button.appendChild(iconEl)
-      button.addEventListener('click', () => {
-        options.editor.setMarkerIcon(icon)
-        this.refresh()
-      })
-      this.iconButtons.set(icon, button)
-      this.iconGroup.appendChild(button)
-    }
+    this.rebuildMarkerButtons()
     this.root.appendChild(this.iconGroup)
 
     // 路径类型（仅路径工具下显示）
@@ -377,11 +377,71 @@ export class MapToolbar {
     })
   }
 
+  /**
+   * 重建标记图标按钮：内置 9 种在前，自定义按设置顺序排在后面。
+   *
+   * 与地形按钮同一套做法（目录签名变了才重建）。两点差别：
+   * - 图片模式的自定义标记在按钮上**直接显示用户那张图**，而不是借来的字形 ——
+   *   否则用户在工具条上根本认不出自己挑的图标（字形只是个占位）；
+   * - 自定义标记额外显示显示名：图标字形可能是通用的圆点，只有名字能把它们区分开。
+   *
+   * 与地形一致：**未知图标不占按钮位**（工具条只列"当前设置里存在的选择"）。
+   * 地图里已有的未知图标仍然正常绘制（回退视觉），数据也不会丢 —— 这里只是不发按钮。
+   */
+  private rebuildMarkerButtons(): void {
+    const doc = this.root.ownerDocument ?? globalThis.document
+    const custom = this.options.getCustomMarkers?.() ?? []
+    const styles = listResolvedMarkerStyles(custom)
+    this.markerSignature = markerCatalogSignature(custom)
+    this.iconGroup.empty()
+    this.iconButtons.clear()
+
+    for (const style of styles) {
+      const button = doc.createElement('button')
+      button.className = style.builtin
+        ? 'fc-toolbar-button fc-toolbar-icon'
+        : 'fc-toolbar-button fc-toolbar-icon is-custom'
+      button.title = style.builtin
+        ? (ICON_LABELS[style.id as MarkerIcon] ?? style.label)
+        : `${style.label}（自定义标记 ${style.id}${style.imagePath.length > 0 ? ` · 图片 ${style.imagePath}` : ''}）`
+      const iconEl = doc.createElement('span')
+      iconEl.className = 'fc-toolbar-icon-glyph'
+      const src = style.imagePath.length > 0 ? (this.options.resolveImageSrc?.(style.imagePath) ?? '') : ''
+      if (src.length > 0) {
+        const img = doc.createElement('img')
+        img.className = 'fc-toolbar-icon-image'
+        img.alt = ''
+        // 同标记层：不设 draggable=false 会把"点按钮"变成浏览器原生拖图
+        img.draggable = false
+        img.src = src
+        iconEl.appendChild(img)
+      } else {
+        setIcon(iconEl, style.iconName)
+      }
+      button.appendChild(iconEl)
+      if (!style.builtin) {
+        const label = doc.createElement('span')
+        label.textContent = style.label
+        button.appendChild(label)
+      }
+      button.addEventListener('click', () => {
+        this.options.editor.setMarkerIcon(style.id)
+        this.refresh()
+      })
+      this.iconButtons.set(style.id, button)
+      this.iconGroup.appendChild(button)
+    }
+  }
+
   /** 按编辑器当前状态刷新按钮文案与可用性 */
   refresh(): void {
     // 地形目录变了（用户增删自定义地形）→ 按钮数量本身变了，只能重建这一组
     if (terrainCatalogSignature(this.options.getCustomTerrains?.() ?? []) !== this.terrainSignature) {
       this.rebuildTerrainButtons()
+    }
+    // 标记目录同理：改完显示名或换图之后按钮上的文字/缩略图也要跟上
+    if (markerCatalogSignature(this.options.getCustomMarkers?.() ?? []) !== this.markerSignature) {
+      this.rebuildMarkerButtons()
     }
     const status: EditorStatus = this.options.editor.getStatus()
     const painting = status.mode === 'paint'

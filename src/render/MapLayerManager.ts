@@ -24,9 +24,11 @@ import {
   type LayerVisibility,
 } from './layerVisibility.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
+import type { CustomMarker } from './markerCatalog.ts'
 import { canonicalColor, defaultStylePalette, resolvePathStyle, resolveRegionPresets, type StylePalette } from './stylePalette.ts'
 import { resolveTerrainStyle, type CustomTerrain } from './terrainCatalog.ts'
 import { MapLegend } from '../ui/MapLegend.ts'
+import { resolveVaultResourceUrl } from '../base/vaultResource.ts'
 
 export interface LayerStatus {
   canvasPath: string
@@ -65,6 +67,13 @@ export interface MapLayerManagerDeps {
    * 否则用户新增一个地形后要重开画布才看得到。
    */
   getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 用户自定义标记图标（来自插件设置）。
+   *
+   * 与 `getCustomTerrains` 逐字同理：地图层活得比设置页久，必须"每次现读"，
+   * 否则用户新增一个标记图标后要重开画布才看得到。
+   */
+  getCustomMarkers?: () => readonly CustomMarker[]
   /**
    * 图层可见性（来自插件设置）。
    *
@@ -324,7 +333,13 @@ export class MapLayerManager {
       // 标记层挂在未变换的 wrapperEl 上：屏幕坐标、字号恒定、可 hover/点击
       getMarkerHost: () => asElement((handle.canvas as { wrapperEl?: unknown }).wrapperEl),
       getPlacements: (document_, projection, viewportRect) =>
-        buildPlacements({ document: document_, projection, viewportRect }),
+        buildPlacements({
+          document: document_,
+          projection,
+          viewportRect,
+          // 自定义标记同样每帧现读：设置里删掉一个定义之后，画布下个重绘帧就会回退字形
+          customMarkers: this.deps.getCustomMarkers?.() ?? [],
+        }),
       // 进行中的路径/区域草稿：与地形同帧绘制（橡皮筋要每帧跟随光标）
       getDraft: () => this.entries.get(canvasPath)?.editor.getDraft() ?? null,
       // 名称字号倍率：来自插件设置
@@ -335,6 +350,8 @@ export class MapLayerManager {
       getLabelFontFamily: () => this.deps.getStylePalette?.().fontFamily ?? '',
       // 自定义地形：目录与图片加载都从这里注入（渲染层不认识 vault）
       getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
+      // 标记图片走 `<img src>`（不是 canvas），所以这里交出一个**同步**的地址解析器
+      resolveImageSrc: (path) => this.resourceUrlFor(path),
       loadTerrainImage: (path) => this.loadTerrainImage(path),
       onOpenLink: (link) => this.openNote(link, mapPath),
       onDeleteMarker: (placement) => this.deletePlacement(canvasPath, placement),
@@ -400,6 +417,9 @@ export class MapLayerManager {
         const options: PlaceMarkerOptions = {
           kind: tool,
           initialIcon: editor.markerIcon,
+          // 打开对话框时现读自定义标记：自动测试注入的替身对话框不关心它，
+          // 而真实对话框要在下拉里列出用户自己定义的图标
+          getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
           onSubmit: (input) => {
             if (tool === 'marker') {
               editor.setMarkerIcon(input.icon)
@@ -440,6 +460,8 @@ export class MapLayerManager {
             return { pathColors: palette.pathColors, regionColors: palette.regionColors }
           },
           getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
+          getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
+          resolveImageSrc: (path) => this.resourceUrlFor(path),
           // 「名称」按钮写图层设置（同一个值）：编辑器里**没有**第二份名称开关，
           // 所以不存在"设置里打开、按钮显示关闭"这种状态
           getShowShapeLabels: () => isLayerVisible(this.layersVisibility(), 'labels'),
@@ -555,13 +577,39 @@ export class MapLayerManager {
    * 文件不在库里、拿不到资源地址（移动端/非文件系统适配器）、图片解码失败。
    * 不抛异常：它是在绘制过程中被调起的，抛出去会变成每帧刷屏的错误。
    */
-  private async loadTerrainImage(path: string): Promise<CanvasImageSource | null> {
-    const vault = this.deps.app?.vault as
+  /**
+   * 取"库内文件 → 资源地址"用的 vault 视图（两个可选 API 都比 obsidian 的类型声明宽）。
+   *
+   * `Vault.getResourcePath` 是官方 API；`adapter.getResourcePath` 是 1.5 之前的老写法，
+   * 移动端与非文件系统适配器上两者都可能缺失 —— 所以全部标成可选，由调用方决定回退。
+   */
+  private resourceVault():
+    | (typeof this.deps.app.vault & {
+        getResourcePath?: (file: TFile) => string
+        adapter?: { getResourcePath?: (path: string) => string }
+      })
+    | undefined {
+    return this.deps.app?.vault as
       | (typeof this.deps.app.vault & {
           getResourcePath?: (file: TFile) => string
           adapter?: { getResourcePath?: (path: string) => string }
         })
       | undefined
+  }
+
+  /**
+   * 库内图片路径 → 可直接放进 `<img src>` 的地址；取不到时返回 `''`。
+   *
+   * 真正的取值顺序在 `base/vaultResource.ts` 里（设置页的图标预览用的是同一个函数）——
+   * 两处各写一遍迟早会分叉，表现是"设置页有预览、画布上是破图"。
+   * 返回空串表示"这张图现在拿不到"，由标记层回退成图标字形。
+   */
+  private resourceUrlFor(path: string): string {
+    return resolveVaultResourceUrl(this.deps.app, path)
+  }
+
+  private async loadTerrainImage(path: string): Promise<CanvasImageSource | null> {
+    const vault = this.resourceVault()
     if (!vault) {
       console.warn(`[project-kaki] 自定义地形图片 ${path}：当前没有可用的 vault，已回退到颜色 + 字形`)
       return null

@@ -115,7 +115,7 @@ test('单条目错误只跳过该条目并告警，其余数据保持可用', ()
 
   assert.deepEqual(Object.keys(doc.terrain).sort(), ['0_0', '1_1', '2_2'])
   assert.deepEqual(doc.markers.map((m) => m.id), ['m1', 'm3'])
-  assert.equal(doc.markers[1]!.icon, 'town', '未知图标应回退为 town')
+  assert.equal(doc.markers[1]!.icon, 'spaceship', '未知图标必须原样保留（改写成 town = 下次保存就永久改了数据）')
   assert.deepEqual(doc.regions.map((r) => r.id), ['r2'], '顶点不足 3 个的区域应被跳过')
 
   const warnings = result.issues.filter((issue) => issue.level === 'warning')
@@ -153,6 +153,50 @@ test('未知地形必须被保留并告警（丢弃会在下次保存时永久�
   const warnings = result.issues.filter((issue) => issue.level === 'warning' && issue.path.endsWith('.t'))
   assert.equal(warnings.length, 1, `只应有一条地形告警，实际 ${JSON.stringify(warnings.map((w) => w.message))}`)
   assert.ok(warnings[0]!.message.includes('已保留'), warnings[0]!.message)
+})
+
+test('未知标记图标必须被保留并告警（与未知地形同一条承诺）', () => {
+  const raw = validRaw()
+  raw.markers = [
+    { id: 'm1', label: '内置', p: [0, 0], icon: 'city' },
+    { id: 'm2', label: '自定义命名空间', p: [1, 0], icon: 'custom:lighthouse' },
+    { id: 'm3', label: '外来的', p: [2, 0], icon: 'spaceship' },
+    // 不是合法字符串（空串 / 带空白 / 非字符串）才是真的用不了 → 回退 town
+    { id: 'm4', label: '空图标', p: [3, 0], icon: '' },
+    { id: 'm5', label: '数字图标', p: [4, 0], icon: 42 },
+  ]
+
+  const result = parseMapDocument(raw)
+  assert.equal(result.ok, true, '未知图标不能让整份文档加载失败')
+  const doc = result.document!
+
+  assert.deepEqual(
+    doc.markers.map((marker) => marker.icon),
+    ['city', 'custom:lighthouse', 'spaceship', 'town', 'town'],
+  )
+
+  // 往返：序列化再解析一次，外来 ID 一个字节都不能变 —— 这条就是"下次保存会不会删数据"的答案
+  const text = serializeMapDocument(doc, 2)
+  assert.ok(text.includes('"spaceship"'), '序列化结果里必须还有原来的图标名')
+  const again = parseMapDocument(JSON.parse(text) as unknown)
+  assert.equal(again.ok, true)
+  assert.equal(again.document!.markers[2]!.icon, 'spaceship')
+
+  // 告警只有"完全外来"的那一条：`custom:` 是否已定义由绘制层判断（解析层读不到设置），
+  // 而"空串/非字符串"是另一类原因（不是合法标识），不该被算成"未知图标"
+  const warnings = result.issues.filter((issue) => issue.level === 'warning' && issue.path.endsWith('.icon'))
+  const unknownWarnings = warnings.filter((issue) => issue.message.includes('未知图标'))
+  assert.equal(
+    unknownWarnings.length,
+    1,
+    `只应有一条"未知图标"告警，实际 ${JSON.stringify(warnings.map((w) => w.message))}`,
+  )
+  assert.ok(unknownWarnings[0]!.message.includes('已保留'), unknownWarnings[0]!.message)
+  assert.ok(unknownWarnings[0]!.message.includes('spaceship'), '告警要指明是哪个值，否则用户无从排查')
+
+  // 非字符串那一类走"回退为 town"，且原因与"未知图标"区分开
+  const fallbackWarnings = warnings.filter((issue) => issue.message.includes('已回退为 town'))
+  assert.equal(fallbackWarnings.length, 2, JSON.stringify(warnings.map((w) => w.message)))
 })
 
 test('opacity 会被收敛到 0..1', () => {
