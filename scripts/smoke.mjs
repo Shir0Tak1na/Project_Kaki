@@ -1594,6 +1594,40 @@ function firePointer(element, type, { clientX = 0, clientY = 0, button = 0, poin
   return { prevented, stopped }
 }
 
+/**
+ * 模拟真实浏览器里的一次画布 `pointerdown`：**先经过 `document`（捕获阶段），再到达画布容器**。
+ *
+ * 为什么需要它：假 DOM 不实现事件传播，`fakeDocument.dispatchEvent(...)` 只会在 document 上
+ * 调监听器、**根本到不了画布**。于是「工具条在下拉展开时把这一击拦下、不让它落到画布上」
+ * 这条契约无法被验证 —— 工具条什么都不做，那一点照样会落到画布，断言也照样绿（空转断言）。
+ * 这里显式按真实顺序走两跳，并尊重 `stopPropagation()`：被拦下就不再送给画布。
+ * 返回值里的 `reachedCanvas` 就是「这一击有没有到达画布」的客观记录。
+ */
+function firePointerThroughDocument(documentNode, canvasHost, { clientX = 0, clientY = 0, button = 0, pointerId = 1, target = null } = {}) {
+  let stopped = false
+  const event = {
+    type: 'pointerdown',
+    clientX,
+    clientY,
+    button,
+    pointerId,
+    target: target ?? canvasHost,
+    preventDefault() {},
+    stopPropagation() {
+      stopped = true
+    },
+    stopImmediatePropagation() {
+      stopped = true
+    },
+  }
+  documentNode.dispatchEvent(event)
+  // 必须在派发给画布**之前**判定：画布自己的 handler 也会调 stopPropagation（它在处理这一击），
+  // 派发之后再读 `stopped` 会把「真的到达了画布」误报成「被拦下」。
+  const reachedCanvas = !stopped
+  if (reachedCanvas) canvasHost.dispatchEvent(event)
+  return { stopped: !reachedCanvas, reachedCanvas }
+}
+
 /** 假 metadataCache：用被测仓库自己的 frontmatter 解析器，模拟 Obsidian 提供 frontmatter */
 function makeMetadataCache(vault) {
   return {
@@ -7277,18 +7311,43 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
     (fakeDocument._listeners.get('pointerdown')?.size ?? 0) === 1,
     String(fakeDocument._listeners.get('pointerdown')?.size),
   )
-  // 真实浏览器里画布上的 pointerdown 会冒泡/捕获经过 document；假 DOM 不模拟事件传播，
-  // 所以这里按**契约**在 document 上派发同一个事件，target 指向下拉之外的画布元素。
-  fakeDocument.dispatchEvent({ type: 'pointerdown', target: wrapper })
-  check('点在画布上（下拉外面）时下拉收起 —— 否则那一击会顺手在地图上画一个点', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
+  // 真实浏览器里画布上的 pointerdown 会先经过 document 的捕获阶段；假 DOM 不模拟事件传播，
+  // 所以用 firePointerThroughDocument 按真实顺序走两跳（document → 画布），并尊重 stopPropagation。
+  const outsideClient = canvas._clientFor({ x: -200, y: 640 })
+  const outsideStrike = firePointerThroughDocument(fakeDocument, host, {
+    clientX: outsideClient.x,
+    clientY: outsideClient.y,
+    target: wrapper,
+  })
+  check('点在画布上（下拉外面）时下拉收起', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
+  check(
+    '这一击被拦下了 —— 没有落到画布上（否则用户只想收下拉，却顺手画出一个路径顶点）',
+    outsideStrike.reachedCanvas === false && editor.isDrafting() === false,
+    `reachedCanvas=${outsideStrike.reachedCanvas} drafting=${editor.isDrafting()}`,
+  )
   check(
     '收起之后监听被摘掉（不留全局残留）',
     (fakeDocument._listeners.get('pointerdown')?.size ?? 0) === 0,
     String(fakeDocument._listeners.get('pointerdown')?.size),
   )
+  // 反向对照：下拉**没有**展开时，同样的一击必须正常到达画布。
+  // 没有这一条，上一条断言在「函数永远返回 reachedCanvas=false」时也会绿（空转）。
+  const controlStrike = firePointerThroughDocument(fakeDocument, host, {
+    clientX: outsideClient.x,
+    clientY: outsideClient.y,
+    target: wrapper,
+  })
+  check(
+    '反向对照：下拉收起时同一击会正常落到画布（证明上一条不是空转）',
+    controlStrike.reachedCanvas === true && editor.getStatus().draftPoints === 1,
+    `reachedCanvas=${controlStrike.reachedCanvas} draftPoints=${editor.getStatus().draftPoints}`,
+  )
+  editor.cancelDraft()
+  flushFrames()
+  check('对照用的顶点已被清掉，不影响后续断言', editor.isDrafting() === false)
   fireEvent(pathTrigger(), 'click')
   check('再点一次又展开', pathMenu()?.style.display === '', String(pathMenu()?.style.display))
-  fakeDocument.dispatchEvent({ type: 'pointerdown', target: pathOption('river') })
+  fakeDocument.dispatchEvent({ type: 'pointerdown', target: pathOption('river'), stopPropagation() {} })
   check('点在下拉**内部**时不收起（由选项自己的 handler 负责）', pathMenu()?.style.display === '', String(pathMenu()?.style.display))
   fireEvent(pathOption('custom:highway'), 'click')
   check('选中后下拉自动收起', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))

@@ -430,6 +430,12 @@ export class MapToolbar {
           // 点在下拉组内部（触发按钮或某个选项）时由它们各自的 handler 处理，别抢
           if (target !== null && this.pathGroup.contains(target as Node)) return
           this.setPathMenuOpen(false)
+          // 这一击**只**用来关下拉，不放它继续走到画布上。
+          //
+          // 为什么必须拦住：用户刚在下拉里选完类型，工具还停在路径模式；此时点一下画布想把
+          // 下拉收起来，如果这一击照常落到画布，就会顺手落下一个路径顶点 —— 用户没想画，
+          // 却得到一笔要撤销的东西。拦截只影响"下拉正展开"的这一击，收起后监听立即摘掉。
+          event.stopPropagation()
         }
         doc.addEventListener('pointerdown', this.pathOutsideListener, true)
       }
