@@ -19,7 +19,7 @@
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
 - 单元测试：278 个通过
-- 冒烟测试：27 个场景、557 条断言全部通过
+- 冒烟测试：28 个场景、587 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - 最近验证命令（**在本沙箱里 `npm run <script>` 可能报 `spawn EPERM`，直接跑 `node ...` 最稳**）：
 
@@ -213,6 +213,6 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 - 插件 ID 是 `project-kaki`；**不要**再改它（改了要同步 `manifest.json` + `scripts/deploy.mjs` + `scripts/smoke.mjs` 里的字面量，
   并给用户做目录与启用项迁移）。同理不要改那三个写在用户文件里的持久化标识，见本文开头的警告。
 - 每次修改 UI 后都要跑 `npm run build`、`npm test`、`node scripts/smoke.mjs`，并部署到测试库后给用户可判伪的手动验证清单。
-- 文档中的测试数量必须和实际输出同步。当前基线是 `278 / 557`（单元测试 / 冒烟断言，27 个冒烟场景），
+- 文档中的测试数量必须和实际输出同步。当前基线是 `278 / 587`（单元测试 / 冒烟断言，28 个冒烟场景），
   两者都能自己数出来：`node --test --test-isolation=none` 的末行、`node scripts/smoke.mjs` 的末行。
 - 加新功能时**同时加冒烟场景**：桩没模拟到的真实行为，就是下一次用户报的 bug。
