@@ -396,6 +396,32 @@
   font-size: var(--font-ui-smaller);
 }
 
+/* ---- 导出对话框（范围 + 格式） ---- */
+
+/*
+ * 摘要：范围/尺寸一行，"输出文件：…（重名时自动加 -2、-3）"一行。
+ * `pre-line` 是必须的：那是**两个换行**，用普通 div 会被折成一行，
+ * 而"会写出哪个文件"恰恰是用户点导出之前最想确认的那一句。
+ */
+.fc-export-summary {
+  margin: 4px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+  white-space: pre-line;
+  word-break: break-word;
+}
+
+/* 范围不合法（没有区域 / 找不到区域 / 还没有可见视口）：把原因说得像个提醒 */
+.fc-export-summary.is-problem {
+  border-color: var(--text-warning);
+  color: var(--text-warning);
+}
+
 /* ---- 地图面板（右侧边栏视图） ---- */
 
 /* 设置页标题下的一行译名（名字只在一处出现，别在每个标题里都写两遍） */

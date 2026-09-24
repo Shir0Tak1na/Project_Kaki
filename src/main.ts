@@ -20,13 +20,22 @@ import {
   isMapDocumentLike,
 } from './base/viewContract.ts'
 import { MapDocumentStore } from './data/MapDocumentStore.ts'
-import { summarizeMapDocument } from './data/mapDocument.ts'
+import { summarizeMapDocument, type MapDocument } from './data/mapDocument.ts'
 import { buildDiagnosticReport } from './dev/diagnostics.ts'
 import { disposeViewportWatch, getWatchStatus, startViewportWatch, stopViewportWatch } from './dev/viewport-watch.ts'
 import { MapEditor } from './editor/MapEditor.ts'
 import { MapLayerManager } from './render/MapLayerManager.ts'
 import { buildMapExportSvg } from './base/mapPreview.ts'
+import {
+  EXPORT_RANGE_OPTIONS,
+  exportFileNameFor,
+  listExportRegions,
+  resolveExportBounds,
+  type ExportRange,
+} from './base/exportBounds.ts'
 import { exportBasePathFor, rasterizeSvgToPng, uniqueExportPath, type PngRasterDeps } from './base/pngExport.ts'
+import { ExportModal, type ExportFormat, type ExportModalFactory } from './ui/ExportModal.ts'
+import type { BBox } from './core/viewport.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
 import { ReportModal, type ReportModalFactory, type ReportModalOptions } from './ui/ReportModal.ts'
 import { AssetSuggestModal, type AssetPickerOptions, type ImagePickerFactory } from './ui/AssetSuggestModal.ts'
@@ -129,6 +138,13 @@ export default class ProjectKakiPlugin extends Plugin {
    * 恰恰是最该测的。注入依赖之后，成功路径与降级路径都能端到端断言。
    */
   private pngRasterDeps: PngRasterDeps | null = null
+  /**
+   * 导出对话框工厂（仅自动化测试注入；默认就是真实对话框）。
+   *
+   * 默认工厂写成惰性闭包：真实对话框只在"真的被打开"时构造，因此注入替身
+   * 可以完全绕开假 DOM，直接断言"用户选了哪个范围、哪种格式"之后发生了什么。
+   */
+  private exportModalFactory: ExportModalFactory = (app, options) => new ExportModal(app, options)
   /** 不能用 `settings` 这个名字：Obsidian 的 Plugin 基类已经有同名成员 */
   private pluginSettings: CartographerSettings = normalizeSettings(null)
   /** Base 自定义视图是否可用（需要 Obsidian 1.10.0+） */
@@ -321,12 +337,23 @@ export default class ProjectKakiPlugin extends Plugin {
         run: () => this.createMapBase(),
       },
       {
+        // 「一条命令 + 一个对话框」：范围与格式都在对话框里选。
+        // 否则"两条命令 × 三种范围"会铺成 6 条命令，命令面板越铺越难找。
+        id: 'export-map',
+        name: '导出地图…（可选范围与格式）',
+        icon: 'image-down',
+        group: 'file',
+        available: hasLayer,
+        describe: () => (hasLayer() ? '选范围（全部内容 / 当前视口 / 某个区域）与格式' : '需要先启用地图层'),
+        run: () => this.openExportModal(),
+      },
+      {
         id: 'export-map-svg',
         name: '导出当前地图为 SVG',
         icon: 'image-down',
         group: 'file',
         available: hasLayer,
-        describe: () => (hasLayer() ? '导出到地图文件同目录' : '需要先启用地图层'),
+        describe: () => (hasLayer() ? '导出到地图文件同目录（等于「导出地图…」选全部内容 + SVG）' : '需要先启用地图层'),
         run: () => this.exportActiveMapSvg(),
       },
       {
@@ -337,7 +364,7 @@ export default class ProjectKakiPlugin extends Plugin {
         available: hasLayer,
         // PNG 与 SVG 是"同一张图的两种格式"：先导出 SVG（共用同一份几何与配色）再光栅化，
         // 所以这里的描述要把这层关系讲清楚，否则用户会以为两条命令各画各的。
-        describe: () => (hasLayer() ? '与 SVG 同源，转成位图' : '需要先启用地图层'),
+        describe: () => (hasLayer() ? '与 SVG 同源，转成位图（等于「导出地图…」选全部内容 + PNG）' : '需要先启用地图层'),
         run: () => this.exportActiveMapPng(),
       },
       {
@@ -547,82 +574,138 @@ export default class ProjectKakiPlugin extends Plugin {
     }
   }
 
-  private async exportActiveMapSvg(): Promise<void> {
+  /**
+   * 导出前的统一前置检查：拿到"当前画布 → 地图文档"这条链上的所有东西。
+   *
+   * 抽出来是因为现在有**三条**导出入口（对话框 / SVG 快捷命令 / PNG 快捷命令），
+   * 三处各写一遍前置检查，迟早会出现"其中一条忘了校验"这种最烦人的不一致。
+   */
+  private resolveExportContext(): { canvasPath: string; mapPath: string; document: MapDocument } | null {
     const handle = activeCanvasHandle(this.app)
     const canvasPath = handle?.file?.path
     if (!canvasPath || !this.layers) {
       new Notice('请先打开一个已启用地图层的 Canvas。', NOTICE_MAX_MS)
-      return
+      return null
     }
     const mapPath = this.store?.mapFilePathForCanvas(canvasPath)
     const document = this.layers.getDocument(canvasPath)
     if (!mapPath || !document) {
       new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', NOTICE_MAX_MS)
-      return
+      return null
     }
+    return { canvasPath, mapPath, document }
+  }
 
-    const basePath = exportBasePathFor(mapPath)
-    const exportPath = uniqueExportPath(basePath, '.svg', (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
-
-    try {
-      // 现读一次设置：导出必须是"当前地图 + 当前自定义地形"的合成结果
-      const created = await this.app.vault.create(
-        exportPath,
-        buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains()),
-      )
-      new Notice(`已导出地图 SVG：${created.path}`, NOTICE_MAX_MS)
-      void this.app.workspace.openLinkText(created.path, '', false)
-    } catch (error) {
-      console.error('[project-kaki] 导出 SVG 失败', error)
-      new Notice(`导出 SVG 失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
-    }
+  /** 当前可见的世界矩形（范围＝「当前视口」时用）；没有可见帧时返回 null 交给范围解析报原因 */
+  private currentViewportWorld(canvasPath: string): BBox | null {
+    const status = this.layers?.listStatus().find((item) => item.canvasPath === canvasPath)
+    return status?.stats?.lastVisibleWorld ?? null
   }
 
   /**
-   * 导出当前地图为 PNG。
+   * 按指定范围与格式导出当前地图 —— 三条入口共用这一份实现。
+   *
+   * 范围解析失败（没有区域、没有可见视口……）时**只给一句人话、不产出文件**：
+   * 半个空图比没有文件更糟（用户会以为导出成功了）。
+   *
+   * 返回值是"**文件真的写出来了吗**"：对话框靠它决定要不要留在原地
+   * （失败时留着，用户就能换个格式再试；成功或"已经报过原因"时才关窗）。
+   * 提示只在这里发一次，所以对话框拿到 `false` 时不需要再说一遍。
+   */
+  private async exportMapWithRange(range: ExportRange, format: ExportFormat): Promise<boolean> {
+    const context = this.resolveExportContext()
+    if (!context) return false
+    const { canvasPath, mapPath, document } = context
+
+    const resolved = resolveExportBounds(range, {
+      document,
+      viewportWorld: this.currentViewportWorld(canvasPath),
+    })
+    if (!resolved.ok) {
+      new Notice(`无法导出：${resolved.reason}`, NOTICE_MAX_MS)
+      return false
+    }
+
+    const basePath = exportFileNameFor(exportBasePathFor(mapPath), range, document)
+    const extension = format === 'png' ? '.png' : '.svg'
+    const exportPath = uniqueExportPath(basePath, extension, (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
+    // 现读一次设置：导出必须是"当前地图 + 当前自定义地形"的合成结果
+    const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains(), resolved.bounds)
+
+    if (format === 'svg') {
+      try {
+        const created = await this.app.vault.create(exportPath, svg)
+        new Notice(`已导出地图 SVG：${created.path}\n（${resolved.description}）`, NOTICE_MAX_MS)
+        void this.app.workspace.openLinkText(created.path, '', false)
+        return true
+      } catch (error) {
+        console.error('[project-kaki] 导出 SVG 失败', error)
+        new Notice(`导出 SVG 失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
+        return false
+      }
+    }
+
+    try {
+      const result = await rasterizeSvgToPng(svg, { width: EXPORT_WIDTH, height: EXPORT_HEIGHT }, this.pngRasterDeps ?? {})
+      if (!result.ok) {
+        new Notice(`导出 PNG 失败：${result.reason}`, NOTICE_MAX_MS)
+        return false
+      }
+      const created = await this.app.vault.createBinary(exportPath, await result.blob.arrayBuffer())
+      new Notice(`已导出地图 PNG：${created.path}\n（${resolved.description}）`, NOTICE_MAX_MS)
+      void this.app.workspace.openLinkText(created.path, '', false)
+      return true
+    } catch (error) {
+      console.error('[project-kaki] 导出 PNG 失败', error)
+      new Notice(`导出 PNG 失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
+      return false
+    }
+  }
+
+  /** 打开「导出地图…」对话框：范围（全部内容 / 当前视口 / 某个区域）+ 格式（SVG / PNG） */
+  private openExportModal(): void {
+    const context = this.resolveExportContext()
+    if (!context) return
+    const { canvasPath, document } = context
+    const canvasPathForViewport = canvasPath
+
+    this.exportModalFactory(this.app, {
+      ranges: EXPORT_RANGE_OPTIONS,
+      regions: listExportRegions(document),
+      initialRange: { kind: 'all' },
+      initialFormat: 'svg',
+      describe: (range, format) => {
+        const resolved = resolveExportBounds(range, {
+          document,
+          viewportWorld: this.currentViewportWorld(canvasPathForViewport),
+        })
+        if (!resolved.ok) return { ok: false, reason: resolved.reason }
+        // 摘要里带上将要写入的文件名：用户点"导出"之前就能知道会多出哪个文件
+        const name = `${exportFileNameFor(exportBasePathFor(context.mapPath), range, document)}${format === 'png' ? '.png' : '.svg'}`
+        return { ok: true, text: `${resolved.description}\n输出文件：${name}（重名时自动加 -2、-3）` }
+      },
+      onExport: async (range, format) => {
+        const done = await this.exportMapWithRange(range, format)
+        // 失败时不留 `reason`：具体原因（"这个环境不支持 toBlob"之类）已经由导出那边
+        // 发过一条提示了，这里再说一遍只会让用户看到两句意思相同的话。
+        return done ? { ok: true as const } : { ok: false as const }
+      },
+    }).open()
+  }
+
+  private async exportActiveMapSvg(): Promise<void> {
+    await this.exportMapWithRange({ kind: 'all' }, 'svg')
+  }
+
+  /**
+   * 导出当前地图为 PNG（快捷入口，相当于对话框里选"全部内容 + PNG"）。
    *
    * 与 SVG 导出**共用同一份几何与配色**：先由 `buildMapExportSvg` 生成 SVG（Base 缩略图也用同一份），
    * 再把它光栅化成位图。这样"导出的图与画布一致"这条承诺只需要维护一处 ——
    * 如果这里另写一套坐标换算，迟早会出现"PNG 与 SVG 长得不一样"。
-   *
-   * 失败一律给一句人话（`rasterizeSvgToPng` 已经把每条失败路径写成中文原因），
-   * 并且**不产生文件**：半个空图比没有文件更糟（用户会以为导出成功了）。
    */
   private async exportActiveMapPng(): Promise<void> {
-    const handle = activeCanvasHandle(this.app)
-    const canvasPath = handle?.file?.path
-    if (!canvasPath || !this.layers) {
-      new Notice('请先打开一个已启用地图层的 Canvas。', NOTICE_MAX_MS)
-      return
-    }
-    const mapPath = this.store?.mapFilePathForCanvas(canvasPath)
-    const document = this.layers.getDocument(canvasPath)
-    if (!mapPath || !document) {
-      new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', NOTICE_MAX_MS)
-      return
-    }
-
-    const basePath = exportBasePathFor(mapPath)
-    const exportPath = uniqueExportPath(basePath, '.png', (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
-
-    try {
-      const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains())
-      const result = await rasterizeSvgToPng(
-        svg,
-        { width: EXPORT_WIDTH, height: EXPORT_HEIGHT },
-        this.pngRasterDeps ?? {},
-      )
-      if (!result.ok) {
-        new Notice(`导出 PNG 失败：${result.reason}`, NOTICE_MAX_MS)
-        return
-      }
-      const created = await this.app.vault.createBinary(exportPath, await result.blob.arrayBuffer())
-      new Notice(`已导出地图 PNG：${created.path}`, NOTICE_MAX_MS)
-      void this.app.workspace.openLinkText(created.path, '', false)
-    } catch (error) {
-      console.error('[project-kaki] 导出 PNG 失败', error)
-      new Notice(`导出 PNG 失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
-    }
+    await this.exportMapWithRange({ kind: 'all' }, 'png')
   }
 
   override onunload(): void {
@@ -965,6 +1048,16 @@ export default class ProjectKakiPlugin extends Plugin {
    */
   setPngRasterizer(deps: PngRasterDeps | null): void {
     this.pngRasterDeps = deps
+  }
+
+  /**
+   * 替换导出对话框工厂（自动化测试用；传 `null` 恢复真实对话框）。
+   *
+   * 与图片选择器、报告面板同一套路：测试要断言的是"选了范围与格式之后产出对不对"，
+   * 而不是去模拟对话框里的点击 —— 所以换掉工厂、直接驱动那几个选项。
+   */
+  setExportModalFactory(factory: ExportModalFactory | null): void {
+    this.exportModalFactory = factory ?? ((app, options) => new ExportModal(app, options))
   }
 
   // ------------------------------------------------------------ 地图层

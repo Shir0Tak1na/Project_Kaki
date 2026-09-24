@@ -23,6 +23,7 @@ import {
   type CanvasHandle,
 } from '../canvas/CanvasAdapter.ts'
 import { axialToWorld, cellKey, hexCorners, parseCellKey } from '../core/hex.ts'
+import type { BBox } from '../core/viewport.ts'
 import { brushCellsAt, visibleCellBounds } from './hexGrid.ts'
 import { buildRenderPlan, worldToRaster, type MapRenderPlan } from './renderPlan.ts'
 import { MarkerLayer } from './MarkerLayer.ts'
@@ -70,6 +71,14 @@ export interface OverlayStats {
    * 用户报"看起来没生效"时就能一眼判断是渲染没走通还是观感问题。
    */
   lastImageRegionCount: number
+  /**
+   * 最近一帧"可见的世界矩形"（导出范围＝「当前视口」时用它）。
+   *
+   * 为什么放在统计里而不是让导出侧自己算：视口 → 世界坐标的换算只有覆盖层手里有
+   * （锚点投影 + 实测标定），在别处再推一次就又是一份会漂移的实现。
+   * 还没画过任何一帧时是 `null`，范围解析会据此给出一句可读原因（而不是导出一张空图）。
+   */
+  lastVisibleWorld: BBox | null
   markerLayerAttached: boolean
   lastRaster: { width: number; height: number } | null
   /** 实测的"位图像素 / 屏幕 CSS 像素"（名称字号的换算依据，诊断用） */
@@ -218,6 +227,7 @@ export class MapOverlay {
     lastRegionCount: 0,
     lastMarkerCount: 0,
     lastImageRegionCount: 0,
+    lastVisibleWorld: null,
     markerLayerAttached: false,
     lastRaster: null,
     rasterPxPerCssPx: 1,
@@ -426,6 +436,8 @@ export class MapOverlay {
       this.stats.redraws += 1
       this.stats.lastCellCount = plan.cells.length
       this.stats.lastCulledCells = plan.culledCells
+      // 记下这一帧的可见世界矩形：导出范围＝「当前视口」时要用（见 OverlayStats 的说明）
+      this.stats.lastVisibleWorld = plan.visibleWorld
       this.stats.lastRaster = { width: plan.layer.rasterWidth, height: plan.layer.rasterHeight }
       this.stats.rasterPxPerCssPx = plan.layer.rasterPxPerCssPx
       this.stats.labelCssPx = {

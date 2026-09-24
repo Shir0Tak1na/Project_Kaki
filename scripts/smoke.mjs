@@ -867,12 +867,19 @@ class FakeSetting {
    * 下拉框。真实语义：`addOption(value, label)` 先登记选项，`setValue` 选中，
    * `onChange` 在用户改选时触发。桩必须保留选项表 —— 否则"字形下拉框里有没有内置地形"
    * 这类断言就没法写。
+   *
+   * `selectEl` 也是必须的：真实 `DropdownComponent` 一定有它，而插件会往它身上挂
+   * `dataset` 标记（对话框里一行有多个下拉时，只能靠标记区分谁是谁）。
+   * 桩里缺这个成员不会报错、只会让标记无处可挂 —— 断言于是永远找不到控件，
+   * 失败信息看起来像"界面没渲染"，其实是假 DOM 少了一个成员。
    */
   addDropdown(callback) {
     const setting = this
+    const selectEl = makeEl({ tagName: 'select', className: 'dropdown' })
     const dropdown = {
       options: [],
       value: null,
+      selectEl,
       addOption(value, label) {
         this.options.push({ value, label })
         return this
@@ -883,6 +890,7 @@ class FakeSetting {
       },
       setValue(value) {
         this.value = value
+        selectEl.value = value
         return this
       },
       onChange(handler) {
@@ -892,11 +900,16 @@ class FakeSetting {
       /** 模拟用户改选 */
       async select(value) {
         this.value = value
+        selectEl.value = value
         await this.handler?.(value)
         return this
       },
     }
     callback?.(dropdown)
+    // 一个 Setting 上只挂一个下拉，但一个对话框里会有好几个：`dropdown` 保留为最后一个，
+    // `dropdowns` 收集全部（按渲染顺序），兼容既有断言
+    setting.dropdowns = setting.dropdowns ?? []
+    setting.dropdowns.push(dropdown)
     setting.dropdown = dropdown
     return this
   }
@@ -1634,6 +1647,29 @@ function captureReports(plugin) {
     last: () => reports.at(-1),
     /** 恢复成真实面板（此后命令会真的造一个 ReportModal） */
     restore: () => plugin.setReportModalFactory(defaultFactory),
+    defaultFactory,
+  }
+}
+
+/**
+ * 捕获「导出地图」对话框收到的选项（与 `captureReports` 同一套路）。
+ *
+ * 为什么要捕获：对话框里"范围/格式/区域"这些内容全是 `main.ts` 现算出来传进去的，
+ * 而那才是我们写的逻辑；对话框本身只负责把它们画出来。
+ * 把**默认工厂**一并返回，就能再用同一份选项造一个**真对话框**，
+ * 用假 DOM 驱动它的下拉框与按钮（`FakeSetting.created` 收着它建的每一个 Setting）。
+ */
+function captureExportModals(plugin) {
+  const opened = []
+  const defaultFactory = plugin.exportModalFactory
+  plugin.setExportModalFactory((_app, options) => {
+    opened.push(options)
+    return { open() {} }
+  })
+  return {
+    opened,
+    last: () => opened.at(-1),
+    restore: () => plugin.setExportModalFactory(defaultFactory),
     defaultFactory,
   }
 }
@@ -6012,6 +6048,430 @@ console.log('\n场景 31：图片地形的「显示方式」（单格一张 / �
     check('平移之后长林带仍然被画出来', false, `平移后拿到 ${longRectAfter === null ? 'null' : '矩形'}`)
   }
 
+  plugin.onunload()
+}
+
+console.log('\n场景 32：导出时自己选范围（用户：一个离主体很远的孤立格会把整张图缩小）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  const mapPath = 'Maps/World.map.md'
+  const mapFile = app.vault.getAbstractFileByPath(mapPath)
+  const loaded = await store.load(mapFile)
+  const grid = loaded.document.grid
+  check('默认网格是 pointy（下面的世界坐标换算依赖这一点）', grid.orientation === 'pointy', String(grid.orientation))
+
+  // 主体：一块 200×200 的区域 + 一个标记
+  // ⚠️ 地图层还没启用，此时 `layers.getDocument()` 是 null —— 内容先写进 `loaded.document`
+  loaded.document.regions.push({ id: 'r1', label: '北境领', pts: [[0, 0], [200, 0], [200, 200], [0, 200]], color: '#44cf6e', opacity: 0.22 })
+  loaded.document.markers.push({ id: 'm1', label: '龙脊城', p: [100, 100], icon: 'city' })
+
+  // 远处那一格（用户问的正是这种"离主体很远的孤立格"）+ 一个跟它同处的远处标记。
+  // 世界坐标用真实几何算：pointy 下 x = s·(√3·q + √3/2·r)，y = s·1.5·r
+  const SQRT3 = Math.sqrt(3)
+  const FAR_AXIAL = { q: 98, r: 150 }
+  const farWorld = [
+    grid.origin[0] + grid.size * (SQRT3 * FAR_AXIAL.q + (SQRT3 / 2) * FAR_AXIAL.r),
+    grid.origin[1] + grid.size * 1.5 * FAR_AXIAL.r,
+  ]
+  check(
+    '远处的孤立格确实很远（世界坐标 > 10000）',
+    farWorld[0] > 10000 && farWorld[1] > 5000,
+    farWorld.join(','),
+  )
+  loaded.document.terrain[`${FAR_AXIAL.q}_${FAR_AXIAL.r}`] = { t: 'forest' }
+  loaded.document.markers.push({ id: 'm-far', label: '孤岛', p: farWorld, icon: 'tower' })
+  await store.writeNow(mapFile, loaded.document, 'World', [canvasPath])
+  await settleEvents()
+  /** 地图层里的**活文档**（层启用之后才是它；导出读的就是这一份） */
+  const doc = () => layers.getDocument(canvasPath)
+
+  const commandById = (id) => plugin.commands.find((command) => command.id === id)
+  const panelAction = (id) => plugin.getPanelActions().find((action) => action.id === id)
+  /**
+   * 从导出 SVG 里读某个标记的像素坐标。
+   *
+   * 导出坐标系的 viewBox 恒为 `0 0 1600 1000` —— 范围改变的是"世界 → 像素"的映射，
+   * 所以"远处的东西被裁掉了"这件事只能从**像素坐标超出画布**看出来。
+   */
+  const markerPixel = (svg, id) => {
+    const match = new RegExp(`data-row-id="map:marker:${id}" cx="([-\\d.]+)" cy="([-\\d.]+)"`).exec(svg ?? '')
+    return match ? { x: Number(match[1]), y: Number(match[2]) } : null
+  }
+  const inCanvas = (point) => point !== null && point.x >= 0 && point.x <= 1600 && point.y >= 0 && point.y <= 1000
+  const svgFiles = () => [...app.vault.files.keys()].filter((key) => key.endsWith('.svg'))
+
+  // ---- 命令面：一条新命令，两条旧命令都留着 ----
+  check('注册了「导出地图…」命令（范围与格式在对话框里选）', commandById('export-map') !== undefined)
+  check('新命令出现在地图面板的动作表里', panelAction('export-map') !== undefined)
+  check(
+    '保留旧的 SVG / PNG 快捷命令（老用户的手指记忆不作废）',
+    commandById('export-map-svg') !== undefined && commandById('export-map-png') !== undefined,
+  )
+  check('未启用地图层时新命令的面板按钮是禁用的', panelAction('export-map')?.available?.() === false, String(panelAction('export-map')?.available?.()))
+
+  // ---- 未启用地图层：明确提示，且**对话框根本不开** ----
+  clearNotices()
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  check(
+    '没有启用地图层时给出明确提示',
+    noticeLog.some((line) => line.includes('没有可导出的地图') || line.includes('已启用地图层')),
+    noticeLog.join(' | '),
+  )
+  check('未启用时不产生任何文件', svgFiles().length === 0, svgFiles().join(','))
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  check('地图层已启用', doc() !== null)
+  // 面板描述会随状态变（"需要先启用地图层" → 讲清三种范围），所以要在启用之后再问一次
+  check(
+    '启用地图层后面板描述里写明了三种范围',
+    /全部内容/.test(panelAction('export-map')?.describe?.() ?? ''),
+    String(panelAction('export-map')?.describe?.()),
+  )
+
+  // ---- 命令传进对话框的选项：范围三种、格式两种、区域来自地图数据 ----
+  const capture = captureExportModals(plugin)
+  clearNotices()
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const options = capture.last()
+  check('「导出地图…」打开的是导出对话框', options !== undefined)
+  check(
+    '对话框里有三种范围，且默认是「全部内容」（与以前的行为一致）',
+    options?.ranges?.map((item) => item.kind).join(',') === 'all,viewport,region' && options?.initialRange?.kind === 'all',
+    `${options?.ranges?.map((item) => item.kind).join(',')} / ${options?.initialRange?.kind}`,
+  )
+  check('对话框里有两种格式，且默认 SVG', options?.initialFormat === 'svg', String(options?.initialFormat))
+  check(
+    '区域列表来自地图上画过的区域',
+    JSON.stringify(options?.regions) === JSON.stringify([{ id: 'r1', label: '北境领' }]),
+    JSON.stringify(options?.regions),
+  )
+  const defaultPreview = options?.describe({ kind: 'all' }, 'svg')
+  check(
+    '默认摘要说的是「全部内容」并预告输出文件名（点之前就知道会多出哪个文件）',
+    defaultPreview?.ok === true && defaultPreview.text.includes('全部内容') && defaultPreview.text.includes('Maps/World.svg'),
+    JSON.stringify(defaultPreview),
+  )
+
+  // ---- 真对话框：假 DOM 里驱动它的下拉与按钮 ----
+  const dropdownByRole = (role) =>
+    FakeSetting.created
+      .flatMap((setting) => setting.dropdowns ?? [])
+      .filter((dropdown) => dropdown.selectEl?.dataset?.fcExportRole === role)
+      .at(-1)
+  const summaryEl = (modal) => collectByClass(modal.contentEl, 'fc-export-summary')[0]
+  const exportButton = () =>
+    FakeSetting.created.flatMap((setting) => setting.buttons ?? []).find((button) => (button.text ?? '').includes('导出'))
+  const openRealModal = (modalOptions) => {
+    FakeSetting.created.length = 0
+    const modal = capture.defaultFactory(app, modalOptions)
+    modal.open()
+    return modal
+  }
+
+  const modal = openRealModal(options)
+  check('对话框里有「范围」下拉', dropdownByRole('range') !== undefined)
+  check('对话框里有「格式」下拉', dropdownByRole('format') !== undefined)
+  check(
+    '范围下拉的三个取值与顺序',
+    dropdownByRole('range')?.options.map((item) => item.value).join(',') === 'all,viewport,region',
+    dropdownByRole('range')?.options.map((item) => `${item.value}=${item.label}`).join(' | '),
+  )
+  check(
+    '格式下拉的两个取值',
+    dropdownByRole('format')?.options.map((item) => item.value).join(',') === 'svg,png',
+    dropdownByRole('format')?.options.map((item) => item.value).join(','),
+  )
+  check('没选「某个区域」时不显示区域下拉（条件渲染）', dropdownByRole('region') === undefined)
+  check(
+    '摘要显示默认范围与输出文件名',
+    (summaryEl(modal)?.textContent ?? '').includes('全部内容') && (summaryEl(modal)?.textContent ?? '').includes('Maps/World.svg'),
+    String(summaryEl(modal)?.textContent),
+  )
+  check('合法范围下导出按钮可点', exportButton()?.disabled === false, String(exportButton()?.disabled))
+  check('导出按钮是主按钮（setCta）', exportButton()?.cta === true)
+
+  // ---- 切到「某个区域」：区域下拉出现并默认选中第一个 ----
+  const rangeDropdown = dropdownByRole('range')
+  FakeSetting.created.length = 0
+  await rangeDropdown.select('region')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check(
+    '选「某个区域」后出现区域下拉，并默认选中第一个区域',
+    dropdownByRole('region')?.value === 'r1',
+    String(dropdownByRole('region')?.value),
+  )
+  check(
+    '区域下拉里是地图上画过的区域',
+    dropdownByRole('region')?.options.map((item) => item.value).join(',') === 'r1',
+    dropdownByRole('region')?.options.map((item) => item.value).join(','),
+  )
+  const regionSummary = summaryEl(modal)?.textContent ?? ''
+  check(
+    '摘要换成该区域的范围，并预告带区域名的新文件名',
+    regionSummary.includes('北境领') && regionSummary.includes('Maps/World-北境领.svg'),
+    regionSummary.replace(/\n/g, ' | '),
+  )
+
+  // ---- 真导出（区域 + SVG）：这一对断言就是整个功能存在的理由 ----
+  clearNotices()
+  openedLinks.length = 0
+  await exportButton().click()
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const regionSvg = app.vault.files.get('Maps/World-北境领.svg')
+  check('按区域导出写出的文件名带上了区域名', typeof regionSvg === 'string', svgFiles().join(','))
+  const nearInRegion = markerPixel(regionSvg, 'm1')
+  const farInRegion = markerPixel(regionSvg, 'm-far')
+  check('区域内的标记在画面里', inCanvas(nearInRegion), JSON.stringify(nearInRegion))
+  check(
+    '**远处的孤立格被裁到画面之外**（用户就是被这个坑到的）',
+    farInRegion !== null && !inCanvas(farInRegion),
+    JSON.stringify(farInRegion),
+  )
+  check('裁掉 ≠ 丢数据：远处的标记仍然被画出来，只是落在 viewBox 之外', (regionSvg ?? '').includes('map:marker:m-far'))
+  // 用户的抱怨是"整张图会变得特别小"。把它量化：主体（选中的那个区域）在图里占多高。
+  // 按区域导出时它应当几乎填满画布；按全部内容导出时它被远处那一格压成一条细缝。
+  const regionPolygon = (svg, id) => {
+    const match = new RegExp(`data-row-id="map:region:${id}" points="([^"]+)"`).exec(svg ?? '')
+    if (!match) return null
+    return match[1].split(' ').map((pair) => ({ x: Number(pair.split(',')[0]), y: Number(pair.split(',')[1]) }))
+  }
+  const spanY = (points) => (points ? Math.max(...points.map((point) => point.y)) - Math.min(...points.map((point) => point.y)) : 0)
+  const regionSpanInRegion = spanY(regionPolygon(regionSvg, 'r1'))
+  check(
+    '选中的区域几乎填满了画布（这就是"自己选范围"要达到的效果）',
+    regionSpanInRegion >= 600,
+    `区域在图里高 ${regionSpanInRegion.toFixed(0)} / 1000 px`,
+  )
+  check(
+    '提示里写清了这次用的是哪个范围',
+    noticeLog.some((line) => line.includes('北境领') && line.includes('已导出地图 SVG')),
+    noticeLog.join(' | '),
+  )
+  check('导出成功后对话框自己关掉', modal.contentEl.children.length === 0, String(modal.contentEl.children.length))
+
+  // ---- 对照：快捷命令仍然是「全部内容」（老行为不变） ----
+  await runCommand(plugin, 'export-map-svg')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const allSvg = app.vault.files.get('Maps/World.svg')
+  check('快捷命令仍然导「全部内容」（文件名不带范围后缀）', typeof allSvg === 'string', svgFiles().join(','))
+  check(
+    '同一份内容：全部内容时远处的标记在画面里（证明上一条不是"它本来就在外面"）',
+    inCanvas(markerPixel(allSvg, 'm-far')),
+    JSON.stringify(markerPixel(allSvg, 'm-far')),
+  )
+  const regionSpanInAll = spanY(regionPolygon(allSvg, 'r1'))
+  check(
+    '**而按「全部内容」导出时同一块区域被压成一条细缝**（用户说的"整张图缩小"）',
+    regionSpanInAll > 0 && regionSpanInAll <= 100,
+    `区域在图里高 ${regionSpanInAll.toFixed(0)} / 1000 px`,
+  )
+
+  // ---- 范围＝「当前视口」：画一帧拿到可见世界矩形，再放一个"正好在正中"的标记 ----
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  canvas.markViewportChanged()
+  flushFrames()
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  flushFrames()
+  const visible = layers.listStatus()[0]?.stats?.lastVisibleWorld ?? null
+  check(
+    '画过一帧之后记下了可见世界矩形（「当前视口」这个范围靠它）',
+    visible !== null && visible.maxX > visible.minX && visible.maxY > visible.minY,
+    JSON.stringify(visible),
+  )
+  const visibleCenter = visible ? { x: (visible.minX + visible.maxX) / 2, y: (visible.minY + visible.maxY) / 2 } : { x: 0, y: 0 }
+  doc().markers.push({ id: 'm-center', label: '视口中心', p: [visibleCenter.x, visibleCenter.y], icon: 'city' })
+  doc().markers.push({ id: 'm-corner', label: '视口角落', p: [visible?.minX ?? 0, visible?.minY ?? 0], icon: 'city' })
+
+  clearNotices()
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const viewportOptions = capture.last()
+  check(
+    '视口范围的摘要给出的是一块真实尺寸的范围',
+    viewportOptions?.describe({ kind: 'viewport' }, 'svg')?.ok === true,
+    JSON.stringify(viewportOptions?.describe({ kind: 'viewport' }, 'svg')),
+  )
+  const viewportModal = openRealModal(viewportOptions)
+  const viewportRangeDropdown = dropdownByRole('range')
+  FakeSetting.created.length = 0
+  await viewportRangeDropdown.select('viewport')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check(
+    '视口范围的摘要里带上了尺寸',
+    /当前视口/.test(summaryEl(viewportModal)?.textContent ?? '') && /世界单位/.test(summaryEl(viewportModal)?.textContent ?? ''),
+    String(summaryEl(viewportModal)?.textContent).replace(/\n/g, ' | '),
+  )
+  // 尺寸必须是**那块可见矩形**的尺寸（+留白）：与"全部内容"的尺寸完全不同，
+  // 所以这条也能鉴别"范围被忽略、还是按全部内容算的"
+  const expectedSpan = visible
+    ? { w: Math.round(visible.maxX - visible.minX + 64), h: Math.round(visible.maxY - visible.minY + 64) }
+    : null
+  check(
+    '摘要里的尺寸就是可见世界矩形的尺寸（而不是全部内容的尺寸）',
+    expectedSpan !== null && (summaryEl(viewportModal)?.textContent ?? '').includes(`${expectedSpan.w} × ${expectedSpan.h}`),
+    `${JSON.stringify(expectedSpan)} / ${String(summaryEl(viewportModal)?.textContent).replace(/\n/g, ' | ')}`,
+  )
+  clearNotices()
+  await exportButton().click()
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const viewportSvg = app.vault.files.get('Maps/World-视口.svg')
+  check('视口范围导出到带「-视口」后缀的文件', typeof viewportSvg === 'string', svgFiles().join(','))
+  // "可见区域的正中"必须落在图片正中 —— 这条只有映射真的用了可见矩形才成立
+  // （与画布长宽比无关：内容始终在图片里居中，所以中心点永远映射到 padding + 内区/2）
+  const centerPixel = markerPixel(viewportSvg, 'm-center')
+  check(
+    '可见区域的正中落在图片正中（映射真的用了可见矩形）',
+    centerPixel !== null && Math.abs(centerPixel.x - 800) < 1 && Math.abs(centerPixel.y - 500) < 1,
+    JSON.stringify(centerPixel),
+  )
+  check(
+    '可见矩形的一角也在画面里（视口范围内的东西不会被裁掉）',
+    inCanvas(markerPixel(viewportSvg, 'm-corner')),
+    JSON.stringify(markerPixel(viewportSvg, 'm-corner')),
+  )
+  // 同一张地图、同一个标记，按「全部内容」再导一次：它不该落在正中
+  // （`Maps/World.svg` 已经被前面那次快捷导出占了，所以这里会是 `-2`）
+  await runCommand(plugin, 'export-map-svg')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const allCenterPixel = markerPixel(app.vault.files.get('Maps/World-2.svg'), 'm-center')
+  check(
+    '同一张地图按「全部内容」导出时它不在正中（证明上一条不是恒真的）',
+    allCenterPixel === null || Math.abs(allCenterPixel.x - 800) > 1 || Math.abs(allCenterPixel.y - 500) > 1,
+    JSON.stringify(allCenterPixel),
+  )
+
+  // ---- 范围也要流进 PNG（PNG 就是同一张 SVG 的光栅化） ----
+  const pngMagic = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+  const seenSvgs = []
+  plugin.setPngRasterizer({
+    createImage: () => ({ src: '', complete: false, naturalWidth: 8, onload: null, onerror: null }),
+    waitForImage: async (image) => {
+      seenSvgs.push(image.src)
+      return true
+    },
+    createCanvas: (width, height) => ({ width, height, getContext: () => ({ drawImage() {} }) }),
+    toBlob: async () => ({ arrayBuffer: async () => pngMagic.buffer.slice(0) }),
+  })
+  clearNotices()
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const pngOptions = capture.last()
+  const pngModal = openRealModal(pngOptions)
+  const pngRangeDropdown = dropdownByRole('range')
+  FakeSetting.created.length = 0
+  await pngRangeDropdown.select('region')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  const pngFormatDropdown = dropdownByRole('format')
+  FakeSetting.created.length = 0
+  await pngFormatDropdown.select('png')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check(
+    '切换格式后摘要里的文件名跟着变成 .png',
+    (summaryEl(pngModal)?.textContent ?? '').includes('Maps/World-北境领.png'),
+    String(summaryEl(pngModal)?.textContent).replace(/\n/g, ' | '),
+  )
+  await exportButton().click()
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  check(
+    '区域 + PNG 也按同样的范围命名',
+    app.vault.binaryFiles.has('Maps/World-北境领.png'),
+    [...app.vault.binaryFiles.keys()].join(','),
+  )
+  const decodedPngSvg = seenSvgs.length > 0 ? decodeURIComponent(String(seenSvgs.at(-1)).replace(/^data:[^,]*,/, '')) : ''
+  check(
+    'PNG 复用的是按区域取景的那张 SVG（远处标记在画面外）',
+    decodedPngSvg.includes('map:marker:m-far') && !inCanvas(markerPixel(decodedPngSvg, 'm-far')),
+    JSON.stringify(markerPixel(decodedPngSvg, 'm-far')),
+  )
+
+  // ---- 光栅化失败：对话框留在原地（用户正好可以改用 SVG），而且只给一条提示 ----
+  plugin.setPngRasterizer({
+    createImage: () => ({ src: '', complete: false, naturalWidth: 8, onload: null, onerror: null }),
+    waitForImage: async () => true,
+    createCanvas: (width, height) => ({ width, height, getContext: () => ({ drawImage() {} }) }),
+    toBlob: async () => null,
+  })
+  clearNotices()
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const failModal = openRealModal(capture.last())
+  const failFormatDropdown = dropdownByRole('format')
+  FakeSetting.created.length = 0
+  await failFormatDropdown.select('png')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  await exportButton().click()
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  const failNotices = noticeLog.filter((line) => line.includes('导出 PNG 失败'))
+  check('光栅化不可用时给出可读原因', failNotices.length === 1 && failNotices[0].includes('toBlob'), noticeLog.join(' | '))
+  check('失败只提示一次（不在对话框里重复一遍）', failNotices.length === 1, String(failNotices.length))
+  check('失败时对话框留在原地（可以换个格式再试）', failModal.contentEl.children.length > 0, String(failModal.contentEl.children.length))
+  plugin.setPngRasterizer(null)
+
+  // ---- 守门在导出那一侧：对话框可以被绕过，导出必须自己再判断一次 ----
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const guardOptions = capture.last()
+  const beforeGuard = svgFiles().length
+  clearNotices()
+  await guardOptions.onExport({ kind: 'region', regionId: 'gone' }, 'svg')
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  check(
+    '区域已被删掉时给出可读原因（找不到，而不是堆栈）',
+    noticeLog.some((line) => line.includes('无法导出') && line.includes('找不到') && !/undefined|Error\b/.test(line)),
+    noticeLog.join(' | '),
+  )
+  check('这种失败不产生文件', svgFiles().length === beforeGuard, svgFiles().join(','))
+  const badPreview = guardOptions.describe({ kind: 'region', regionId: 'gone' }, 'svg')
+  check(
+    '对话框侧同样判为不可导出（按钮会变灰）',
+    badPreview?.ok === false && /找不到/.test(badPreview.reason),
+    JSON.stringify(badPreview),
+  )
+
+  // ---- 一张还没画过区域的地图：区域下拉为空、摘要给出原因、导出按钮变灰 ----
+  const regionsBackup = doc().regions.splice(0, doc().regions.length)
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const emptyOptions = capture.last()
+  check('没有区域时对话框照常打开（而不是拒绝打开）', emptyOptions !== undefined && emptyOptions.regions.length === 0, JSON.stringify(emptyOptions?.regions))
+  const emptyModal = openRealModal(emptyOptions)
+  const emptyRangeDropdown = dropdownByRole('range')
+  FakeSetting.created.length = 0
+  await emptyRangeDropdown.select('region')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check(
+    '没有区域时摘要直接显示原因（而不是给一张空图）',
+    /还没有区域/.test(summaryEl(emptyModal)?.textContent ?? ''),
+    String(summaryEl(emptyModal)?.textContent),
+  )
+  check('没有区域时摘要带上了"有问题"的样式', collectByClass(emptyModal.contentEl, 'is-problem').length === 1)
+  check('没有区域时导出按钮变灰（点不动比点了报错好）', exportButton()?.disabled === true, String(exportButton()?.disabled))
+  check('区域下拉此时是空的', (dropdownByRole('region')?.options ?? []).length === 0)
+  // 绕过对话框直接导（按钮虽然灰了，但导出这一侧必须自己再判一次）
+  const beforeEmptyGuard = svgFiles().length
+  clearNotices()
+  await emptyOptions.onExport({ kind: 'region' }, 'svg')
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  check(
+    '没有区域时按区域导出：给出可读原因，且不产出文件',
+    noticeLog.some((line) => line.includes('无法导出') && line.includes('还没有区域')) && svgFiles().length === beforeEmptyGuard,
+    noticeLog.join(' | '),
+  )
+  doc().regions.push(...regionsBackup)
+
+  capture.restore()
   plugin.onunload()
 }
 

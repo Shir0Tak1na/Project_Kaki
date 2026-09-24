@@ -6,6 +6,7 @@
  */
 
 import { hexCorners, parseCellKey } from '../core/hex.ts'
+import type { BBox } from '../core/viewport.ts'
 import type { MapDocument, MapPath, MapRegion } from '../data/mapDocument.ts'
 import { resolveTerrainStyle, type CustomTerrain } from '../render/terrainCatalog.ts'
 import type { MapRow } from './mapRows.ts'
@@ -19,6 +20,14 @@ export interface MapPreviewOptions {
    * Base 缩略图与导出的 SVG 上，不需要重建 Base 或重新导出（导出是命令触发的，本来就现读）。
    */
   customTerrains?: readonly CustomTerrain[]
+  /**
+   * 显式指定世界包围盒（导出范围）。
+   *
+   * 缺省时按"全部内容"自动计算（缩略图与老行为）。给了就用它：
+   * 范围**只改变世界 → 画布的映射**，内容仍然全部绘制，**超出范围的部分由 SVG 的 viewport
+   * 自然裁掉** —— 刻意不写"先裁剪内容"的逻辑，那要复制一套几何判断，而每处判断都是新的出错点。
+   */
+  bounds?: BBox
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -41,7 +50,14 @@ function pointToSvgPoint(x: number, y: number, bounds: { minX: number; minY: num
   return `${px.toFixed(2)},${py.toFixed(2)}`
 }
 
-function makeBounds(rows: readonly MapRow[], document: MapDocument | null): { minX: number; minY: number; maxX: number; maxY: number } {
+/**
+ * 「全部内容」的包围盒：地形格取**六边形顶点**（而不是格心，否则边缘会顶到画布边上），
+ * 标记/文字/路径/区域取它们自己的坐标，笔记行取它们的点。
+ *
+ * 导出范围功能要用它（`all` 范围、以及"没有内容"时的兜底），所以从这里导出而不是各写一份：
+ * 两处各算一次，迟早会出现"缩略图和导出的范围不一样"。
+ */
+export function contentBounds(rows: readonly MapRow[], document: MapDocument | null): BBox {
   const points: Array<[number, number]> = []
 
   if (document) {
@@ -108,7 +124,8 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
   const height = clamp(heightValue, 48, 2000)
   const padding = clamp(paddingValue, 0, 40)
   const customTerrains = options.customTerrains ?? []
-  const bounds = makeBounds(rows, document)
+  // 显式范围优先：导出"某个区域/当前视口"时，那个范围就是这次输出的全部视野
+  const bounds = options.bounds ?? contentBounds(rows, document)
   const content: string[] = []
   content.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Map preview">`)
 
@@ -173,12 +190,16 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
  *
  * `customTerrains` 由调用方从插件设置里现读：导出必须是"当前设置 + 当前地图"的合成结果，
  * 否则刚改完颜色导出出来的还是旧色。
+ *
+ * `bounds` 是**导出范围**（见 `exportBounds.ts`）：不传就导全部内容（老行为）。
+ * 参数保持位置式而不是换成 options 对象，是为了让既有调用点与断言一行都不用改。
  */
 export function buildMapExportSvg(
   document: MapDocument,
   width = 1600,
   height = 1000,
   customTerrains: readonly CustomTerrain[] = [],
+  bounds?: BBox,
 ): string {
-  return buildMapPreviewSvg(document, [], { width, height, padding: 32, customTerrains })
+  return buildMapPreviewSvg(document, [], { width, height, padding: 32, customTerrains, ...(bounds ? { bounds } : {}) })
 }
