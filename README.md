@@ -132,9 +132,14 @@ node scripts/build.mjs      # 产出 main.js
 | **ID** | **就是写进地图文件的标识**。只能小写字母开头、`a-z 0-9 _ -`，2–32 字符；`custom:` 前缀由插件自动补上（你自己带也会被去掉再补，不会出现两个前缀）。大写会被统一成小写 —— 否则 `Swamp` 与 `swamp` 会变成两条看起来一样、数据却互不相认的地形 |
 | **显示名** | 只出现在工具条、图例与设置页。**改它不会影响任何已画好的格子**（文件里存的是 ID） |
 | **颜色** | 该地形的底色 |
-| **字形 / 图片** | 可借用某个内置地形的字形；也可关联一张**库内图片**（相对库根的路径，支持 `png / jpg / jpeg / webp / svg / gif`） |
+| **字形 / 图片** | 可借用某个内置地形的字形；也可关联一张**库内图片**（`png / jpg / jpeg / webp / svg / gif`）。路径可以**手打**，也可以点右边的「从库中选择…」从库里挑 |
 
 几条需要知道的行为：
+
+- **图片只能从库里选**（或手打库内相对路径）：Obsidian 没给插件开系统文件对话框，
+  所以流程是"先把图片放进库 → 再选它"。好处是地图文件里存的是库内相对路径，
+  换机器或同步之后仍然找得到。
+- 选择器只列出**库内**的图片；库里没有图片时会明确提示，而不是弹一个空列表。
 
 - 自定义地形出现在工具条上**内置 9 种之后**；它们**不占用数字键** `1`–`9`（键位已被内置占满，再抢会破坏肌肉记忆），用鼠标点选即可，悬停提示里有完整 ID。
 - **图片只在画布上生效**：Base 缩略图与 SVG 导出里的自定义地形使用回退色（导出文件要能脱离你的库打开，内联图片属于后续工作）。
@@ -295,8 +300,8 @@ canvases:
 ```bash
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
-node --test --test-isolation=none                 # 278 个单元测试
-node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，28 个场景 / 587 条断言
+node --test --test-isolation=none                 # 273 个单元测试
+node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，29 个场景 / 608 条断言
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```
 
