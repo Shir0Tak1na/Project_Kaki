@@ -237,23 +237,28 @@
   border: 1px solid rgba(0, 0, 0, 0.35);
 }
 
-/* ---------------------------------------------------------------- 路径类型下拉
-   路径类型可能有很多（内置 4 种 + 最多 32 个自定义），一排按钮会把工具条挤爆，
-   所以收进一个下拉。菜单是**绝对定位**的浮层：它不能把下面的控件顶走。 */
-.fc-toolbar-path-group {
+/* ------------------------------------------------- 路径 / 区域类型下拉
+   类型可能有很多（内置 4+6 种，各自最多 32 个自定义），一排按钮会把工具条挤爆，
+   所以两者都收进下拉，并**共用同一套样式**（同一个 `ToolbarDropdown` 实现）。
+   菜单是**绝对定位**的浮层：它不能把下面的控件顶走。 */
+.fc-toolbar-path-group,
+.fc-toolbar-region-group {
   position: relative;
 }
 
-.fc-toolbar-path-trigger {
+.fc-toolbar-path-trigger,
+.fc-toolbar-region-trigger {
   gap: 6px;
 }
 
-.fc-toolbar-path-caret {
+.fc-toolbar-path-caret,
+.fc-toolbar-region-caret {
   color: var(--text-faint);
   font-size: 10px;
 }
 
-.fc-toolbar-path-menu {
+.fc-toolbar-path-menu,
+.fc-toolbar-region-menu {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
@@ -262,7 +267,7 @@
   flex-direction: column;
   gap: 2px;
   min-width: 120px;
-  /* 类型多的时候要能滚：32 项 + 内置 4 项远超一屏 */
+  /* 类型多的时候要能滚：32 项 + 内置项远超一屏 */
   max-height: 46vh;
   overflow-y: auto;
   padding: 4px;
@@ -272,20 +277,23 @@
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
 }
 
-.fc-toolbar-path-option {
+.fc-toolbar-path-option,
+.fc-toolbar-region-option {
   justify-content: flex-start;
   width: 100%;
   border-color: transparent;
   background: transparent;
 }
 
-.fc-toolbar-path-option.is-active {
+.fc-toolbar-path-option.is-active,
+.fc-toolbar-region-option.is-active {
   border-color: var(--interactive-accent);
   background: var(--interactive-accent);
   color: var(--text-on-accent);
 }
 
-.fc-toolbar-path-option:hover {
+.fc-toolbar-path-option:hover,
+.fc-toolbar-region-option:hover {
   background: var(--background-modifier-hover);
 }
 

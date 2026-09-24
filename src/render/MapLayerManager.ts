@@ -25,8 +25,14 @@ import {
 } from './layerVisibility.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
 import type { CustomMarker } from './markerCatalog.ts'
-import { canonicalColor, defaultStylePalette, resolveRegionPresets, type StylePalette } from './stylePalette.ts'
+import { defaultStylePalette, type StylePalette } from './stylePalette.ts'
 import { defaultPathTypeEntries, resolvePathType, type PathTypeEntry } from './pathTypeCatalog.ts'
+import {
+  defaultRegionTypeEntries,
+  regionLabelForColor,
+  regionTypeLabelOf,
+  type RegionTypeEntry,
+} from './regionTypeCatalog.ts'
 import { resolveTerrainStyle, type CustomTerrain } from './terrainCatalog.ts'
 import { MapLegend } from '../ui/MapLegend.ts'
 import { resolveVaultResourceUrl } from '../base/vaultResource.ts'
@@ -69,6 +75,13 @@ export interface MapLayerManagerDeps {
    * 与 `getStylePalette` 同理传函数：用户改完线宽/颜色/端点后，画布与工具条要立刻跟上。
    */
   getPathTypes?: () => readonly PathTypeEntry[]
+  /**
+   * 区域类型目录（内置 6 种 + 用户自定义，含填充/不透明度/边框参数），来自插件设置。
+   *
+   * 与 `getPathTypes` 逐字同理：区域样式的唯一来源，用户改完设置后画布、工具条、
+   * 图例要立刻跟上。
+   */
+  getRegionTypes?: () => readonly RegionTypeEntry[]
   /**
    * 用户自定义地形（来自插件设置）。
    *
@@ -391,10 +404,11 @@ export class MapLayerManager {
       getDocument: () => this.entries.get(canvasPath)?.document ?? null,
       onChanged: () => overlay.requestRedraw(),
       onSaveRequested: () => this.scheduleSave(canvasPath),
-      // 新画的路径取当前路径类型目录里的画法参数；新画的区域取调色板里的颜色。
+      // 新画的路径取当前路径类型目录里的画法参数、新画的区域取当前区域类型目录里的参数。
       // 两个都必须是"现读"：已画好的对象用文件里存的值，不受设置影响。
       getPalette: () => this.deps.getStylePalette?.() ?? defaultStylePalette(),
       getPathTypes: () => this.deps.getPathTypes?.() ?? defaultPathTypeEntries(),
+      getRegionTypes: () => this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries(),
       onStateChanged: () => {
         // 单一收口点：任何模式/工具变化都会经过这里，
         // 因此标记层的交互开关放在这里最稳（不依赖调用方是否走了交互层）
@@ -471,6 +485,7 @@ export class MapLayerManager {
             return { regionColors: palette.regionColors }
           },
           getPathTypes: () => this.deps.getPathTypes?.() ?? defaultPathTypeEntries(),
+          getRegionTypes: () => this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries(),
           getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
           getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
           resolveImageSrc: (path) => this.resourceUrlFor(path),
@@ -712,10 +727,9 @@ export class MapLayerManager {
    * 于是"图例与画布配色不一致"这种老问题不会因为新功能复活。
    */
   private legendDeps(): LegendDeps {
-    const palette = this.deps.getStylePalette?.() ?? defaultStylePalette()
     const custom = this.deps.getCustomTerrains?.() ?? []
     const pathTypes = this.deps.getPathTypes?.() ?? defaultPathTypeEntries()
-    const presets = resolveRegionPresets(palette.regionColors)
+    const regionTypes = this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries()
     return {
       resolveTerrain: (id) => {
         const style = resolveTerrainStyle(id, custom)
@@ -730,11 +744,11 @@ export class MapLayerManager {
           ...(resolved.params.dash.length > 0 ? { dash: [...resolved.params.dash] } : {}),
         }
       },
-      // 区域没有"类型"，颜色就是它的身份：能对上预设就报预设名，否则给一个通用名
-      resolveRegion: (color) => {
-        const preset = presets.find((item) => canonicalColor(item.color) === canonicalColor(color))
-        return { label: preset ? preset.label : '区域' }
-      },
+      // 区域：有类型就报类型名（自定义类型也是自己的名字），没有类型（升级前画的）
+      // 就按颜色反查 —— 与升级前的 `resolveRegionPresets` 同语义，老地图图例一字不变
+      resolveRegion: (color, type) => ({
+        label: type.length > 0 ? regionTypeLabelOf(type, regionTypes) : regionLabelForColor(color, regionTypes),
+      }),
     }
   }
 

@@ -360,9 +360,17 @@ export function drawRegion(
     ctx.strokeStyle = region.borderColor ?? region.color
     ctx.lineWidth = Math.max(1, borderWidth * layer.deviceScale)
     ctx.lineJoin = 'round'
+    // 边框虚线：**这条区域自己存的**值（画的时候从设置抄进文件）；
+    // 缺字段的旧区域取 `[]` = 实线，也就是升级前唯一的行为，于是老地图观感不变。
+    if (region.borderDash && region.borderDash.length > 0) {
+      ctx.setLineDash(region.borderDash.map((value) => value * layer.deviceScale))
+    } else {
+      ctx.setLineDash([])
+    }
     traceCommands(ctx, commands)
     ctx.closePath()
     ctx.stroke()
+    ctx.setLineDash([])
   }
 
   if (showLabel && region.label.length > 0) {

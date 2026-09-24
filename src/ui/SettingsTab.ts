@@ -17,7 +17,16 @@
 import { PluginSettingTab, Setting, type App } from 'obsidian'
 import type ProjectKakiPlugin from '../main.ts'
 import { MARKER_ICONS } from '../data/mapDocument.ts'
-import { REGION_PRESETS } from '../render/shapeStyle.ts'
+import {
+  CUSTOM_REGION_TYPE_PREFIX,
+  DEFAULT_CUSTOM_REGION_COLOR,
+  MAX_CUSTOM_REGION_TYPES,
+  customRegionTypeEntries,
+  describeRegionTypeParams,
+  isDefaultRegionTypeStyles,
+  regionTypeIdProblem,
+  resolveRegionType,
+} from '../render/regionTypeCatalog.ts'
 import {
   CUSTOM_PATH_TYPE_PREFIX,
   DEFAULT_CUSTOM_PATH_COLOR,
@@ -53,7 +62,6 @@ import {
 } from '../render/terrainCatalog.ts'
 import { listTerrainStyles } from '../render/terrainStyle.ts'
 import { LAYER_KEYS, LAYER_LABELS, isLayerVisible, type LayerKey } from '../render/layerVisibility.ts'
-import { isDefaultRegionColors } from '../render/stylePalette.ts'
 
 /**
  * 自定义地形的两种模式（设置页的分段控件用）。
@@ -108,7 +116,8 @@ export class CartographerSettingTab extends PluginSettingTab {
   private markerNoteEl: HTMLElement | null = null
   /** 路径类型区底部那一行就地提示（同样分开：三节同屏，提示必须出现在出问题的那一节下面） */
   private pathTypeNoteEl: HTMLElement | null = null
-
+  /** 区域类型区底部那一行就地提示（同上：四节同屏，提示必须出现在出问题的那一节下面） */
+  private regionTypeNoteEl: HTMLElement | null = null
   constructor(app: App, plugin: ProjectKakiPlugin) {
     super(app, plugin)
     this.plugin = plugin
@@ -222,16 +231,7 @@ export class CartographerSettingTab extends PluginSettingTab {
 
     this.renderPathTypes(containerEl, settings)
 
-    REGION_PRESETS.forEach((preset, index) => {
-      new Setting(containerEl)
-        .setName(`区域颜色 · ${preset.label}`)
-        .setDesc('区域预设色块（工具条上那一排色块，按顺序对应）')
-        .addColorPicker((picker) =>
-          picker.setValue(settings.regionColors[index] ?? preset.color).onChange((value) => {
-            void this.plugin.setRegionColor(index, value)
-          }),
-        )
-    })
+    this.renderRegionTypes(containerEl, settings)
 
     new Setting(containerEl)
       .setName('名称字体族')
@@ -251,13 +251,14 @@ export class CartographerSettingTab extends PluginSettingTab {
 
     const dirty =
       !isDefaultPathTypeStyles(settings.pathTypes) ||
-      !isDefaultRegionColors(settings.regionColors) ||
+      !isDefaultRegionTypeStyles(settings.regionTypes) ||
       settings.labelFontFamily.length > 0
     new Setting(containerEl)
       .setName('恢复出厂样式')
       .setDesc(
         dirty
-          ? '当前样式已被改动。点这里把内置 4 种路径类型的参数、区域颜色与字体恢复为出厂默认（自定义路径类型定义不会被删）。'
+          ? '当前样式已被改动。点这里把内置 4 种路径类型与 6 种区域类型的参数、字体恢复为出厂默认' +
+            '（自定义路径类型 / 区域类型的定义不会被删）。'
           : '当前就是出厂默认样式。',
       )
       .addButton((button) =>
@@ -976,6 +977,215 @@ export class CartographerSettingTab extends PluginSettingTab {
   /** 路径类型区底部那一行提示（与地形/标记两节分开，理由见 `setMarkerNoteText`） */
   private setPathTypeNoteText(text: string): void {
     if (this.pathTypeNoteEl) this.pathTypeNoteEl.textContent = text
+  }
+
+  /**
+   * 区域类型（内置 6 种 + 自定义）+ 自定义类型的新建/删除。
+   *
+   * 与 `renderPathTypes` 完全同构（同样的两行布局与就地提示）：
+   * 一屏要放下最多 38 种类型，每个字段一行会让用户永远滚不到底。
+   * 区别只在参数不同 —— 区域是"填充色 / 不透明度 / 边框色"与"边框宽 / 边框虚线"。
+   */
+  private renderRegionTypes(containerEl: HTMLElement, settings: CartographerSettings): void {
+    const regionTypes = settings.regionTypes
+    const custom = customRegionTypeEntries(regionTypes)
+
+    containerEl.createEl('h3', { text: '区域类型' })
+    containerEl.createEl('div', {
+      cls: 'fc-settings-note',
+      text:
+        '每种区域类型的填充色、不透明度、边框色、边框宽与边框虚线都在这里改。' +
+        '内置 6 种的名字固定（王国/帝国/公国/教区/荒原/海域），自定义类型的名字随时可改。' +
+        '边框色留空 = 跟随填充色；边框宽填 0 = 不画边框；边框虚线留空 = 实线。',
+    })
+
+    for (const entry of regionTypes) {
+      const resolved = resolveRegionType(entry.id, regionTypes)
+      const isCustom = !resolved.builtin
+      const dashText = entry.params.borderDash.join(',')
+
+      new Setting(containerEl)
+        .setName(`${entry.label}${isCustom ? '（自定义）' : ''}`)
+        .setDesc(`ID ${entry.id} · ${describeRegionTypeParams(entry.params)}`)
+        .addColorPicker((picker) =>
+          picker.setValue(entry.params.color).onChange((value) => {
+            void this.plugin.updateRegionType(entry.id, { color: value }).then((result) => {
+              if (!result.ok) this.setRegionTypeNoteText(result.problem)
+            })
+          }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('不透明度 0–1，例如 0.22')
+            .setValue(String(entry.params.opacity))
+            .onChange((value) => {
+              void this.plugin.updateRegionType(entry.id, { opacity: value }).then((result) => {
+                this.setRegionTypeNoteText(result.ok ? '' : `「${entry.label}」的不透明度：${result.problem}`)
+              })
+            }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('边框色（留空 = 跟随填充色）')
+            .setValue(entry.params.borderColor ?? '')
+            .onChange((value) => {
+              void this.plugin.updateRegionType(entry.id, { borderColor: value })
+            }),
+        )
+
+      new Setting(containerEl)
+        .setName(`边框 · ${entry.label}`)
+        .setDesc('边框宽是世界单位（0–40，0 = 不画边框）；虚线留空 = 实线')
+        .addText((text) =>
+          text
+            .setPlaceholder('边框宽，例如 3')
+            .setValue(String(entry.params.borderWidth))
+            .onChange((value) => {
+              void this.plugin.updateRegionType(entry.id, { borderWidth: value })
+            }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('虚线，例如 12,8；留空 = 实线')
+            .setValue(dashText)
+            .onChange((value) => {
+              const parsed = parsePathDashInput(value)
+              if (!parsed.ok) {
+                this.setRegionTypeNoteText(`「${entry.label}」的边框虚线：${parsed.problem}`)
+                return
+              }
+              void this.plugin
+                .updateRegionType(entry.id, { borderDash: parsed.dash })
+                .then((result) => {
+                  this.setRegionTypeNoteText(
+                    result.ok ? '' : `「${entry.label}」的边框虚线：${result.problem}`,
+                  )
+                })
+            }),
+        )
+        // 删除只给自定义类型：内置 6 种删掉会让旧地图的区域全部变成"未知类型"
+        .addButton((button) => {
+          if (!isCustom) return
+          button.setButtonText('删除').setWarning().setTooltip(`删除自定义区域类型 ${entry.id}`).onClick(() => {
+            void this.plugin.removeCustomRegionType(entry.id).then(() => this.display())
+          })
+        })
+    }
+
+    // ---- 新建（与自定义地形/标记/路径类型同构）----
+    const atLimit = custom.length >= MAX_CUSTOM_REGION_TYPES
+    const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
+    note.dataset.fcNote = 'regionType'
+    this.regionTypeNoteEl = note
+    const pending: {
+      id: string
+      label: string
+      color: string
+      opacity: string
+      borderWidth: string
+      borderDash: string
+    } = {
+      id: '',
+      label: '',
+      color: DEFAULT_CUSTOM_REGION_COLOR,
+      opacity: String(resolveRegionType('realm', regionTypes).params.opacity),
+      borderWidth: String(resolveRegionType('realm', regionTypes).params.borderWidth),
+      borderDash: '',
+    }
+
+    new Setting(containerEl)
+      .setName('新增自定义区域类型')
+      .setDesc(
+        atLimit
+          ? `已达上限（${MAX_CUSTOM_REGION_TYPES} 个）`
+          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+              `前缀 ${CUSTOM_REGION_TYPE_PREFIX} 会自动补上，避免与内置 6 种重名。` +
+              '建好之后同样可以改颜色、不透明度与边框。',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('ID（例如 march）')
+          .setValue('')
+          .onChange((value) => {
+            pending.id = value
+            // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
+            this.setRegionTypeNoteText(value.trim().length === 0 ? '' : (regionTypeIdProblem(value) ?? ''))
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('显示名（留空 = 用 ID）')
+          .setValue('')
+          .onChange((value) => {
+            pending.label = value
+          }),
+      )
+      .addColorPicker((picker) =>
+        picker.setValue(pending.color).onChange((value) => {
+          pending.color = value
+        }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('不透明度（默认 0.22）')
+          .setValue('')
+          .onChange((value) => {
+            pending.opacity = value
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('边框宽（默认 3）')
+          .setValue('')
+          .onChange((value) => {
+            pending.borderWidth = value
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('边框虚线（留空 = 实线）')
+          .setValue('')
+          .onChange((value) => {
+            pending.borderDash = value
+          }),
+      )
+      .addButton((button) =>
+        button.setButtonText('新增').onClick(() => {
+          const problem = regionTypeIdProblem(pending.id)
+          if (problem !== null) {
+            this.setRegionTypeNoteText(problem)
+            return
+          }
+          const dash = parsePathDashInput(pending.borderDash)
+          if (!dash.ok) {
+            this.setRegionTypeNoteText(`边框虚线：${dash.problem}`)
+            return
+          }
+          void this.plugin
+            .addCustomRegionType({
+              id: pending.id,
+              label: pending.label,
+              color: pending.color,
+              // 留空 = 用工厂默认值（`validateCustomRegionTypeInput` 收到 undefined 就走默认）
+              opacity: pending.opacity.trim().length > 0 ? pending.opacity : undefined,
+              borderWidth: pending.borderWidth.trim().length > 0 ? pending.borderWidth : undefined,
+              borderDash: dash.dash,
+            })
+            .then((result) => {
+              if (!result.ok) {
+                this.setRegionTypeNoteText(result.problem)
+                return
+              }
+              this.setRegionTypeNoteText('')
+              this.display()
+            })
+        }),
+      )
+  }
+
+  /** 区域类型区底部那一行提示（与路径类型区分开，理由同 `setMarkerNoteText`） */
+  private setRegionTypeNoteText(text: string): void {
+    if (this.regionTypeNoteEl) this.regionTypeNoteEl.textContent = text
   }
 
   /**

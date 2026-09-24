@@ -31,8 +31,14 @@ export interface LegendDeps {
   resolveTerrain: (type: string) => { label: string; color: string }
   /** 路径类型 → 样式（内置、自定义、未知都由 `pathTypeCatalog` 决定） */
   resolvePath: (type: string) => { label: string; color: string; dash?: number[] }
-  /** 区域颜色 → 样式（能对上预设就给预设名，否则给一个通用名） */
-  resolveRegion: (color: string) => { label: string }
+  /**
+   * 区域 → 显示名。
+   *
+   * 参数是**两个**而不是一个：`type` 是新数据（可能有），`color` 是旧数据的身份
+   * （升级前的区域没有类型字段）。解析器自己决定先看哪个 ——
+   * 图例这里只负责把两者都递过去，不替它猜。
+   */
+  resolveRegion: (color: string, type: string) => { label: string }
 }
 
 /**
@@ -81,15 +87,30 @@ export function buildLegendEntries(
     }
   }
 
-  // ---- 区域：按实际用到的颜色归并（区域没有"类型"，颜色就是它的身份） ----
+  // ---- 区域：有类型就按类型归并，没有类型（升级前画的）就按颜色归并 ----
+  //
+  // 为什么保留"按颜色"这条路：老地图的区域里没有 `type` 字段，颜色就是它的身份，
+  // 而升级前正是这么归并的 —— 于是同一张老地图的图例**一字不变**。
+  // 归并键带上颜色（而不是只用类型）：两个类型被设成同一个颜色时，
+  // 只用类型做键会把两条不同颜色的事实压成一行，图例会开始说谎。
   if (visibility === undefined || isLayerVisible(visibility, 'regions')) {
-    const counts = new Map<string, number>()
+    const counts = new Map<string, { color: string; type: string; count: number }>()
     for (const region of document.regions) {
       const color = typeof region.color === 'string' && region.color.length > 0 ? region.color : '#7ab77b'
-      counts.set(color, (counts.get(color) ?? 0) + 1)
+      const type = typeof region.type === 'string' ? region.type : ''
+      const key = `${type}::${color}`
+      const found = counts.get(key)
+      if (found) found.count += 1
+      else counts.set(key, { color, type, count: 1 })
     }
-    for (const color of [...counts.keys()].sort()) {
-      entries.push({ kind: 'region', label: deps.resolveRegion(color).label, color, count: counts.get(color) ?? 0 })
+    for (const key of [...counts.keys()].sort()) {
+      const item = counts.get(key)!
+      entries.push({
+        kind: 'region',
+        label: deps.resolveRegion(item.color, item.type).label,
+        color: item.color,
+        count: item.count,
+      })
     }
   }
 

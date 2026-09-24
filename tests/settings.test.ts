@@ -196,3 +196,66 @@ test('调色板：设置 → 绘制层的投影只含绘制需要的东西', () 
   assert.equal(palette.regionColors.length, REGION_PRESETS.length)
   assert.deepEqual(Object.keys(palette).sort(), ['fontFamily', 'pathColors', 'regionColors'])
 })
+
+/* ------------------------------------------------- 区域类型迁移（⑤-2）
+
+   与路径那一套逐条对应：旧字段只在加载时读一次，之后目录是唯一来源；
+   迁移必须幂等，且"用户没改过"时结果逐字段等于出厂（= 升级前后视觉一致）。 */
+
+test('没有旧字段时，区域类型目录就是出厂目录（用户没改过 = 视觉不变）', () => {
+  const settings = normalizeSettings({})
+  assert.deepEqual(
+    settings.regionTypes,
+    normalizeSettings({ regionTypes: undefined }).regionTypes,
+  )
+  assert.equal(settings.regionTypes.length, REGION_PRESETS.length)
+  assert.deepEqual(
+    settings.regionTypes.map((entry) => entry.params.color),
+    REGION_PRESETS.map((preset) => preset.color),
+  )
+  assert.deepEqual(settings.regionColors, REGION_PRESETS.map((preset) => preset.color))
+})
+
+test('旧字段 regionColors 按下标迁进区域类型目录（颜色真的过去了）', () => {
+  const settings = normalizeSettings({ regionColors: ['#111111', '#222222', '#333333'] })
+  assert.equal(settings.regionTypes[0]!.params.color, '#111111')
+  assert.equal(settings.regionTypes[1]!.params.color, '#222222')
+  assert.equal(settings.regionTypes[2]!.params.color, '#333333')
+  // 没写的下标仍然出厂
+  assert.equal(settings.regionTypes[5]!.params.color, REGION_PRESETS[5]!.color)
+  // 旧字段与目录保持一致（它是镜像，不是第二个来源）
+  assert.deepEqual(settings.regionColors, ['#111111', '#222222', '#333333', ...REGION_PRESETS.slice(3).map((p) => p.color)])
+})
+
+test('区域类型迁移是幂等的：把收敛结果再收敛一次完全相同', () => {
+  const once = normalizeSettings({ regionColors: ['#111111', '#222222'], regionTypes: [{ id: 'custom:march', label: '边境' }] })
+  const twice = normalizeSettings(JSON.parse(JSON.stringify(once)))
+  assert.deepEqual(twice.regionTypes, once.regionTypes)
+  assert.deepEqual(twice.regionColors, once.regionColors)
+})
+
+test('目录里的参数优先于旧字段（显式写过的以它为准）', () => {
+  const settings = normalizeSettings({
+    regionColors: ['#111111'],
+    regionTypes: [{ id: 'realm', params: { color: '#abcdef', opacity: 0.5, borderWidth: 0 } }],
+  })
+  assert.equal(settings.regionTypes[0]!.params.color, '#abcdef')
+  assert.equal(settings.regionTypes[0]!.params.opacity, 0.5)
+  assert.equal(settings.regionTypes[0]!.params.borderWidth, 0)
+  // 镜像跟着目录走
+  assert.equal(settings.regionColors[0], '#abcdef')
+})
+
+test('区域类型的坏输入被逐条独立处理（坏的那条回退，其余照常可用）', () => {
+  const settings = normalizeSettings({
+    regionTypes: [
+      { id: 'realm', params: { color: 'not-a-color' } },
+      { id: 'custom:march', label: '边境', params: { color: '#123456' } },
+      { id: 'bad id', label: '无效' },
+    ],
+  })
+  assert.equal(settings.regionTypes[0]!.params.color, REGION_PRESETS[0]!.color)
+  const custom = settings.regionTypes.filter((entry) => entry.id.startsWith('custom:'))
+  assert.equal(custom.length, 1)
+  assert.equal(custom[0]!.params.color, '#123456')
+})

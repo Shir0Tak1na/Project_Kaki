@@ -18,10 +18,12 @@ import type { CustomMarker } from '../render/markerCatalog.ts'
 import { normalizeCustomMarkers } from '../render/markerCatalog.ts'
 import type { PathTypeEntry } from '../render/pathTypeCatalog.ts'
 import { normalizePathTypeEntries, pathColorsFromEntries } from '../render/pathTypeCatalog.ts'
+import type { RegionTypeEntry } from '../render/regionTypeCatalog.ts'
+import { normalizeRegionTypeEntries, regionColorsFromEntries } from '../render/regionTypeCatalog.ts'
 import type { LayerVisibility } from '../render/layerVisibility.ts'
 import { DEFAULT_LAYER_VISIBILITY, layerVisibilityFromLegacy } from '../render/layerVisibility.ts'
 import type { PathColorMap, StylePalette } from '../render/stylePalette.ts'
-import { defaultRegionColors, normalizeFontFamily, normalizeRegionColors } from '../render/stylePalette.ts'
+import { normalizeFontFamily } from '../render/stylePalette.ts'
 
 export interface CartographerSettings {
   /** 名称字号倍率（1 = 默认）。范围 0.5–3.0，步长 0.1。 */
@@ -46,7 +48,23 @@ export interface CartographerSettings {
    * 2. 写回时让旧字段与目录保持一致，用户回退到旧版插件仍能看到自己改过的颜色。
    */
   pathColors: PathColorMap
-  /** 区域预设色（新画的区域用它） */
+  /**
+   * **每种区域类型的参数**（内置 6 种 + 用户自定义）—— 区域样式的唯一来源。
+   *
+   * 填充色、不透明度、边框色、边框宽、边框虚线都住在这里的 `params` 里。
+   * 内置 6 种永远存在且顺序固定；自定义项由用户在设置页增删。
+   *
+   * ⚠️ 与 `MapRegion.type` 一样是**可选语义**：升级前画的区域没有类型字段，
+   * 由颜色反查显示名（见 `regionTypeCatalog.regionLabelForColor`）。
+   */
+  regionTypes: RegionTypeEntry[]
+  /**
+   * 区域预设色 —— **旧字段**，只读兼容（与 `pathColors` 同一个处境）。
+   *
+   * 它已经不再是渲染依据（渲染一律走 `regionTypes`）。保留是为了：
+   * 1. 迁移上一代 `data.json`（那里只有这一个字段）；
+   * 2. 写回时让旧字段与目录保持一致，用户回退到旧版插件仍能看到自己改过的颜色。
+   */
   regionColors: string[]
   /** 名称字体族；`''` = 跟随主题 */
   labelFontFamily: string
@@ -81,12 +99,16 @@ export interface CartographerSettings {
 /** 出厂路径类型目录（内置 4 种、参数即出厂值） */
 const DEFAULT_PATH_TYPES: PathTypeEntry[] = normalizePathTypeEntries(undefined)
 
+/** 出厂区域类型目录（内置 6 种、参数即出厂值） */
+const DEFAULT_REGION_TYPES: RegionTypeEntry[] = normalizeRegionTypeEntries(undefined)
+
 export const DEFAULT_SETTINGS: CartographerSettings = {
   labelScale: 1,
   developerMode: false,
   pathTypes: DEFAULT_PATH_TYPES,
   pathColors: pathColorsFromEntries(DEFAULT_PATH_TYPES),
-  regionColors: defaultRegionColors(),
+  regionTypes: DEFAULT_REGION_TYPES,
+  regionColors: regionColorsFromEntries(DEFAULT_REGION_TYPES),
   labelFontFamily: '',
   customTerrains: [],
   customMarkers: [],
@@ -134,13 +156,18 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     pathColors: asRecord(source.pathColors),
     pathStyleOverrides: asRecord(source.pathStyleOverrides),
   })
+  const regionTypes = normalizeRegionTypeEntries(source.regionTypes, {
+    // 旧字段只作为迁移输入读一次：`regionColors` 的下标与内置 6 种一一对应
+    regionColors: source.regionColors,
+  })
   return {
     labelScale: normalizeLabelScale(source.labelScale),
     developerMode: source.developerMode === true,
     pathTypes,
     // 旧字段与目录保持一致（不是第二个来源：渲染从不读它，见 CartographerSettings.pathColors）
     pathColors: pathColorsFromEntries(pathTypes),
-    regionColors: normalizeRegionColors(source.regionColors),
+    regionTypes,
+    regionColors: regionColorsFromEntries(regionTypes),
     labelFontFamily: normalizeFontFamily(source.labelFontFamily),
     // 自定义地形逐条独立校验：data.json 被手工改坏时只丢坏的那一条，其余照常可用
     customTerrains: normalizeCustomTerrains(source.customTerrains),

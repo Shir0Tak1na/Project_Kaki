@@ -19,11 +19,13 @@
 /**
  * 路径与区域的默认颜色。
  *
- * ⚠️ 路径部分（`pathColors` / `resolvePathStyle`）自 ⑤-1 起是**旧字段兼容层**：
+ * ⚠️ 自 ⑤-1 / ⑤-2 起，**路径与区域两部分都是旧字段兼容层**：
  * 每种路径类型的参数（颜色 + 线宽 + 虚线 + 端点 + 连接）唯一来源是
- * `pathTypeCatalog.ts` 的目录，渲染与设置界面都读那里。这里保留它们只为两件事：
- * 迁移旧 `data.json`（见 `pathTypeCatalog.normalizePathTypeEntries`）以及区域预设色
- * （区域这一轮不动）。**不要在渲染路径上新增对本模块的调用。**
+ * `pathTypeCatalog.ts`，每种区域类型的参数（填充色 + 不透明度 + 边框色 + 边框宽 + 边框虚线）
+ * 唯一来源是 `regionTypeCatalog.ts`，渲染与设置界面都读那里。
+ * 这里保留它们只为两件事：迁移旧 `data.json`（见两个目录的 `normalize*Entries`），
+ * 以及让"用户回退到旧版插件"时仍能看到自己改过的颜色。
+ * **不要在渲染路径上新增对本模块的调用。**
  */
 
 import type { BuiltinPathType } from '../data/mapDocument.ts'

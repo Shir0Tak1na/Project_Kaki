@@ -97,6 +97,29 @@ export const PATH_TYPES: readonly BuiltinPathType[] = ['river', 'road', 'trade-r
 export type PathType = string
 
 /**
+ * 区域类型标识。与 `PathType` 同口径：刻意**不是**内置 id 的字面量联合，
+ * 因为文件里可能出现本机没有定义的 ID（别的库、别的版本、用户删掉了自定义定义）。
+ */
+export type RegionType = string
+
+/**
+ * 内置区域类型（6 种），顺序 = 工具条下拉与图例的顺序。
+ *
+ * 与 `PATH_TYPES` 一样放在数据层：解析层要据此判断"这个 ID 认不认识"，
+ * 而显示名与颜色在 `shapeStyle.REGION_TYPE_STYLES`（与 `PATH_STYLES` 的分工一致）。
+ */
+export const BUILTIN_REGION_TYPES = [
+  'realm',
+  'empire',
+  'duchy',
+  'diocese',
+  'wilderness',
+  'sea',
+] as const
+
+export type BuiltinRegionType = (typeof BUILTIN_REGION_TYPES)[number]
+
+/**
  * 路径端点样式（存进文件的画法参数之一）。
  *
  * 为什么这组词表定义在**数据层**：它要被写进 `.map.md`（`paths[].cap`），
@@ -179,9 +202,22 @@ export interface MapRegion {
   opacity: number
   borderColor?: string
   borderWidth?: number
+  /** 边界虚线（世界单位，成对）；缺省 = 实线。语义与 `MapPath.dash` 一致 */
+  borderDash?: number[]
   link?: string
   /** 见 `MapPath.mode` */
   mode?: GeometryMode
+  /**
+   * 区域类型 ID（内置 `realm`… 或自定义 `custom:xxx`）。
+   *
+   * ⚠️ **可选**字段，而且刻意如此：升级前画的区域没有它，读取时保持"没有"，
+   * 写回时也不补 —— 于是老地图的文件**逐字节不变**，图例也仍按颜色反查预设名
+   * （见 `legend.buildLegendEntries` 与 `regionTypeCatalog.regionLabelForColor`）。
+   *
+   * 与 `MapPath.type` 同口径：不认识的 ID **原样保留 + 告警**，绝不改写成某个内置类型，
+   * 也绝不丢掉整个区域（那等于用户一保存就永久丢数据）。
+   */
+  type?: RegionType
 }
 
 export interface MapLabel {
@@ -564,6 +600,35 @@ function parsePath(raw: Record<string, unknown>, path: string, issues: MapDocume
   return path2
 }
 
+/**
+ * 读取区域类型。
+ *
+ * 三条刻意的选择（与 `readPathType` 完全同口径）：
+ * 1. 认不出的 ID **原样保留** —— 它在文件里是用户的数据，改写它等于篡改；
+ * 2. **绝不因为类型有问题而丢掉整个区域**（旧版本对路径就是这么丢的，是数据保全事故）；
+ * 3. 只有"完全不可能当 ID"的值（非字符串 / 空串 / 含空白或控制字符）才当作"没有类型"，
+ *    并给出可读原因 —— 这时区域仍然保留，只是回到升级前那种"按颜色认身份"的状态。
+ */
+function readRegionType(value: unknown, path: string, issues: MapDocumentIssue[]): RegionType | undefined {
+  if (value === undefined || value === null) return undefined
+  if (isStorablePathTypeId(value)) {
+    if (!(BUILTIN_REGION_TYPES as readonly string[]).includes(value) && !value.startsWith('custom:')) {
+      issues.push({
+        level: 'warning',
+        path: `${path}.type`,
+        message: `未知区域类型 ${JSON.stringify(value)}，已保留（按回退样式绘制；内置类型：${BUILTIN_REGION_TYPES.join('/')}）`,
+      })
+    }
+    return value
+  }
+  issues.push({
+    level: 'warning',
+    path: `${path}.type`,
+    message: `区域类型 ${JSON.stringify(value)} 不是合法字符串，已忽略该字段（区域本身仍保留）`,
+  })
+  return undefined
+}
+
 function parseRegion(raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]): MapRegion | null {
   const id = isNonEmptyString(raw.id) ? raw.id : null
   const pts = readPointList(raw.pts)
@@ -580,8 +645,15 @@ function parseRegion(raw: Record<string, unknown>, path: string, issues: MapDocu
   }
   if (isNonEmptyString(raw.borderColor)) region.borderColor = raw.borderColor
   if (isFiniteNumber(raw.borderWidth)) region.borderWidth = raw.borderWidth
+  if (Array.isArray(raw.borderDash) && raw.borderDash.every(isFiniteNumber)) {
+    region.borderDash = raw.borderDash as number[]
+  }
   if (isNonEmptyString(raw.link)) region.link = raw.link
   region.mode = readGeometryMode(raw.mode)
+  // `type` 放在最后写入：字段顺序决定序列化后的字节顺序，而"没有 type"的旧区域
+  // 必须一个字节都不变（见 MapRegion.type 的注释）。
+  const type = readRegionType(raw.type, path, issues)
+  if (type !== undefined) region.type = type
   return region
 }
 

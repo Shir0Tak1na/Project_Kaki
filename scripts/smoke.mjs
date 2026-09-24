@@ -298,6 +298,15 @@ function makeRecordingContext() {
     lineWidth: 1,
     lineCap: 'butt',
     lineJoin: 'miter',
+    /**
+     * 虚线状态。
+     *
+     * 真实 canvas 的 `setLineDash(pattern)` 是**状态**：之后画的每一笔都带着它，
+     * 直到被重新设置。桩必须同样保存它，否则"这条区域画的是实线还是虚线"
+     * 根本没有地方可断言（`setLineDash` 的参数会被丢掉）——
+     * 那正是"设了但没生效"这类缺陷能悄悄溜过去的地方。
+     */
+    lineDash: [],
     globalAlpha: 1,
     textAlign: 'start',
     textBaseline: 'alphabetic',
@@ -331,6 +340,9 @@ function makeRecordingContext() {
         lineWidth: context.lineWidth,
         lineCap: context.lineCap,
         lineJoin: context.lineJoin,
+        // 虚线也要快照：`drawRegion` 正是先 setLineDash、再 beginPath，
+        // 只看 setLineDash 的调用次数分不清"画的是哪条虚线"
+        lineDash: [...context.lineDash],
         beziers: 0,
       }
     },
@@ -350,8 +362,10 @@ function makeRecordingContext() {
         current.points.push({ x, y })
       }
     },
-    setLineDash() {
+    setLineDash(pattern) {
       calls.setLineDash += 1
+      // 与真实 canvas 一致：这是**状态**，不是一次性参数
+      context.lineDash = Array.isArray(pattern) ? [...pattern] : []
     },
     fillText(text, x, y) {
       calls.fillText += 1
@@ -4268,13 +4282,21 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
   openSettings()
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
   const riverPicker = pickerNamed('河流')
-  const regionPicker = pickerNamed('区域颜色 · 公国')
+  // ⑤-2 起区域也是"每种类型一条参数行"：名字就是区域类型名（内置 6 种没有后缀），
+  // 第二行是"边框 · <名字>"。所以取色器不再叫"区域颜色 · 公国"，而是"公国"。
+  const regionPicker = pickerNamed('公国')
   const fontText = textNamed('名称字体族')
   check(
     '设置页有每种路径类型的参数行（含颜色选择器）',
     pickerNamed('河流') !== undefined && pickerNamed('边界') !== undefined && pickerNamed('贸易路线') !== undefined ? true : false,
   )
-  check('设置页有每个区域预设的颜色选择器', pickerNamed('区域颜色 · 王国') !== undefined && pickerNamed('区域颜色 · 海域') !== undefined)
+  check('设置页有每种区域类型的颜色选择器', pickerNamed('王国') !== undefined && pickerNamed('海域') !== undefined)
+  check(
+    '区域类型的第二行是「边框 · <名字>」（与路径类型的「线宽与虚线」同构）',
+    settingNamed('边框 · 公国') !== undefined &&
+      (settingNamed('边框 · 公国')?.texts ?? []).length === 2,
+    JSON.stringify((settingNamed('边框 · 公国')?.texts ?? []).map((text) => text.placeholder)),
+  )
   check('设置页有名称字体族输入框', fontText !== undefined && fontText.placeholder === '留空 = 跟随主题', String(fontText?.placeholder))
   check('选择器带出当前值（出厂默认）', riverPicker?.value === defaultRiver, String(riverPicker?.value))
   check('字体族默认为空（= 跟随主题）', fontText?.value === '', JSON.stringify(fontText?.value))
@@ -4316,13 +4338,28 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     collectByClass(toolbarEl, 'fc-toolbar-path-option').find((button) => button.dataset.pathType === 'river') === pathOptionBefore,
   )
 
-  // ---- 区域颜色：按下标选色 ----
+  // ---- 区域类型：改颜色 → 只影响**之后**新画的区域 ----
   await regionPicker.pick('#123456')
+  check(
+    '区域颜色写进了区域类型目录',
+    plugin.getSettings().regionTypes.find((entry) => entry.id === 'duchy')?.params.color === '#123456',
+    JSON.stringify(plugin.getSettings().regionTypes.map((entry) => [entry.id, entry.params.color])),
+  )
+  check(
+    '旧字段 regionColors 与目录保持一致（回退到旧版插件仍看到自己改过的颜色）',
+    plugin.getSettings().regionColors[2] === '#123456',
+    JSON.stringify(plugin.getSettings().regionColors),
+  )
   editor.setRegionPresetIndex(2)
-  check('区域预设按下标取色，改设置后新区域立刻用新色', editor.regionColor === '#123456', editor.regionColor)
+  check(
+    '按下标选区域类型时取到的是目录里的颜色',
+    editor.regionType === 'duchy' && editor.regionColor === '#123456',
+    `${editor.regionType} / ${editor.regionColor}`,
+  )
   const region = drawRegion(-500, 700)
   check('新画的区域用了新颜色', region.color === '#123456', String(region.color))
-  check('区域透明度仍是出厂默认（颜色设置不该改别的字段）', region.opacity === 0.22, String(region.opacity))
+  check('新画的区域记下了类型 ID', region.type === 'duchy', String(region.type))
+  check('区域不透明度仍是出厂默认（颜色设置不该改别的字段）', region.opacity === 0.22, String(region.opacity))
 
   // ---- 名称字体族：必须真的出现在 ctx.font 里，且不能带 var() ----
   await fontText.type('Noto Serif SC, serif')
@@ -4375,15 +4412,20 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
   await buttonNamed('恢复出厂样式').click()
   const restored = plugin.getSettings()
   check(
-    '「恢复默认」把路径类型参数、区域颜色与字体都还原',
+    '「恢复默认」把路径类型参数、区域类型参数与字体都还原',
     restored.pathTypes.find((entry) => entry.id === 'river')?.params.color === defaultRiver &&
       restored.labelFontFamily === '' &&
-      restored.regionColors[2] === '#a882ff',
+      restored.regionTypes.find((entry) => entry.id === 'duchy')?.params.color === '#a882ff',
     JSON.stringify({
       river: restored.pathTypes.find((entry) => entry.id === 'river')?.params.color,
       font: restored.labelFontFamily,
-      region2: restored.regionColors[2],
+      duchy: restored.regionTypes.find((entry) => entry.id === 'duchy')?.params.color,
     }),
+  )
+  check(
+    '旧字段 regionColors 也跟着目录还原了',
+    restored.regionColors[2] === '#a882ff',
+    JSON.stringify(restored.regionColors),
   )
   check('旧字段 pathColors 也跟着目录还原了', restored.pathColors.river === defaultRiver, String(restored.pathColors.river))
   check('未改动的键没有被写进设置（normalize 会过滤未知键）', !('extra' in restored.pathColors))
@@ -7524,11 +7566,12 @@ console.log('\n场景 35：旧 data.json 迁移到路径类型目录（用户没
   const canvas = makeCanvas()
   const app = makeApp(canvas)
   const plugin = await loadPlugin(app)
-  // 上一代的设置：只有 pathColors（还改过一个颜色），没有任何目录字段
+  // 上一代的设置：只有 pathColors / regionColors（各改过一个颜色），没有任何目录字段。
+  // 区域那条是 ⑤-2 的迁移回归：旧字段只读一次，之后目录是唯一来源。
   plugin._data = JSON.stringify({
     labelScale: 1,
     pathColors: { river: '#ff0000', road: 'var(--x)' },
-    regionColors: [],
+    regionColors: ['#111111', '#222222', '#333333'],
   })
   await plugin.onload()
   const settings = plugin.getSettings()
@@ -7545,12 +7588,44 @@ console.log('\n场景 35：旧 data.json 迁移到路径类型目录（用户没
     settings.pathColors.river === '#ff0000' && settings.pathColors.border === '#b3452f',
     JSON.stringify(settings.pathColors),
   )
+  // ---- 区域类型的迁移（⑤-2）----
+  const duchy = settings.regionTypes.find((entry) => entry.id === 'duchy')
+  check(
+    '旧 regionColors 按下标迁进区域类型目录（老用户改过的区域颜色没丢）',
+    settings.regionTypes[0]?.params.color === '#111111' &&
+      settings.regionTypes[1]?.params.color === '#222222' &&
+      duchy?.params.color === '#333333',
+    JSON.stringify(settings.regionTypes.map((entry) => [entry.id, entry.params.color])),
+  )
+  check(
+    '区域的结构字段仍取出厂值（迁移前后视觉一致：不透明度 0.22、边框宽 3、边框色跟随填充色）',
+    duchy?.params.opacity === 0.22 &&
+      duchy?.params.borderWidth === 3 &&
+      duchy?.params.borderColor === null &&
+      JSON.stringify(duchy?.params.borderDash) === '[]',
+    JSON.stringify(duchy?.params),
+  )
+  check(
+    '没写到的下标仍然是出厂色（迁移不会把别的类型一起改掉）',
+    settings.regionTypes[5]?.params.color === '#4a9fd8',
+    String(settings.regionTypes[5]?.params.color),
+  )
+  check(
+    '旧字段 regionColors 被镜像成同一份颜色（长度 = 内置 6 种）',
+    JSON.stringify(settings.regionColors) === JSON.stringify(['#111111', '#222222', '#333333', '#e0de71', '#8b8b8b', '#4a9fd8']),
+    JSON.stringify(settings.regionColors),
+  )
   await plugin.saveData(settings)
   const once = JSON.stringify(plugin.getSettings())
   // 再走一遍归一化（模拟"再次启动"）：必须完全相同（幂等）
   await plugin.onload()
   check('迁移是幂等的：第二次加载结果完全相同', JSON.stringify(plugin.getSettings()) === once)
   check('目录里内置 4 种齐全', plugin.getSettings().pathTypes.length === 4, JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)))
+  check(
+    '目录里内置 6 种区域类型齐全',
+    plugin.getSettings().regionTypes.length === 6,
+    JSON.stringify(plugin.getSettings().regionTypes.map((entry) => entry.id)),
+  )
   plugin.onunload()
 }
 
@@ -7876,6 +7951,373 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   await wait()
   check('库里没有定义文件时给出可操作的提示', noticeLog.some((line) => line.includes('没有找到定义文件')), noticeLog.join(' | '))
   check('这时根本不打开空的选择器', pickerEmpty.calls.length === 0, String(pickerEmpty.calls.length))
+
+  plugin.onunload()
+}
+
+console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下拉 → 画布 → 文件 → 未知类型保留 → 图例）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  // 桩环境里只有一张画布（`Maps/World.canvas`），地图层只能挂到它上面
+  const canvasPath = 'Maps/World.canvas'
+  const file = await store.createMap({ name: 'Regions', folder: 'Maps', canvasPath })
+  /**
+   * 文件里先塞两条区域，它们是本次增量的两条命根子回归：
+   * - `r-legacy`：**升级前画的**，没有 `type` 字段，颜色 = 内置「王国」出厂色。
+   *   它必须一字不变地读进来、写回去，图例里也仍然显示「王国」（按颜色反查）。
+   * - `r-foreign`：**别的库/别的版本写的**未知类型。它必须仍然在、仍然画得出来，
+   *   `type` 原样保留 —— 丢掉一条区域等于用户打开一次别人的库就永久丢数据。
+   */
+  const LEGACY_COLOR = '#44cf6e'
+  const FOREIGN_COLOR = '#00ffcc'
+  const FOREIGN_TYPE = 'alien-zone'
+  const seeded = await store.load(file)
+  seeded.document.regions.push(
+    { id: 'r-legacy', label: '', pts: [[-900, -700], [-500, -700], [-500, -400]], color: LEGACY_COLOR, opacity: 0.2 },
+    {
+      id: 'r-foreign',
+      label: '',
+      pts: [[300, -700], [700, -700], [700, -400]],
+      color: FOREIGN_COLOR,
+      opacity: 0.2,
+      type: FOREIGN_TYPE,
+    },
+  )
+  await store.writeNow(file, seeded.document, 'Regions', [canvasPath])
+  await settleEvents()
+
+  const prompts = []
+  plugin.setPromptModalFactory((_app, options, onSubmit) => {
+    prompts.push({ options, onSubmit })
+    return { open() {} }
+  })
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const fakeDocument = wrapper.ownerDocument
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const doc = () => layers.getDocument(canvasPath)
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const clickAt = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+  }
+  /** 画一个三角形区域（跳过命名），返回刚提交的那一个 */
+  const drawRegion = (x0, y0, x1, y1) => {
+    editor.setMode('paint')
+    editor.setTool('region')
+    clickAt({ x: x0, y: y0 })
+    clickAt({ x: x1, y: y0 })
+    clickAt({ x: x1, y: y1 })
+    clickAt({ x: x1, y: y1 })
+    flushFrames()
+    prompts[prompts.length - 1].onSubmit('')
+    flushFrames()
+    return doc().regions[doc().regions.length - 1]
+  }
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  /** 区域类型区底部那一行就地提示（按 `dataset.fcNote` 取，见 SettingsTab） */
+  const regionNote = () =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find(
+      (el) => el.dataset?.fcNote === 'regionType',
+    )?.textContent ?? ''
+  const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
+  const regionOptions = () => collectByClass(toolbarEl(), 'fc-toolbar-region-option')
+  const regionOption = (id) => regionOptions().find((button) => button.dataset.regionType === id)
+  const regionTrigger = () => collectByClass(toolbarEl(), 'fc-toolbar-region-trigger')[0]
+  const regionMenu = () => collectByClass(toolbarEl(), 'fc-toolbar-region-menu')[0]
+  const triggerSwatch = () => collectByClass(regionTrigger(), 'fc-toolbar-swatch')[0]
+  const entryOf = (id) => plugin.getSettings().regionTypes.find((entry) => entry.id === id)
+  const legendRows = () => collectByClass(wrapper, 'fc-legend-row')
+  const legendLabels = (kind) =>
+    legendRows()
+      .filter((row) => row.dataset.kind === kind)
+      .map((row) => collectByClass(row, 'fc-legend-label')[0]?.textContent ?? '')
+
+  // ---------------------------------------------------------- 旧区域：读进来、写回去都不变
+  const legacy = doc().regions.find((region) => region.id === 'r-legacy')
+  check('升级前画的区域（没有 type 字段）仍然在文档里', legacy !== undefined)
+  check('它读进来之后仍然没有 type（不会被凭空补一个）', legacy !== undefined && !('type' in legacy))
+  check('旧区域的颜色与不透明度一字未改', legacy?.color === LEGACY_COLOR && legacy?.opacity === 0.2, JSON.stringify(legacy))
+  await store.writeNow(file, doc(), 'Regions', [canvasPath])
+  await settleEvents()
+  const reread = await store.load(file)
+  const legacyAgain = reread.document.regions.find((region) => region.id === 'r-legacy')
+  check(
+    '保存再读回：旧区域仍然没有 type，颜色也没变（这条保证老地图文件不被升级改写）',
+    legacyAgain !== undefined && !('type' in legacyAgain) && legacyAgain.color === LEGACY_COLOR,
+    JSON.stringify(legacyAgain),
+  )
+
+  // ---------------------------------------------------------- 未知区域类型：不丢、不改写、看得见
+  const foreign = doc().regions.find((region) => region.id === 'r-foreign')
+  check('未知区域类型没有被丢掉（旧版本对路径就是这么丢整条的）', foreign !== undefined)
+  check('未知区域类型的 type 原样保留', foreign?.type === FOREIGN_TYPE, String(foreign?.type))
+  const loadIssues = (await store.load(file)).issues
+  check(
+    '未知区域类型给了一条可读的「已保留」告警',
+    loadIssues.some((issue) => issue.message.includes('未知区域类型') && issue.message.includes('已保留')),
+    JSON.stringify(loadIssues.map((issue) => issue.message)),
+  )
+  check(
+    '未知区域仍然画出来了，而且用的是**文件里存的**颜色（不是回退色盖掉用户数据）',
+    frame().fills.some((fill) => fill.fillStyle === FOREIGN_COLOR),
+    JSON.stringify([...new Set(frame().fills.map((fill) => fill.fillStyle))]),
+  )
+
+  // ---------------------------------------------------------- 工具条：区域类型下拉
+  editor.setMode('paint')
+  editor.setTool('region')
+  flushFrames()
+  check('区域工具下有一个区域类型下拉（不再是一排色块按钮）', regionTrigger() !== undefined && regionMenu() !== undefined)
+  check(
+    '下拉里有内置 6 种（王国/帝国/公国/教区/荒原/海域）',
+    ['realm', 'empire', 'duchy', 'diocese', 'wilderness', 'sea'].every((id) => regionOption(id) !== undefined),
+    JSON.stringify(regionOptions().map((button) => button.dataset.regionType)),
+  )
+  check('下拉里没有「未知类型」这种选项（它只列设置里存在的选择）', regionOption(FOREIGN_TYPE) === undefined)
+  fireEvent(regionTrigger(), 'click')
+  check('点触发按钮展开菜单', regionMenu().style.display !== 'none', String(regionMenu().style.display))
+  fireEvent(regionOption('empire'), 'click')
+  check('选中「帝国」后菜单自动收起', regionMenu().style.display === 'none', String(regionMenu().style.display))
+  check(
+    '触发按钮显示当前类型的名字与色块',
+    collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent === '帝国' &&
+      triggerSwatch()?.style.backgroundColor === '#c94f4f',
+    `${collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent} / ${String(triggerSwatch()?.style.backgroundColor)}`,
+  )
+
+  // 真实浏览器里画布上的 pointerdown 会先经过 document 的捕获阶段；假 DOM 不模拟事件传播，
+  // 所以用 firePointerThroughDocument 按真实顺序走两跳（document → 画布），并尊重 stopPropagation。
+  // 区域这条路径尤其重要：多出一个**区域顶点**比多出一个路径顶点更难发现（形状会悄悄变形）。
+  fireEvent(regionTrigger(), 'click')
+  const outsideClient = canvas._clientFor({ x: -100, y: 600 })
+  const outsideStrike = firePointerThroughDocument(fakeDocument, host, {
+    clientX: outsideClient.x,
+    clientY: outsideClient.y,
+    target: wrapper,
+  })
+  check('点在画布上（下拉外面）时区域菜单收起', regionMenu().style.display === 'none', String(regionMenu().style.display))
+  check(
+    '这一击被拦下了 —— 没有落到画布上（否则用户只想收菜单，却顺手多一个区域顶点）',
+    outsideStrike.reachedCanvas === false && editor.isDrafting() === false,
+  )
+  // 反向对照：菜单**没有**展开时，同样的一击必须正常到达画布。
+  // 没有这一条，上一条在「reachedCanvas 永远是 false」时也会绿（空转断言）。
+  const controlStrike = firePointerThroughDocument(fakeDocument, host, {
+    clientX: outsideClient.x,
+    clientY: outsideClient.y,
+    target: wrapper,
+  })
+  check(
+    '反向对照：菜单收起时同一击会正常落到画布（证明上一条不是空转）',
+    controlStrike.reachedCanvas === true && editor.getStatus().draftPoints === 1,
+    `reachedCanvas=${controlStrike.reachedCanvas} draftPoints=${editor.getStatus().draftPoints}`,
+  )
+  editor.cancelDraft()
+
+  // ---------------------------------------------------------- 设置页：区域类型参数
+  openSettings()
+  check(
+    '内置 6 种区域各有参数行（颜色 + 不透明度 + 边框色）',
+    ['王国', '帝国', '公国', '教区', '荒原', '海域'].every((label) => {
+      const setting = FakeSetting.created.find((item) => item.info.name === label)
+      return (setting?.colorPickers?.length ?? 0) === 1 && (setting?.texts?.length ?? 0) === 2
+    }),
+  )
+  check(
+    '第二行是「边框 · <名字>」（边框宽 + 边框虚线）',
+    (settingNamed('边框 · 王国')?.texts ?? []).length === 2,
+    JSON.stringify((settingNamed('边框 · 王国')?.texts ?? []).map((text) => text.value)),
+  )
+  check(
+    '出厂值带出来了（不透明度 0.22、边框宽 3、边框色留空 = 跟随填充色、虚线留空 = 实线）',
+    settingNamed('王国')?.texts?.[0]?.value === '0.22' &&
+      settingNamed('王国')?.texts?.[1]?.value === '' &&
+      settingNamed('边框 · 王国')?.texts?.[0]?.value === '3' &&
+      settingNamed('边框 · 王国')?.texts?.[1]?.value === '',
+    JSON.stringify([
+      settingNamed('王国')?.texts?.[0]?.value,
+      settingNamed('王国')?.texts?.[1]?.value,
+      settingNamed('边框 · 王国')?.texts?.[0]?.value,
+      settingNamed('边框 · 王国')?.texts?.[1]?.value,
+    ]),
+  )
+
+  // ---- 改「帝国」的参数：只影响**之后**新画的区域 ----
+  const beforeDraw = editor.getStatus()
+  void beforeDraw
+  await settingNamed('帝国').texts[0].type('0.6')
+  check('不透明度写进区域类型目录', entryOf('empire')?.params.opacity === 0.6, JSON.stringify(entryOf('empire')?.params))
+  await settingNamed('帝国').texts[1].type('#101010')
+  check('边框色写进目录', entryOf('empire')?.params.borderColor === '#101010', JSON.stringify(entryOf('empire')?.params))
+  await settingNamed('边框 · 帝国').texts[0].type('9')
+  check('边框宽写进目录', entryOf('empire')?.params.borderWidth === 9, JSON.stringify(entryOf('empire')?.params))
+  await settingNamed('边框 · 帝国').texts[1].type('6,3')
+  check('边框虚线写进目录', JSON.stringify(entryOf('empire')?.params.borderDash) === '[6,3]', JSON.stringify(entryOf('empire')?.params))
+
+  editor.setRegionType('empire')
+  const drawn = drawRegion(-300, 200, 100, 500)
+  check('新画的区域记下了类型 ID', drawn.type === 'empire', String(drawn.type))
+  check(
+    '新画的区域把目录里的全部参数写进了文件',
+    drawn.color === '#c94f4f' && drawn.opacity === 0.6 && drawn.borderWidth === 9 && JSON.stringify(drawn.borderDash) === '[6,3]',
+    JSON.stringify(drawn),
+  )
+  check('边框色与填充色不同时才会写进文件（跟随填充色不写冗余字段）', drawn.borderColor === '#101010', String(drawn.borderColor))
+  // 边框色 '#101010' 只属于刚画的那个区域，用它把这一笔从整帧里挑出来
+  const empireBorders = frame().groups.filter((group) => group.strokeStyle === '#101010')
+  check(
+    '画布上真的按这条区域的虚线画了边框（6,3 按设备像素缩放后在 ctx 里生效）',
+    empireBorders.length > 0 &&
+      empireBorders.every((group) => group.lineDash.length === 2 && Math.abs(group.lineDash[0] / group.lineDash[1] - 2) < 0.01),
+    JSON.stringify(empireBorders.map((group) => group.lineDash)),
+  )
+  check(
+    '旧区域的边框是实线（它没有 borderDash 字段 → 升级前唯一的行为）',
+    frame()
+      .groups.filter((group) => group.strokeStyle === LEGACY_COLOR)
+      .every((group) => group.lineDash.length === 0),
+    JSON.stringify(frame().groups.map((group) => [group.strokeStyle, group.lineDash])),
+  )
+  check(
+    '已经画好的旧区域不受设置影响（颜色仍是文件里那份）',
+    doc().regions.find((region) => region.id === 'r-legacy')?.color === LEGACY_COLOR,
+  )
+  check(
+    '旧区域的边框宽没有被新设置改掉（它压根没写这个字段 → 仍是升级前的 0 = 不画边框）',
+    doc().regions.find((region) => region.id === 'r-legacy')?.borderWidth === undefined,
+  )
+
+  // ---------------------------------------------------------- 图例：旧区域标签必须还是「王国」
+  await plugin.setShowLegend(true)
+  flushFrames()
+  check('图例里旧区域仍显示「王国」（按颜色反查，与升级前完全一致）', legendLabels('region').includes('王国'), JSON.stringify(legendLabels('region')))
+  check(
+    '图例里新画的区域显示它的类型名「帝国」',
+    legendLabels('region').includes('帝国'),
+    JSON.stringify(legendLabels('region')),
+  )
+  check(
+    '图例里未知类型显示为「未知（ID）」而不是空着或混进内置名',
+    legendLabels('region').includes(`未知（${FOREIGN_TYPE}）`),
+    JSON.stringify(legendLabels('region')),
+  )
+
+  // ---------------------------------------------------------- 自定义区域类型：新增 → 用 → 删
+  openSettings()
+  const addSetting = settingNamed('新增自定义区域类型')
+  check('设置页有「新增自定义区域类型」一节', addSetting !== undefined)
+  check(
+    '新增区有 ID / 显示名 / 不透明度 / 边框宽 / 边框虚线五个文本框 + 一个颜色选择器',
+    (addSetting?.texts?.length ?? 0) === 5 && (addSetting?.colorPickers?.length ?? 0) === 1,
+    `texts=${addSetting?.texts?.length} pickers=${addSetting?.colorPickers?.length}`,
+  )
+  await addSetting.texts[0].type('Bad Id!')
+  check('非法区域类型 ID 就地给出可读原因', regionNote().includes('ID'), regionNote())
+  await addSetting.texts[0].type('March')
+  await addSetting.texts[1].type('边境侯国')
+  await addSetting.colorPickers[0].pick('#00aa88')
+  await addSetting.texts[2].type('0.35')
+  await addSetting.texts[3].type('7')
+  await addSetting.texts[4].type('10,4')
+  await addSetting.button.click()
+  check(
+    '新增的自定义区域类型 ID 收敛为 custom:march（小写 + 自动前缀）',
+    entryOf('custom:march') !== undefined,
+    JSON.stringify(plugin.getSettings().regionTypes.map((entry) => entry.id)),
+  )
+  check(
+    '自定义区域类型的参数按填的写进目录',
+    JSON.stringify(entryOf('custom:march')?.params) ===
+      JSON.stringify({ color: '#00aa88', opacity: 0.35, borderColor: null, borderWidth: 7, borderDash: [10, 4] }),
+    JSON.stringify(entryOf('custom:march')?.params),
+  )
+  check(
+    '旧字段 regionColors 与目录保持一致（回退到旧版插件仍看到自己改过的颜色）',
+    plugin.getSettings().regionColors[1] === entryOf('empire')?.params.color &&
+      plugin.getSettings().regionColors[5] === entryOf('sea')?.params.color,
+    JSON.stringify([plugin.getSettings().regionColors, entryOf('empire')?.params.color]),
+  )
+  check('自定义区域类型已落盘（真实 JSON 往返）', JSON.parse(plugin._data).regionTypes.some((entry) => entry.id === 'custom:march'))
+
+  editor.setMode('paint')
+  editor.setTool('region')
+  flushFrames()
+  check(
+    '工具条区域下拉里立刻多出「边境侯国」（带自己的 ID 索引）',
+    regionOption('custom:march') !== undefined,
+    JSON.stringify(regionOptions().map((button) => button.dataset.regionType)),
+  )
+  editor.setRegionType('custom:march')
+  const custom = drawRegion(500, 200, 900, 500)
+  check('用自定义类型画的区域写进文件的是 ID（不是显示名）', custom.type === 'custom:march', String(custom.type))
+  check('自定义类型的颜色生效', custom.color === '#00aa88' && custom.opacity === 0.35, JSON.stringify(custom))
+
+  // ---- 删掉自定义定义：地图数据不许被顺手删掉 ----
+  openSettings()
+  // 删除按钮在第二种行（与路径类型同构：名字行放参数，第二行放尺寸与删除）
+  const customSetting = FakeSetting.created.find((item) => (item.info.name ?? '').includes('边框 · 边境侯国'))
+  check('自定义区域类型那一行有删除按钮', customSetting?.button !== undefined)
+  await customSetting.button.click()
+  check('定义被删掉了', entryOf('custom:march') === undefined)
+  check(
+    '但地图上的那个区域仍在、type 也没被改写（删定义 ≠ 删数据）',
+    doc().regions.some((region) => region.id === custom.id && region.type === 'custom:march'),
+    JSON.stringify(doc().regions.map((region) => [region.id, region.type])),
+  )
+  flushFrames()
+  const orphan = drawRegion(-900, 200, -500, 500)
+  check(
+    '删掉定义之后再画同类型：拿到的是看得见的回退样式（颜色不是空的）',
+    typeof orphan.color === 'string' && orphan.color.length > 0 && orphan.type === 'custom:march',
+    JSON.stringify(orphan),
+  )
+  check(
+    '工具条触发按钮显示「未知（custom:march）」而不是空着',
+    collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent === '未知（custom:march）',
+    String(collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent),
+  )
+
+  // ---------------------------------------------------------- 上限：明确提示，不静默失败
+  for (let i = 0; i < 32; i += 1) {
+    await plugin.addCustomRegionType({ id: `fill${i}`, label: `填充${i}`, color: '#123456' })
+  }
+  check(
+    '加到 32 个自定义区域类型（内置 6 种不受影响）',
+    plugin.getSettings().regionTypes.filter((entry) => entry.id.startsWith('custom:')).length === 32,
+    String(plugin.getSettings().regionTypes.filter((entry) => entry.id.startsWith('custom:')).length),
+  )
+  openSettings()
+  const cappedSetting = settingNamed('新增自定义区域类型')
+  check('达到上限时说明文字给出明确原因', (cappedSetting?.info.desc ?? '').includes('已达上限'), cappedSetting?.info.desc)
+  await cappedSetting.texts[0].type('overflow')
+  await cappedSetting.button.click()
+  check(
+    '超过上限时被拒绝并给出可读原因（不静默失败）',
+    regionNote().includes('最多 32 个自定义区域类型'),
+    regionNote(),
+  )
 
   plugin.onunload()
 }

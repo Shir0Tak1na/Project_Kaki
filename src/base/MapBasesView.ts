@@ -27,6 +27,7 @@ import {
 import { buildMapPreviewSvg } from './mapPreview.ts'
 import type { CustomTerrain } from '../render/terrainCatalog.ts'
 import { pathTypeLabelOf, type PathTypeEntry } from '../render/pathTypeCatalog.ts'
+import { regionTypeLabelOf, type RegionTypeEntry } from '../render/regionTypeCatalog.ts'
 import { parseNoteMapProps } from './noteCoordinates.ts'
 import {
   BASES_VIEW_TYPE,
@@ -58,6 +59,13 @@ export interface BasesViewDeps {
    * 表里写 `custom:highway` 而画布上叫"官道"，用户会以为是两条不同的东西。
    */
   getPathTypes?: () => readonly PathTypeEntry[]
+  /**
+   * 区域类型目录（来自插件设置）。
+   *
+   * 与 `getPathTypes` 同理：Base 行里区域的类型名必须与画布、图例说同一句话。
+   * 缺省时不带类型名（旧区域本来也没有类型字段）。
+   */
+  getRegionTypes?: () => readonly RegionTypeEntry[]
   /** 诊断与测试用：最近一次渲染的统计 */
   onRendered?: (info: { rows: number; notes: number; mapEntries: number; reason?: string }) => void
 }
@@ -194,6 +202,8 @@ export class MapBasesView extends BasesView {
         notes: this.noteInputs(),
         // 路径类型的显示名跟着**目录**走（自定义类型显示用户起的名字，未知 ID 显示「未知（…）」）
         resolvePathTypeLabel: (type) => pathTypeLabelOf(type, this.deps.getPathTypes?.() ?? []),
+        // 区域同理；没有类型字段的旧区域由 mapRows 退回通用名「区域」
+        resolveRegionTypeLabel: (type) => regionTypeLabelOf(type, this.deps.getRegionTypes?.() ?? []),
       })
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error)

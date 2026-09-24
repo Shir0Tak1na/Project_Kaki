@@ -96,6 +96,13 @@ export interface RenderPlanRegion {
   opacity: number
   borderColor?: string
   borderWidth?: number
+  /**
+   * 边框虚线（世界单位）。
+   *
+   * 必须有这个字段，否则"设置里把某个区域类型设成虚线边框"到这一步就被悄悄丢掉了 ——
+   * 绘制清单表达不了的东西，绘制层画不出来，而中间没有任何报错。
+   */
+  borderDash?: number[]
 }
 
 export interface MapRenderPlan {

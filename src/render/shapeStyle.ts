@@ -5,7 +5,8 @@
  * 绘制层只负责解释，工具栏与对话框直接复用同一份定义。
  */
 
-import type { BuiltinPathType, PathCapStyle, PathJoinStyle } from '../data/mapDocument.ts'
+import type { BuiltinPathType, BuiltinRegionType, PathCapStyle, PathJoinStyle } from '../data/mapDocument.ts'
+import { BUILTIN_REGION_TYPES } from '../data/mapDocument.ts'
 
 export interface PathStyle {
   type: string
@@ -58,7 +59,14 @@ export interface RegionPreset {
   color: string
 }
 
-/** 区域填充色（低透明度使用，因此取饱和度适中、明度偏高的颜色） */
+/**
+ * 区域填充色（低透明度使用，因此取饱和度适中、明度偏高的颜色）。
+ *
+ * ⚠️ 这是区域**出厂颜色与显示名**的唯一一份数据：内置区域类型的 id 表（见下）
+ * 按同样的顺序与它一一对应，`regionTypeCatalog.factoryRegionTypeParams()` 也从这里取色。
+ * 想改内置区域的出厂色，只改这里 —— 在别处再抄一份就是本项目出过真事故的那种写法
+ * （曾经抄过一份调色板，结果缩略图与画布颜色全不一样）。
+ */
 export const REGION_PRESETS: RegionPreset[] = [
   { label: '王国', color: '#44cf6e' },
   { label: '帝国', color: '#c94f4f' },
@@ -68,8 +76,36 @@ export const REGION_PRESETS: RegionPreset[] = [
   { label: '海域', color: '#4a9fd8' },
 ]
 
+/**
+ * 内置区域类型的 ID（顺序 = `REGION_PRESETS` 的顺序 = 工具条下拉与图例的顺序）。
+ *
+ * ⚠️ id 表本身在 `data/mapDocument.ts`（与 `PATH_TYPES` 同一个位置）：解析层要据此判断
+ * "认不认识这个 ID"。类型名直接从那张表推导，于是两处不可能对不上。
+ *
+ * 为什么 id 不是颜色、也不是中文名：id 是**写进地图文件** `regions[].type` 的值，
+ * 与显示名解耦；用颜色当 ID 的话，用户改一次颜色就会让所有已画区域变成"未知类型"。
+ */
+export type { BuiltinRegionType } from '../data/mapDocument.ts'
+
+/**
+ * 内置区域类型的出厂显示名与颜色 —— 与 `REGION_PRESETS` 按下标对应。
+ *
+ * 中文名与颜色的定义处只有 `REGION_PRESETS` 一处，这里只做 id 与它的对齐。
+ * `REGION_PRESETS` 的长度必须 ≥ id 表长度，由 `tests/regionTypeCatalog.test.ts` 钉死。
+ */
+export const REGION_TYPE_STYLES: Record<BuiltinRegionType, RegionPreset> = Object.fromEntries(
+  BUILTIN_REGION_TYPES.map((id, index) => {
+    const preset = REGION_PRESETS[index] ?? { label: id, color: '#8b8b8b' }
+    return [id, { label: preset.label, color: preset.color }]
+  }),
+) as Record<BuiltinRegionType, RegionPreset>
+
+/** 升级前的区域默认值：半透明填充 + 3 单位边界，边界色跟随填充色 */
 export const DEFAULT_REGION_OPACITY = 0.22
 export const DEFAULT_REGION_BORDER_WIDTH = 3
+
+/** 新画区域时的默认类型（= 升级前工具条的第一个色块「王国」） */
+export const DEFAULT_REGION_TYPE_ID: BuiltinRegionType = BUILTIN_REGION_TYPES[0]
 
 export function defaultRegionColor(): string {
   return REGION_PRESETS[0]!.color

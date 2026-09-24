@@ -47,12 +47,7 @@ import {
   paletteOf,
   type CartographerSettings,
 } from './ui/SettingsTab.ts'
-import {
-  defaultRegionColors,
-  normalizeFontFamily,
-  normalizeRegionColors,
-  type StylePalette,
-} from './render/stylePalette.ts'
+import { normalizeFontFamily, type StylePalette } from './render/stylePalette.ts'
 import {
   MAX_CUSTOM_PATH_TYPES,
   applyPathTypePatch,
@@ -64,6 +59,17 @@ import {
   type PathTypeEntry,
   type PathTypePatch,
 } from './render/pathTypeCatalog.ts'
+import {
+  MAX_CUSTOM_REGION_TYPES,
+  applyRegionTypePatch,
+  customRegionTypeEntries,
+  isBuiltinRegionType,
+  regionColorsFromEntries,
+  resetRegionTypeStyles,
+  validateCustomRegionTypeInput,
+  type RegionTypeEntry,
+  type RegionTypePatch,
+} from './render/regionTypeCatalog.ts'
 import {
   allLayersHidden,
   hiddenLayerLabels,
@@ -206,6 +212,8 @@ export default class ProjectKakiPlugin extends Plugin {
       getStylePalette: () => this.getStylePalette(),
       // 路径类型目录（内置 4 种 + 自定义，含全部画法参数）：路径样式的唯一来源
       getPathTypes: () => this.getPathTypes(),
+      // 区域类型目录（内置 6 种 + 自定义，含填充/不透明度/边框参数）：区域样式的唯一来源
+      getRegionTypes: () => this.getRegionTypes(),
       getCustomTerrains: () => this.getCustomTerrains(),
       getCustomMarkers: () => this.getCustomMarkers(),
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
@@ -565,6 +573,8 @@ export default class ProjectKakiPlugin extends Plugin {
           getCustomTerrains: () => this.getCustomTerrains(),
           // Base 行的路径类型显示名也要跟着目录走（否则自定义类型在表里显示成 custom:xxx）
           getPathTypes: () => this.getPathTypes(),
+          // 区域同理：表里、画布上、图例里对同一个区域类型必须说同一个名字
+          getRegionTypes: () => this.getRegionTypes(),
         }),
       options: () => [
         // 几何数据留在 .map.md 里，靠文件选项指过去 —— 不进 YAML
@@ -1077,13 +1087,104 @@ export default class ProjectKakiPlugin extends Plugin {
     this.layers?.redrawAll()
   }
 
-  /** 改第 index 个区域预设色（工具条上按顺序对应的色块） */
+  /**
+   * 改第 index 个**内置**区域类型的颜色。
+   *
+   * 旧接口（工具条曾经是"一排预设色块"，设置页也按下标排），语义保持不变：
+   * 下标与内置 6 种一一对应；现在它写的是区域类型目录里那一条的颜色，
+   * 旧字段 `regionColors` 只是目录的镜像（不再是渲染依据）。
+   */
   async setRegionColor(index: number, color: string): Promise<void> {
-    const list = [...this.pluginSettings.regionColors]
-    if (index < 0 || index >= list.length) return
-    const next = normalizeRegionColors(list.map((item, i) => (i === index ? color : item)))
-    if (next[index] === list[index]) return
-    this.pluginSettings = { ...this.pluginSettings, regionColors: next }
+    const builtin = this.pluginSettings.regionTypes.filter((entry) => isBuiltinRegionType(entry.id))
+    const target = builtin[index]
+    if (target === undefined) return
+    await this.updateRegionType(target.id, { color })
+  }
+
+  /** 当前区域类型目录（地图层、工具条、设置页、Base 行都现读它）—— 区域样式的唯一来源 */
+  getRegionTypes(): readonly RegionTypeEntry[] {
+    return this.pluginSettings.regionTypes
+  }
+
+  /**
+   * 改一种区域类型的参数（填充色 / 不透明度 / 边框色 / 边框宽 / 边框虚线）。
+   *
+   * 全部校验在 `applyRegionTypePatch` 里（纯函数）：非法虚线**整条拒绝**并返回可读原因，
+   * 而不是"悄悄回退到出厂值"——后者会让用户以为自己填的生效了。
+   *
+   * 只影响**之后新画**的区域：已经画好的区域把参数存在地图文件里。
+   */
+  async updateRegionType(
+    id: string,
+    patch: RegionTypePatch,
+  ): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const index = this.pluginSettings.regionTypes.findIndex((entry) => entry.id === id)
+    if (index < 0) return { ok: false, problem: `没有这个区域类型：${id}` }
+    const current = this.pluginSettings.regionTypes[index]!
+    const next = applyRegionTypePatch(current, patch)
+    if (!next.ok) return next
+    const list = [...this.pluginSettings.regionTypes]
+    list[index] = next.entry
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      regionTypes: list,
+      // 旧字段跟着目录走，避免同一份颜色在两处自相矛盾（它不再是渲染依据）
+      regionColors: regionColorsFromEntries(list),
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+    return { ok: true }
+  }
+
+  /**
+   * 新增一个自定义区域类型。
+   *
+   * 与 `addCustomPathType` 逐字同构：校验全在 `validateCustomRegionTypeInput` 里（纯函数），
+   * 这里只负责落盘与通知渲染层。重名会被拒绝：同一个 ID 两条定义会让"画出来是哪一条"
+   * 变成说不清的问题。
+   */
+  async addCustomRegionType(input: {
+    id: unknown
+    label?: unknown
+    color?: unknown
+    opacity?: unknown
+    borderColor?: unknown
+    borderWidth?: unknown
+    borderDash?: unknown
+  }): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const result = validateCustomRegionTypeInput(input)
+    if (!result.ok) return result
+    if (this.pluginSettings.regionTypes.some((entry) => entry.id === result.entry.id)) {
+      return { ok: false, problem: `已经有一个区域类型用了 ID ${result.entry.id}` }
+    }
+    if (customRegionTypeEntries(this.pluginSettings.regionTypes).length >= MAX_CUSTOM_REGION_TYPES) {
+      return { ok: false, problem: `最多 ${MAX_CUSTOM_REGION_TYPES} 个自定义区域类型` }
+    }
+    const list = [...this.pluginSettings.regionTypes, result.entry]
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      regionTypes: list,
+      regionColors: regionColorsFromEntries(list),
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+    return { ok: true }
+  }
+
+  /**
+   * 删除一个自定义区域类型。
+   *
+   * **不动地图数据**：已经用了这个类型的区域仍然留在文件里，只是画成回退样式。
+   * 反过来做（顺手把区域删掉）是不可逆的，而用户通常只是想清理一下列表。
+   */
+  async removeCustomRegionType(id: string): Promise<void> {
+    const list = this.pluginSettings.regionTypes.filter((entry) => entry.id !== id)
+    if (list.length === this.pluginSettings.regionTypes.length) return
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      regionTypes: list,
+      regionColors: regionColorsFromEntries(list),
+    }
     await this.saveData(this.pluginSettings)
     this.layers?.setStylePalette()
   }
@@ -1100,16 +1201,18 @@ export default class ProjectKakiPlugin extends Plugin {
   /**
    * 样式恢复出厂（设置页的「恢复默认」）。
    *
-   * **不动自定义地形 / 标记 / 路径类型定义**：那些是数据，不是样式偏好。
-   * 路径类型只把**内置 4 种**的参数恢复成工厂值（自定义类型的参数是用户建的定义，留着）。
+   * **不动自定义地形 / 标记 / 路径类型 / 区域类型定义**：那些是数据，不是样式偏好。
+   * 内置类型只把**参数**恢复成工厂值（自定义类型是用户建的定义，留着）。
    */
   async resetStylePalette(): Promise<void> {
     const pathTypes = resetPathTypeStyles(this.pluginSettings.pathTypes)
+    const regionTypes = resetRegionTypeStyles(this.pluginSettings.regionTypes)
     this.pluginSettings = {
       ...this.pluginSettings,
       pathTypes,
       pathColors: pathColorsFromEntries(pathTypes),
-      regionColors: defaultRegionColors(),
+      regionTypes,
+      regionColors: regionColorsFromEntries(regionTypes),
       labelFontFamily: '',
     }
     await this.saveData(this.pluginSettings)

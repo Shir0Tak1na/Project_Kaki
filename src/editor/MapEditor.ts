@@ -24,6 +24,7 @@ import type {
   PathCapStyle,
   PathJoinStyle,
   PathType,
+  RegionType,
   TerrainCell,
   TerrainId,
 } from '../data/mapDocument.ts'
@@ -34,22 +35,23 @@ import { hitTestPolygon, hitTestPolyline, visiblePolyline } from '../render/shap
 import {
   DEFAULT_PATH_CAP,
   DEFAULT_PATH_JOIN,
-  DEFAULT_REGION_BORDER_WIDTH,
-  DEFAULT_REGION_OPACITY,
   type PathStyle,
 } from '../render/shapeStyle.ts'
-import {
-  defaultRegionColors,
-  normalizeColor,
-  resolveDefaultRegionColor,
-  type StylePalette,
-} from '../render/stylePalette.ts'
+import { defaultRegionColors, normalizeColor, type StylePalette } from '../render/stylePalette.ts'
 import {
   defaultPathTypeEntries,
   pathColorsFromEntries,
   resolvedPathStyle,
   type PathTypeEntry,
 } from '../render/pathTypeCatalog.ts'
+import {
+  defaultRegionTypeEntries,
+  defaultRegionTypeId,
+  isBuiltinRegionType,
+  resolvedRegionStyle,
+  type RegionTypeEntry,
+  type ResolvedRegionStyle,
+} from '../render/regionTypeCatalog.ts'
 
 /** 路径/区域 id：与标记共用"避开已用 id"的策略 */
 function nextShapeId(document_: MapDocument, prefix: string): string {
@@ -132,6 +134,13 @@ export interface MapEditorOptions {
    * 而 `getPalette` 只剩下区域颜色与字体还在用。缺省 = 出厂目录。
    */
   getPathTypes?: () => readonly PathTypeEntry[]
+  /**
+   * 当前生效的**区域类型目录**（来自插件设置）—— 区域样式的唯一来源。
+   *
+   * 与 `getPathTypes` 完全同构：内置 6 种 + 自定义类型，参数（填充色/不透明度/边框…）
+   * 都从目录取。缺省 = 出厂目录。
+   */
+  getRegionTypes?: () => readonly RegionTypeEntry[]
   historyLimit?: number
 }
 
@@ -143,6 +152,14 @@ export interface EditorStatus {
   /** 当前标记图标（内置 9 种之一，或用户自定义的 `custom:xxx`） */
   markerIcon: MarkerId
   pathType: PathType
+  /** 当前区域类型 ID（内置 `realm`… 或自定义 `custom:xxx`）—— 新画的区域用它 */
+  regionType: RegionType
+  /**
+   * 当前区域类型的填充色（保留给旧调用方）。
+   *
+   * 它是 `regionType` 的**派生值**，不是第二份状态：改设置里的颜色后新区域立刻用新色，
+   * 而已经画好的区域仍用文件里存的值。
+   */
   regionColor: string
   brushRadius: number
   undo: number
@@ -166,12 +183,13 @@ export class MapEditor {
   markerIcon: MarkerId = 'town'
   pathType: PathType = 'river'
   /**
-   * 区域预设色下标（工具栏上点第几个色块）。
+   * 区域类型（工具条下拉里选的那一个）。
    *
-   * 存下标而不是颜色：设置里改了调色板之后，**新画的区域会自动用新颜色**，
-   * 不会留着一个已经过期的旧色值。已画好的区域仍然用文件里存的颜色。
+   * 存**类型 ID** 而不是颜色/不透明度等数值：设置里改了某个类型的参数之后，
+   * **新画的区域会自动用新参数**，不会留着一组已经过期的旧值。
+   * 已画好的区域仍然用文件里存的参数（见 `buildRegionFrom`）。
    */
-  regionPresetIndex = 0
+  regionType: RegionType = defaultRegionTypeId()
   brushRadius = 0
   /**
    * 路径与区域的几何模式（用户要的"两种模式"）：
@@ -206,6 +224,7 @@ export class MapEditor {
       terrainType: this.terrainType,
       markerIcon: this.markerIcon,
       pathType: this.pathType,
+      regionType: this.regionType,
       regionColor: this.regionColor,
       brushRadius: this.brushRadius,
       undo: size.undo,
@@ -258,29 +277,61 @@ export class MapEditor {
     return resolvedPathStyle(this.pathType, this.getPathTypes())
   }
 
-  /** 当前区域颜色：由预设下标 → 调色板解析出来（所以改设置后新区域立刻用新色） */
+  /** 当前区域类型目录（缺省即出厂目录，见 `MapEditorOptions.getRegionTypes`） */
+  getRegionTypes(): readonly RegionTypeEntry[] {
+    return this.options.getRegionTypes?.() ?? defaultRegionTypeEntries()
+  }
+
+  /** 当前区域类型的完整样式（填充色/不透明度/边框色/边框宽/边框虚线）—— 新画的区域用它 */
+  currentRegionStyle(): ResolvedRegionStyle {
+    return resolvedRegionStyle(this.regionType, this.getRegionTypes())
+  }
+
+  /** 当前区域填充色（`currentRegionStyle()` 的派生值，保留给旧调用方与状态显示） */
   get regionColor(): string {
-    const list = this.getPalette().regionColors
-    return normalizeColor(list[this.regionPresetIndex], resolveDefaultRegionColor(list))
+    return this.currentRegionStyle().color
   }
 
+  /**
+   * 切换当前区域类型（内置或自定义都走这里 —— 编辑器只认 ID，不关心它是不是内置的）。
+   *
+   * 刻意**不校验** ID 是否存在：与 `setTerrainType` 同理，用户删掉自定义定义之后，
+   * 正在用的那个 ID 只是"画上去会显示回退样式"，不需要让编辑器偷偷改掉他的选择。
+   */
+  setRegionType(id: RegionType): void {
+    if (this.regionType === id) return
+    this.regionType = id
+    this.options.onStateChanged?.()
+  }
+
+  /**
+   * 按颜色选区域类型 —— **旧接口**（工具条曾是"一排色块"）。
+   *
+   * 语义与升级前一致：在目录里找颜色相同的类型，找不到就退回第一个内置类型
+   * （而不是把任意颜色塞进状态，那会让工具条高亮和实际画出来的东西对不上）。
+   */
   setRegionColor(color: string): void {
-    const palette = this.getPalette()
-    const index = palette.regionColors.findIndex((item) => normalizeColor(item, '') === normalizeColor(color, ''))
-    // 认不出来（例如颜色来自旧设置）就退回第一个预设，而不是把任意颜色塞进状态
-    const next = index >= 0 ? index : 0
-    if (this.regionPresetIndex === next) return
-    this.regionPresetIndex = next
-    this.options.onStateChanged?.()
+    const entries = this.getRegionTypes()
+    const target = normalizeColor(color, '')
+    const found = entries.find((entry) => normalizeColor(entry.params.color, '') === target)
+    if (found === undefined) {
+      this.setRegionType(defaultRegionTypeId())
+      return
+    }
+    this.setRegionType(found.id)
   }
 
-  /** 直接按下标选区域色（工具栏用；下标会被夹取到合法范围） */
+  /**
+   * 按**内置类型下标**选区域类型 —— 旧接口（工具栏曾经按预设下标建按钮）。
+   *
+   * 保留下标语义是为了不破坏既有调用方：下标与 `BUILTIN_REGION_TYPES` 一一对应，
+   * 越界夹取到合法范围。
+   */
   setRegionPresetIndex(index: number): void {
-    const palette = this.getPalette()
-    const clamped = Math.min(Math.max(0, Math.trunc(index)), Math.max(0, palette.regionColors.length - 1))
-    if (this.regionPresetIndex === clamped) return
-    this.regionPresetIndex = clamped
-    this.options.onStateChanged?.()
+    const builtin = this.getRegionTypes().filter((entry) => isBuiltinRegionType(entry.id))
+    if (builtin.length === 0) return
+    const clamped = Math.min(Math.max(0, Math.trunc(index)), builtin.length - 1)
+    this.setRegionType(builtin[clamped]!.id)
   }
 
   setMarkerIcon(icon: MarkerId): void {
@@ -497,6 +548,7 @@ export class MapEditor {
   beginDraft(kind: 'path' | 'region', world: Point): void {
     if (this.mode !== 'paint') return
     const style = this.currentPathStyle()
+    const region = kind === 'region' ? this.currentRegionStyle() : null
     // 沿格边模式下，落点先吸附到最近的网格顶点
     const start = this.snapDraftPoint(world)
     this.draft = {
@@ -504,8 +556,8 @@ export class MapEditor {
       points: [start],
       clickCount: 1,
       cursor: null,
-      color: kind === 'path' ? style.color : this.regionColor,
-      width: kind === 'path' ? style.width : DEFAULT_REGION_BORDER_WIDTH,
+      color: kind === 'path' ? style.color : (region?.color ?? '#44cf6e'),
+      width: kind === 'path' ? style.width : (region?.borderWidth ?? 3),
       // 预览与最终渲染保持一致（河流：平滑 + 末端变细）。
       // 沿格边模式**不做平滑**：平滑会把格边抹成曲线，正好毁掉"整洁"的目的。
       smooth: kind === 'path' && style.smooth === true && this.geometryMode === 'interior',
@@ -658,15 +710,24 @@ export class MapEditor {
   private buildRegionFrom(points: Point[]): MapOp {
     const document_ = this.options.getDocument()!
     const geometry = this.commitGeometry(points, true)
+    const style = this.currentRegionStyle()
     const region: MapRegion = {
       id: nextShapeId(document_, 'r'),
       label: '',
       pts: geometry.map((point) => [point.x, point.y] as [number, number]),
-      color: this.regionColor,
-      opacity: DEFAULT_REGION_OPACITY,
-      borderWidth: DEFAULT_REGION_BORDER_WIDTH,
+      // 参数**来自目录**，并全部写进文件：于是改设置不会动已画好的区域，
+      // 而换个版本打开这张地图时它仍然长这样（不依赖当时的设置）。
+      color: style.color,
+      opacity: style.opacity,
+      borderWidth: style.borderWidth,
+      // `type` 是新增字段：新画的区域带上它，图例/Base 行就能显示类型名
+      type: style.type,
       mode: this.geometryMode,
     }
+    // 边框色只在"不等于填充色"时写：跟随填充色是升级前的默认行为，
+    // 写一个与填充色相同的值只是冗余（而且用户之后改填充色时它会留在旧值上）。
+    if (style.borderColor !== style.color) region.borderColor = style.borderColor
+    if (style.borderDash.length > 0) region.borderDash = [...style.borderDash]
     return { kind: 'addRegion', region }
   }
 

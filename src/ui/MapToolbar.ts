@@ -22,8 +22,15 @@ import {
   resolvePathType,
   type PathTypeEntry,
 } from '../render/pathTypeCatalog.ts'
-import { REGION_PRESETS } from '../render/shapeStyle.ts'
-import { defaultRegionColors } from '../render/stylePalette.ts'
+import {
+  customRegionTypeEntries,
+  defaultRegionTypeEntries,
+  describeRegionTypeParams,
+  regionTypeCatalogSignature,
+  resolveRegionType,
+  type RegionTypeEntry,
+} from '../render/regionTypeCatalog.ts'
+import { ToolbarDropdown, type ToolbarDropdownItem } from './ToolbarDropdown.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
 
 export interface MapToolbarOptions {
@@ -35,9 +42,8 @@ export interface MapToolbarOptions {
   /**
    * 当前样式调色板（来自插件设置）。
    *
-   * 工具条**不缓存**颜色：点亮色块时按下标去调色板里现取，
-   * `refresh()` 时也重新读一遍色块颜色 —— 于是设置里改完颜色，工具条立刻跟上，
-   * 又不需要重建 DOM（侧边栏那次"每帧重建"的教训）。
+   * ⚠️ 工具条**不再**从这里取区域颜色：区域颜色自 ⑤-2 起是区域类型目录里的一项
+   * （见 `getRegionTypes`）。保留这个选项只为不破坏既有调用方；工具条不读它。
    */
   getPalette?: () => { regionColors: string[] }
   /**
@@ -46,6 +52,12 @@ export interface MapToolbarOptions {
    * 与自定义地形/标记同理：选项数量会随设置变化，所以目录签名变了要重建下拉。
    */
   getPathTypes?: () => readonly PathTypeEntry[]
+  /**
+   * 区域类型目录（来自插件设置）—— 区域下拉的**唯一**内容来源：内置 6 种 + 用户自定义。
+   *
+   * 与路径下拉逐字同理：选项数量会随设置变化，所以目录签名变了要重建下拉。
+   */
+  getRegionTypes?: () => readonly RegionTypeEntry[]
   /**
    * 用户自定义地形（来自插件设置）。
    *
@@ -130,40 +142,22 @@ export class MapToolbar {
   private markerSignature = ''
   private readonly iconButtons = new Map<MarkerId, HTMLButtonElement>()
   /**
-   * 路径类型下拉。
+   * 路径类型下拉与区域类型下拉。
    *
-   * 以前是"每种类型一个按钮 + 一个色块"，类型变多就换行、把别的控件挤走；
-   * 现在只有一个按钮（显示当前类型的色块 + 名字）和一个选项列表。
-   * 选项按 `dataset.pathType` 索引，**未知类型不给选项**（工具条只列"当前设置里存在的选择"），
-   * 但地图里已有的未知类型仍然正常绘制，数据也不会丢。
+   * 两者共用 `ToolbarDropdown`（同一个实现）：以前路径是"每种类型一个按钮"、
+   * 区域是"每 个预设一个色块按钮"，类型一多就换行并把别的控件挤走。
+   * 现在各只有一个按钮（当前类型的色块 + 名字），点开是选项列表。
+   * 选项按 `dataset.pathType` / `dataset.regionType` 索引，**未知类型不给选项**
+   * （下拉只列"当前设置里存在的选择"），但地图里已有的未知类型仍然正常绘制，数据也不会丢。
    */
-  private readonly pathTrigger: HTMLButtonElement
-  private readonly pathSwatch: HTMLElement
-  private readonly pathLabel: HTMLElement
-  private readonly pathCaret: HTMLElement
-  private readonly pathMenu: HTMLElement
-  private readonly pathOptions = new Map<PathType, HTMLButtonElement>()
-  /** 每个选项自己的色块（改颜色时原地刷新，不重建 DOM） */
-  private readonly pathOptionSwatches = new Map<PathType, HTMLElement>()
-  /** 上一次构建下拉时的目录签名：变了才重建 DOM */
+  private readonly pathDropdown: ToolbarDropdown
+  private readonly regionDropdown: ToolbarDropdown
+  /** 上一次构建两个下拉时的目录签名：变了才重建 DOM */
   private pathSignature = ''
-  /** 下拉是否展开（纯界面状态，不进设置） */
-  private pathMenuOpen = false
-  /**
-   * 展开时挂在 document 上的「点外面就收起」监听。
-   *
-   * 为什么必须有：菜单是个浮层，用户点地图的直觉是"把它关掉"——
-   * 而点击会落到画布上，于是下一个动作变成在地图上画了一个点。
-   * 监听器**跟着展开状态注册/注销**（收起、销毁时都摘掉），不留全局残留。
-   */
-  private pathOutsideListener: ((event: Event) => void) | null = null
-  private readonly regionButtons = new Map<number, HTMLButtonElement>()
-  private readonly regionSwatches = new Map<number, HTMLElement>()
+  private regionSignature = ''
   private readonly geometryButtons = new Map<GeometryMode, HTMLButtonElement>()
   private readonly terrainGroup: HTMLElement
   private readonly iconGroup: HTMLElement
-  private readonly pathGroup: HTMLElement
-  private readonly regionGroup: HTMLElement
   private readonly geometryGroup: HTMLElement
   private readonly brushGroup: HTMLElement
   private readonly brushLabel: HTMLElement
@@ -221,30 +215,24 @@ export class MapToolbar {
 
     // 路径类型（仅路径工具下显示）：**收进一个下拉**（用户决定）。
     // 类型数量会随自定义类型增长（上限 32 + 内置 4），一排按钮会换行并挤掉其它控件。
-    this.pathGroup = doc.createElement('div')
-    this.pathGroup.className = 'fc-toolbar-group fc-toolbar-path-group'
-    this.pathTrigger = doc.createElement('button')
-    this.pathTrigger.className = 'fc-toolbar-button fc-toolbar-path-trigger'
-    this.pathTrigger.dataset.fcPathTrigger = '1'
-    this.pathSwatch = doc.createElement('span')
-    this.pathSwatch.className = 'fc-toolbar-swatch'
-    this.pathSwatch.dataset.fcPathSwatch = '1'
-    this.pathLabel = doc.createElement('span')
-    this.pathLabel.className = 'fc-toolbar-path-label'
-    this.pathCaret = doc.createElement('span')
-    this.pathCaret.className = 'fc-toolbar-path-caret'
-    this.pathCaret.textContent = '▾'
-    this.pathTrigger.append(this.pathSwatch, this.pathLabel, this.pathCaret)
-    this.pathTrigger.addEventListener('click', () => {
-      this.setPathMenuOpen(!this.pathMenuOpen)
+    this.pathDropdown = new ToolbarDropdown(this.root, {
+      skin: {
+        groupClass: 'fc-toolbar-group fc-toolbar-path-group',
+        triggerClass: 'fc-toolbar-button fc-toolbar-path-trigger',
+        triggerKey: 'fcPathTrigger',
+        swatchKey: 'fcPathSwatch',
+        labelClass: 'fc-toolbar-path-label',
+        caretClass: 'fc-toolbar-path-caret',
+        menuClass: 'fc-toolbar-path-menu',
+        menuKey: 'fcPathMenu',
+        optionClass: 'fc-toolbar-button fc-toolbar-path-option',
+        optionKey: 'pathType',
+      },
+      onSelect: (id) => {
+        options.editor.setPathType(id)
+        this.refresh()
+      },
     })
-    this.pathMenu = doc.createElement('div')
-    this.pathMenu.className = 'fc-toolbar-path-menu'
-    this.pathMenu.dataset.fcPathMenu = '1'
-    this.pathMenu.style.display = 'none'
-    this.pathGroup.append(this.pathTrigger, this.pathMenu)
-    this.rebuildPathMenu()
-    this.root.appendChild(this.pathGroup)
 
     // 几何模式（路径 / 区域工具下显示）：勾勒六边形边框 vs 直接穿过格子内部
     this.geometryGroup = doc.createElement('div')
@@ -263,26 +251,26 @@ export class MapToolbar {
     }
     this.root.appendChild(this.geometryGroup)
 
-    // 区域颜色（仅区域工具下显示）：按下标建按钮，颜色在点击/刷新时现取
-    this.regionGroup = doc.createElement('div')
-    this.regionGroup.className = 'fc-toolbar-group fc-toolbar-region-group'
-    REGION_PRESETS.forEach((preset, index) => {
-      const button = doc.createElement('button')
-      button.className = 'fc-toolbar-button fc-toolbar-region'
-      button.title = preset.label
-      const swatch = doc.createElement('span')
-      swatch.className = 'fc-toolbar-swatch'
-      swatch.style.backgroundColor = preset.color
-      button.appendChild(swatch)
-      button.addEventListener('click', () => {
-        options.editor.setRegionPresetIndex(index)
+    // 区域类型（仅区域工具下显示）：与路径类型**同一个下拉实现**。
+    // 以前是"每个预设一个色块按钮"，改成下拉之后自定义区域类型才排得下（上限 32 + 内置 6）。
+    this.regionDropdown = new ToolbarDropdown(this.root, {
+      skin: {
+        groupClass: 'fc-toolbar-group fc-toolbar-region-group',
+        triggerClass: 'fc-toolbar-button fc-toolbar-region-trigger',
+        triggerKey: 'fcRegionTrigger',
+        swatchKey: 'fcRegionSwatch',
+        labelClass: 'fc-toolbar-region-label',
+        caretClass: 'fc-toolbar-region-caret',
+        menuClass: 'fc-toolbar-region-menu',
+        menuKey: 'fcRegionMenu',
+        optionClass: 'fc-toolbar-button fc-toolbar-region-option',
+        optionKey: 'regionType',
+      },
+      onSelect: (id) => {
+        options.editor.setRegionType(id)
         this.refresh()
-      })
-      this.regionButtons.set(index, button)
-      this.regionSwatches.set(index, swatch)
-      this.regionGroup.appendChild(button)
+      },
     })
-    this.root.appendChild(this.regionGroup)
 
     // 笔刷大小（仅笔刷工具下显示）
     this.brushGroup = doc.createElement('div')
@@ -368,9 +356,9 @@ export class MapToolbar {
     return this.root
   }
 
-  /** 当前调色板（缺省即出厂默认） */
-  private palette(): { regionColors: string[] } {
-    return this.options.getPalette?.() ?? { regionColors: defaultRegionColors() }
+  /** 当前区域类型目录（缺省即出厂目录） */
+  private regionTypes(): readonly RegionTypeEntry[] {
+    return this.options.getRegionTypes?.() ?? defaultRegionTypeEntries()
   }
 
   /** 当前路径类型目录（缺省即出厂目录） */
@@ -378,71 +366,96 @@ export class MapToolbar {
     return this.options.getPathTypes?.() ?? defaultPathTypeEntries()
   }
 
-  /**
-   * 重建路径类型下拉的选项。
-   *
-   * 与地形/标记按钮同一套做法：目录签名变了才重建（不要每帧重建 DOM）。
-   * 每一项都带**自己的颜色小色块**，于是用户不必展开就能分清"哪个是自己建的那条路"。
-   */
-  private rebuildPathMenu(): void {
-    const doc = this.root.ownerDocument ?? globalThis.document
-    const entries = listPathTypeEntries(this.pathTypes())
-    this.pathSignature = pathTypeCatalogSignature(this.pathTypes())
-    this.pathMenu.empty()
-    this.pathOptions.clear()
-    this.pathOptionSwatches.clear()
+  /** 路径下拉的选项（内置 4 种 + 自定义；顺序 = 目录顺序） */
+  private pathDropdownItems(): ToolbarDropdownItem[] {
+    const entries = this.pathTypes()
+    return listPathTypeEntries(entries).map((entry) => {
+      const resolved = resolvePathType(entry.id, entries)
+      return {
+        id: entry.id,
+        label: entry.label,
+        color: resolved.params.color,
+        title: `${entry.label}（ID ${entry.id} · ${describePathTypeParams(resolved.params)}）`,
+      }
+    })
+  }
 
-    for (const entry of entries) {
-      const resolved = resolvePathType(entry.id, this.pathTypes())
-      const button = doc.createElement('button')
-      button.className = 'fc-toolbar-button fc-toolbar-path-option'
-      // 选项按 ID 索引：断言与"当前选中项"都靠它，而不是靠显示名（显示名可以改）
-      button.dataset.pathType = entry.id
-      button.title = `${entry.label}（ID ${entry.id} · ${describePathTypeParams(resolved.params)}）`
-      const swatch = doc.createElement('span')
-      swatch.className = 'fc-toolbar-swatch'
-      swatch.style.backgroundColor = resolved.params.color
-      const label = doc.createElement('span')
-      label.textContent = entry.label
-      button.append(swatch, label)
-      button.addEventListener('click', () => {
-        this.options.editor.setPathType(entry.id)
-        // 选完就收起：下拉常开会挡住画布
-        this.setPathMenuOpen(false)
-        this.refresh()
-      })
-      this.pathOptions.set(entry.id, button)
-      this.pathOptionSwatches.set(entry.id, swatch)
-      this.pathMenu.appendChild(button)
+  /**
+   * 区域下拉的选项（内置 6 种 + 自定义）。
+   *
+   * 每个选项都带**自己的色块**，于是用户不必展开就能分清"哪个是自己建的那个区域类型"；
+   * 提示里给出 ID 与画法参数，让两个同色类型也能区分（否则界面上会出现两个看起来一样的选项）。
+   */
+  private regionDropdownItems(): ToolbarDropdownItem[] {
+    const entries = this.regionTypes()
+    return entries.map((entry) => {
+      const resolved = resolveRegionType(entry.id, entries)
+      return {
+        id: entry.id,
+        label: entry.label,
+        color: resolved.params.color,
+        title: `${entry.label}（ID ${entry.id} · ${describeRegionTypeParams(resolved.params)}）`,
+      }
+    })
+  }
+
+  /**
+   * 当前区域类型的下拉项 —— 用**目录解析器**而不是在选项列表里找。
+   *
+   * 选项列表里只有"设置里存在的类型"；当前类型可能是未知 ID（别的库写的、或用户刚把定义删了），
+   * 这时解析器给回退参数与「未知（ID）」，触发按钮于是显示得出来东西，而不是空着。
+   */
+  private currentRegionItem(id: string, items: readonly ToolbarDropdownItem[]): ToolbarDropdownItem {
+    const known = items.find((item) => item.id === id)
+    if (known) return { ...known, title: `区域类型：${known.title}` }
+    const resolved = resolveRegionType(id, this.regionTypes())
+    return {
+      id,
+      label: resolved.label,
+      color: resolved.params.color,
+      title: `区域类型：${resolved.label}（ID ${id} · ${describeRegionTypeParams(resolved.params)}）`,
     }
   }
 
-  /** 展开/收起路径类型下拉（纯界面状态：不进设置，也不影响画布） */
-  private setPathMenuOpen(open: boolean): void {
-    this.pathMenuOpen = open
-    this.pathMenu.style.display = open ? '' : 'none'
-    this.pathTrigger.classList.toggle('is-open', open)
-    const doc = this.root.ownerDocument ?? globalThis.document
-    if (open) {
-      if (this.pathOutsideListener === null) {
-        this.pathOutsideListener = (event: Event) => {
-          const target = event.target
-          // 点在下拉组内部（触发按钮或某个选项）时由它们各自的 handler 处理，别抢
-          if (target !== null && this.pathGroup.contains(target as Node)) return
-          this.setPathMenuOpen(false)
-          // 这一击**只**用来关下拉，不放它继续走到画布上。
-          //
-          // 为什么必须拦住：用户刚在下拉里选完类型，工具还停在路径模式；此时点一下画布想把
-          // 下拉收起来，如果这一击照常落到画布，就会顺手落下一个路径顶点 —— 用户没想画，
-          // 却得到一笔要撤销的东西。拦截只影响"下拉正展开"的这一击，收起后监听立即摘掉。
-          event.stopPropagation()
-        }
-        doc.addEventListener('pointerdown', this.pathOutsideListener, true)
-      }
-    } else if (this.pathOutsideListener !== null) {
-      doc.removeEventListener('pointerdown', this.pathOutsideListener, true)
-      this.pathOutsideListener = null
+  /** 当前路径类型的下拉项（同 `currentRegionItem`，未知类型也要看得见） */
+  private currentPathItem(id: string, items: readonly ToolbarDropdownItem[]): ToolbarDropdownItem {
+    const known = items.find((item) => item.id === id)
+    if (known) return { ...known, title: `路径类型：${known.title}` }
+    const resolved = resolvePathType(id, this.pathTypes())
+    return {
+      id,
+      label: resolved.label,
+      color: resolved.params.color,
+      title: `路径类型：${resolved.label}（ID ${id} · ${describePathTypeParams(resolved.params)}）`,
     }
+  }
+
+  /**
+   * 重建两个类型下拉的选项。
+   *
+   * 与地形/标记按钮同一套做法：目录签名变了才重建（不要每帧重建 DOM）；
+   * 每个选项都带自己的颜色小色块。
+   */
+  private rebuildTypeDropdowns(): void {
+    const pathEntries = this.pathTypes()
+    const pathItems = this.pathDropdownItems()
+    const status = this.options.editor.getStatus()
+    this.pathDropdown.rebuild(
+      pathItems,
+      pathTypeCatalogSignature(pathEntries),
+      this.currentPathItem(status.pathType, pathItems),
+      this.pathSignature === '',
+    )
+    this.pathSignature = pathTypeCatalogSignature(pathEntries)
+    const regionEntries = this.regionTypes()
+    const regionItems = this.regionDropdownItems()
+    this.regionDropdown.rebuild(
+      regionItems,
+      regionTypeCatalogSignature(regionEntries),
+      this.currentRegionItem(status.regionType, regionItems),
+      this.regionSignature === '',
+    )
+    this.regionSignature = regionTypeCatalogSignature(regionEntries)
   }
 
   /**
@@ -549,9 +562,12 @@ export class MapToolbar {
     if (markerCatalogSignature(this.options.getCustomMarkers?.() ?? []) !== this.markerSignature) {
       this.rebuildMarkerButtons()
     }
-    // 路径类型目录同理：用户增删自定义类型、或改了名字/颜色，下拉的选项就要跟上
-    if (pathTypeCatalogSignature(this.pathTypes()) !== this.pathSignature) {
-      this.rebuildPathMenu()
+    // 路径/区域类型目录同理：用户增删自定义类型、或改了名字，两个下拉的选项就要跟上
+    if (
+      pathTypeCatalogSignature(this.pathTypes()) !== this.pathSignature ||
+      regionTypeCatalogSignature(this.regionTypes()) !== this.regionSignature
+    ) {
+      this.rebuildTypeDropdowns()
     }
     const status: EditorStatus = this.options.editor.getStatus()
     const painting = status.mode === 'paint'
@@ -576,43 +592,27 @@ export class MapToolbar {
     this.brushGroup.style.display = painting && status.tool === 'brush' ? '' : 'none'
     this.iconGroup.style.display = painting && status.tool === 'marker' ? '' : 'none'
     const showPathGroup = painting && status.tool === 'path'
-    this.pathGroup.style.display = showPathGroup ? '' : 'none'
-    // 离开路径工具就收起下拉：留着展开状态会让它下次出现时莫名其妙是开的
-    if (!showPathGroup && this.pathMenuOpen) this.setPathMenuOpen(false)
-    this.regionGroup.style.display = painting && status.tool === 'region' ? '' : 'none'
+    const showRegionGroup = painting && status.tool === 'region'
+    this.pathDropdown.getElement().style.display = showPathGroup ? '' : 'none'
+    // 离开某个工具就收起它的下拉：留着展开状态会让它下次出现时莫名其妙是开的
+    if (!showPathGroup && this.pathDropdown.isOpen()) this.pathDropdown.setOpen(false)
+    this.regionDropdown.getElement().style.display = showRegionGroup ? '' : 'none'
+    if (!showRegionGroup && this.regionDropdown.isOpen()) this.regionDropdown.setOpen(false)
     // 几何模式只对"多点绘制"的两个工具显示
     const isShapeTool = status.tool === 'path' || status.tool === 'region'
     this.geometryGroup.style.display = painting && isShapeTool ? '' : 'none'
     for (const [mode, button] of this.geometryButtons) button.classList.toggle('is-active', mode === status.geometryMode)
 
-    // 路径类型下拉：触发按钮上的色块与名字 = **当前类型**（每次刷新现读目录，改完设置立刻跟上）
-    const currentPath = resolvePathType(status.pathType, this.pathTypes())
-    if (this.pathSwatch.style.backgroundColor !== currentPath.params.color) {
-      this.pathSwatch.style.backgroundColor = currentPath.params.color
-    }
-    this.pathLabel.textContent = currentPath.label
-    this.pathTrigger.title = `路径类型：${currentPath.label}（${describePathTypeParams(currentPath.params)}）`
-    for (const [type, button] of this.pathOptions) {
-      button.classList.toggle('is-active', type === status.pathType)
-      // 色块与提示**原地刷新**：改了颜色/线宽不需要重建选项（签名里没有参数，见 pathTypeCatalogSignature）
-      const resolved = resolvePathType(type, this.pathTypes())
-      const swatch = this.pathOptionSwatches.get(type)
-      if (swatch && swatch.style.backgroundColor !== resolved.params.color) {
-        swatch.style.backgroundColor = resolved.params.color
-      }
-      const title = `${resolved.label}（ID ${type} · ${describePathTypeParams(resolved.params)}）`
-      if (button.title !== title) button.title = title
-    }
-    // 区域色块：按下标比对（设置里换了颜色也能正确高亮），并顺带把色块更新到最新设置
-    const palette = this.palette()
-    for (const [index, button] of this.regionButtons) {
-      const color = palette.regionColors[index]
-      const swatch = this.regionSwatches.get(index)
-      if (swatch && typeof color === 'string' && color.length > 0 && swatch.style.backgroundColor !== color) {
-        swatch.style.backgroundColor = color
-      }
-      button.classList.toggle('is-active', typeof color === 'string' && color === status.regionColor)
-    }
+    // 两个类型下拉：触发按钮上的色块与名字 = **当前类型**；选中项高亮、色块与提示原地刷新
+    // （每次现读目录，于是设置里改完颜色/线宽/不透明度，工具条立刻跟上）
+    // 两个类型下拉：触发按钮上的色块与名字 = **当前类型**；选中项高亮、色块与提示原地刷新
+    // （每次现读目录，于是设置里改完颜色/线宽/不透明度，工具条立刻跟上）。
+    // 当前类型解析器**永不返回空**：定义被删掉或遇到未知 ID 时显示回退视觉，
+    // 而不是留着上一条类型的名字（那会让用户以为选中的还是它）。
+    const pathItems = this.pathDropdownItems()
+    this.pathDropdown.refreshSelection(pathItems, this.currentPathItem(status.pathType, pathItems))
+    const regionItems = this.regionDropdownItems()
+    this.regionDropdown.refreshSelection(regionItems, this.currentRegionItem(status.regionType, regionItems))
 
     this.brushLabel.textContent = `${status.brushRadius}`
     // 这两个高亮读的是**设置**（唯一真相），不是工具条或编辑器里的副本
@@ -650,12 +650,9 @@ export class MapToolbar {
   }
 
   destroy(): void {
-    // 先摘掉全局监听：地图层被停用时工具条会整个销毁，留着监听就是一处泄漏
-    if (this.pathOutsideListener !== null) {
-      const doc = this.root.ownerDocument ?? globalThis.document
-      doc.removeEventListener('pointerdown', this.pathOutsideListener, true)
-      this.pathOutsideListener = null
-    }
+    // 两个下拉各自摘掉自己的 document 监听（地图层被停用时工具条会整个销毁，留着监听就是一处泄漏）
+    this.pathDropdown.destroy()
+    this.regionDropdown.destroy()
     this.root.remove()
   }
 }

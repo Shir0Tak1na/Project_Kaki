@@ -434,3 +434,79 @@ test('带完整内容的文档序列化体积在预期量级', () => {
   assert.ok(perCell > 20 && perCell < 32, `每格 ${perCell.toFixed(1)} 字节`)
   assert.equal(Object.keys(parseMapDocument(JSON.parse(text)).document!.terrain).length, 6400)
 })
+
+/* ------------------------------------------------- 区域类型（⑤-2）
+
+   与路径类型同一口径：区域里的 `type` 是**用户的数据**，认不出来只能告警，
+   既不能改写它，更不能因为一个类型字段而把整个区域丢掉。 */
+
+test('未知的区域类型：区域原样保留，type 不被改写，只给一条「已保留」告警', () => {
+  const input = {
+    ...createEmptyMapDocument({}),
+    regions: [
+      { id: 'r1', label: '', pts: [[0, 0], [10, 0], [10, 10]], color: '#44cf6e', opacity: 0.22, type: 'alien-zone' },
+    ],
+  }
+  const parsed = parseMapDocument(input)
+  assert.equal(parsed.document!.regions.length, 1, '区域不能被丢掉')
+  assert.equal(parsed.document!.regions[0]!.type, 'alien-zone')
+  const issue = parsed.issues.find((item) => item.path.endsWith('.type'))
+  assert.ok(issue, `应有告警，实际：${JSON.stringify(parsed.issues)}`)
+  assert.match(issue!.message, /已保留/)
+  // 落盘再解析：仍然在，且类型没变
+  const again = parseMapDocument(JSON.parse(serializeMapDocument(parsed.document!)))
+  assert.equal(again.document!.regions[0]!.type, 'alien-zone')
+})
+
+test('区域类型不是合法字符串时：忽略该字段，但区域本身仍然保留', () => {
+  const input = {
+    ...createEmptyMapDocument({}),
+    regions: [{ id: 'r1', label: '', pts: [[0, 0], [10, 0], [10, 10]], color: '#44cf6e', opacity: 0.22, type: 42 }],
+  }
+  const parsed = parseMapDocument(input)
+  assert.equal(parsed.document!.regions.length, 1)
+  assert.equal('type' in parsed.document!.regions[0]!, false)
+  assert.ok(parsed.issues.some((item) => item.path.endsWith('.type')))
+})
+
+test('升级前画的区域（没有 type 字段）读进来仍然没有 type，序列化也不会凭空补出来', () => {
+  const legacy = {
+    ...createEmptyMapDocument({}),
+    regions: [{ id: 'r1', label: '北境', pts: [[0, 0], [10, 0], [10, 10]], color: '#c94f4f', opacity: 0.2 }],
+  }
+  const first = parseMapDocument(legacy)
+  assert.equal('type' in first.document!.regions[0]!, false)
+  const text = serializeMapDocument(first.document!)
+  assert.equal(text.includes('"type"'), false, `不该凭空补出 type：${text}`)
+  // 二次往返仍然相同（解析 → 序列化是稳定的）
+  assert.equal(serializeMapDocument(parseMapDocument(JSON.parse(text)).document!), text)
+})
+
+test('区域边框虚线可以往返（缺省 = 实线，不写进文件）', () => {
+  const input = {
+    ...createEmptyMapDocument({}),
+    regions: [
+      { id: 'r1', label: '', pts: [[0, 0], [10, 0], [10, 10]], color: '#44cf6e', opacity: 0.22, borderDash: [8, 4] },
+      { id: 'r2', label: '', pts: [[0, 0], [5, 0], [5, 5]], color: '#44cf6e', opacity: 0.22 },
+    ],
+  }
+  const parsed = parseMapDocument(input)
+  assert.deepEqual(parsed.document!.regions[0]!.borderDash, [8, 4])
+  assert.equal('borderDash' in parsed.document!.regions[1]!, false)
+  const again = parseMapDocument(JSON.parse(serializeMapDocument(parsed.document!)))
+  assert.deepEqual(again.document!.regions[0]!.borderDash, [8, 4])
+})
+
+test('内置区域类型不会被当成未知（不该刷告警）', () => {
+  const input = {
+    ...createEmptyMapDocument({}),
+    regions: [{ id: 'r1', label: '', pts: [[0, 0], [10, 0], [10, 10]], color: '#44cf6e', opacity: 0.22, type: 'realm' }],
+  }
+  const parsed = parseMapDocument(input)
+  assert.equal(parsed.document!.regions[0]!.type, 'realm')
+  assert.equal(
+    parsed.issues.some((item) => item.path.endsWith('.type')),
+    false,
+    JSON.stringify(parsed.issues),
+  )
+})

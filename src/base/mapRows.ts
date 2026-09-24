@@ -77,6 +77,23 @@ export function pathKindLabel(
   return PATH_KIND_LABELS[type as BuiltinPathType] ?? type
 }
 
+/**
+ * 区域类型 → 显示名。
+ *
+ * 与 `pathKindLabel` 同构：目录给的解析器优先（自定义类型要显示自己的名字），
+ * 没有类型字段（升级前画的区域）或解析器缺省时退回通用名「区域」。
+ * 未知 ID 由目录解析器给成「未知（ID）」，不会在这里被美化成内置名。
+ */
+export function regionKindLabel(
+  type: string | undefined,
+  resolveLabel?: ((type: string) => string) | undefined,
+): string {
+  if (typeof type !== 'string' || type.length === 0) return '区域'
+  const fromCatalog = resolveLabel?.(type)
+  if (typeof fromCatalog === 'string' && fromCatalog.length > 0) return fromCatalog
+  return type
+}
+
 function pathDetail(path: MapPath, resolveLabel?: ((type: string) => string) | undefined): string {
   return `${pathKindLabel(path.type, resolveLabel)} · ${path.pts.length} 点`
 }
@@ -91,6 +108,7 @@ export function rowsFromDocument(
   document: MapDocument,
   mapPath: string,
   resolvePathTypeLabel?: ((type: string) => string) | undefined,
+  resolveRegionTypeLabel?: ((type: string) => string) | undefined,
 ): MapRow[] {
   const rows: MapRow[] = []
 
@@ -137,14 +155,15 @@ export function rowsFromDocument(
 
   for (const region of document.regions) {
     const anchor = polygonAnchor(region.pts.map(([x, y]) => ({ x, y })))
+    const kindLabel = regionKindLabel(region.type, resolveRegionTypeLabel)
     rows.push({
       id: `map:region:${region.id}`,
       source: 'map',
       kind: 'region',
-      name: region.label && region.label.length > 0 ? region.label : '（未命名区域）',
+      name: region.label && region.label.length > 0 ? region.label : `（未命名${kindLabel}）`,
       point: anchor,
       filePath: region.link ?? mapPath,
-      detail: `区域 · ${region.pts.length} 顶点`,
+      detail: `${kindLabel} · ${region.pts.length} 顶点`,
     })
   }
 
@@ -176,10 +195,19 @@ export function buildMapRows(options: {
   notes: readonly NoteRowInput[]
   /** 目录里的路径类型显示名解析器（自定义与未知类型靠它才不会在表里显示成裸 ID） */
   resolvePathTypeLabel?: ((type: string) => string) | undefined
+  /** 区域类型显示名解析器（同上）；旧区域没有类型字段，由 `regionKindLabel` 退回通用名 */
+  resolveRegionTypeLabel?: ((type: string) => string) | undefined
 }): MapRow[] {
   const rows = options.notes ? rowsFromNotes(options.notes) : []
   if (options.document && options.mapPath) {
-    rows.push(...rowsFromDocument(options.document, options.mapPath, options.resolvePathTypeLabel))
+    rows.push(
+      ...rowsFromDocument(
+        options.document,
+        options.mapPath,
+        options.resolvePathTypeLabel,
+        options.resolveRegionTypeLabel,
+      ),
+    )
   }
   return rows
 }
