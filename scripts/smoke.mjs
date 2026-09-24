@@ -4773,6 +4773,160 @@ console.log('\n场景 26：PNG 导出（复用 SVG 几何 → 光栅化 → 两�
   plugin.onunload()
 }
 
+console.log('\n场景 27：地图面板的图层开关与工具条精简（用户反馈：那个按钮不知道是干什么的）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const wrapper = canvas.wrapperEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const doc = () => layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+
+  const RIVER_COLOR = '#4a9fd8'
+  doc().terrain['0_0'] = { t: 'forest' }
+  doc().terrain['1_0'] = { t: 'water' }
+  doc().paths.push({ id: 'p1', type: 'river', pts: [[0, 0], [200, 0]], width: 8, color: RIVER_COLOR, label: '长歌川' })
+
+  // ---- 工具条：那个让人看不懂的按钮必须真的没了 ----
+  const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
+  check('工具条还在（只是少了一个按钮）', toolbarEl !== undefined)
+  check(
+    '工具条上不再有「地图层」按钮',
+    collectByClass(wrapper, 'fc-toolbar-layer').length === 0,
+    String(collectByClass(wrapper, 'fc-toolbar-layer').length),
+  )
+  check(
+    '工具条上没有任何按钮的文字是「地图层」',
+    collectByClass(toolbarEl, 'fc-toolbar-button').every((button) => (button.textContent ?? '') !== '地图层'),
+    collectByClass(toolbarEl, 'fc-toolbar-button').map((button) => button.textContent).join(','),
+  )
+
+  // ---- 面板：六个图层开关 ----
+  plugin.ribbonIcons[0].callback()
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const panel = app.workspace.getLeavesOfType('fictional-cartographer-panel')[0]?.view
+  check('面板已打开', panel !== undefined)
+  const toggleEls = () => collectByClass(panel.contentEl, 'fc-layer-toggle')
+  const toggleFor = (key) => toggleEls().find((element) => element.dataset.layer === key)
+  check('面板里有六个图层开关', toggleEls().length === 6, String(toggleEls().length))
+  check(
+    '六个开关的 key 与图层登记表一致',
+    toggleEls().map((element) => element.dataset.layer).join(',') === 'terrain,grid,regions,paths,markers,labels',
+    toggleEls().map((element) => element.dataset.layer).join(','),
+  )
+  check(
+    '开关显示的是中文层名',
+    collectByClass(panel.contentEl, 'fc-layer-toggle-label').map((el) => el.textContent).join(',') === '地形,网格,区域,路径,标记,名称',
+    collectByClass(panel.contentEl, 'fc-layer-toggle-label').map((el) => el.textContent).join(','),
+  )
+  check('默认六个开关都是"开"', toggleEls().every((element) => element.classList.contains('is-active')))
+  check(
+    '开关的悬停提示写清了这一层管什么（用具名文案，而不是让人猜）',
+    (toggleFor('markers')?.title ?? '').includes('地标标记与文字标注') && (toggleFor('labels')?.title ?? '').includes('名称文字'),
+    String(toggleFor('markers')?.title),
+  )
+
+  // ---- 从别处改图层时，面板要跟着变（否则会出现"设置改了、开关还亮着旧的"）----
+  await plugin.setLayerVisible('paths', false)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  flushFrames()
+  check(
+    '从别处关掉路径后，面板上的路径开关自己也灭了',
+    !toggleFor('paths')?.classList.contains('is-active'),
+    String(toggleFor('paths')?.classList.contains('is-active')),
+  )
+  check(
+    '灭掉的开关用空心标记（○）表示，一眼能看出是关的',
+    collectByClass(toggleFor('paths'), 'fc-layer-toggle-mark')[0]?.textContent === '○',
+    String(collectByClass(toggleFor('paths'), 'fc-layer-toggle-mark')[0]?.textContent),
+  )
+  await plugin.setLayerVisible('paths', true)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  flushFrames()
+  check('开回来时面板上的开关也亮回来', toggleFor('paths')?.classList.contains('is-active') === true)
+
+  // ---- 点面板里的开关：设置真的变、这一帧真的不画、文档里的数据不动 ----
+  fireEvent(toggleFor('terrain'), 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  flushFrames()
+  check('点开关后设置里的地形层被关掉', plugin.getSettings().layers.terrain === false, JSON.stringify(plugin.getSettings().layers))
+  const hiddenFrame = frame()
+  check('关掉地形后这一帧没有画任何格子', stats().lastCellCount === 0, String(stats().lastCellCount))
+  check(
+    '但文档里的地形格仍在（图层不改数据）',
+    Object.keys(doc().terrain).length === 2,
+    String(Object.keys(doc().terrain).length),
+  )
+  check('关掉地形不影响路径（只动点的那一层）', hiddenFrame.groups.some((group) => group.strokeStyle === RIVER_COLOR))
+
+  fireEvent(toggleFor('terrain'), 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  flushFrames()
+  check('再点一次就开回来', plugin.getSettings().layers.terrain === true)
+  frame()
+  check('开回来后格子又画出来了', stats().lastCellCount === 2, String(stats().lastCellCount))
+
+  fireEvent(toggleFor('paths'), 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const noPathFrame = frame()
+  check(
+    '点开关关掉路径后，那一帧没有河流描边',
+    noPathFrame.groups.every((group) => group.strokeStyle !== RIVER_COLOR),
+    JSON.stringify([...new Set(noPathFrame.groups.map((group) => group.strokeStyle))]),
+  )
+  check('路径仍在文档里', doc().paths.length === 1)
+  fireEvent(toggleFor('paths'), 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  flushFrames()
+
+  // ---- 关键回归：关掉地图层之后，入口不能跟着消失 ----
+  const layerButton = () =>
+    collectByClass(panel.contentEl, 'fc-panel-button').find((button) =>
+      (collectByClass(button, 'fc-panel-button-label')[0]?.textContent ?? '').includes('启用/停用当前 Canvas 的地图层'),
+    )
+  check('面板里有「启用/停用当前 Canvas 的地图层」这个入口', layerButton() !== undefined)
+  fireEvent(layerButton(), 'click')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  flushFrames()
+  // 停用后这个画布会被从「已启用」集合里移除，所以 listStatus() 是**空数组**
+  // （不是 [{attached:false}]）—— 断言要按真实的返回形状写，否则会把正确行为判成失败。
+  check(
+    '点它之后地图层被停用（工具条与覆盖层一起收起）',
+    layers.listStatus().length === 0,
+    JSON.stringify(layers.listStatus().map((status) => status.attached)),
+  )
+  check('工具条确实随地图层一起消失了', collectByClass(wrapper, 'fc-toolbar').length === 0)
+  check('而面板还在（所以关掉之后仍有入口 —— 这正是把按钮从工具条拿掉的前提）', collectByClass(panel.contentEl, 'fc-layer-toggle').length === 6)
+
+  fireEvent(layerButton(), 'click')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  check(
+    '再从面板点一次就能把地图层开回来',
+    layers.listStatus().some((status) => status.attached) === true,
+    JSON.stringify(layers.listStatus().map((status) => status.attached)),
+  )
+
+  plugin.onunload()
+}
+
 console.log('')
 if (failures === 0) {
   console.log(`✓ 冒烟测试全部通过（${assertions} 条断言）`)

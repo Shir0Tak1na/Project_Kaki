@@ -83,7 +83,6 @@ export interface MapLayerManagerDeps {
   setLayerVisible?: (key: LayerKey, value: boolean) => void
   /** 写回图例显示开关（同上） */
   setShowLegend?: (value: boolean) => void
-  onToggleLayer?: (canvasPath: string) => void
 }
 
 interface LayerEntry {
@@ -452,7 +451,10 @@ export class MapLayerManager {
             this.deps.setShowLegend?.(!(this.deps.getShowLegend?.() ?? false))
           },
           onModeChanged: (mode) => interaction.notifyModeChanged(mode),
-          onToggleLayer: () => this.disable(canvasPath),
+          // 工具条上那个「地图层」按钮已删掉（用户反馈"不知道是干什么的"，且与面板里的
+          // 「启用/停用当前 Canvas 的地图层」重复）。停用地图层现在的入口是：侧栏地图面板
+          // （常驻，关掉之后仍然在）与命令面板 —— 这一条很关键：**关掉地图层不能让自己失去入口**，
+          // 而画布上的按钮会随地图层一起消失，所以它本来就不适合承担这个职责。
           onUndo: () => {
             editor.undo()
           },

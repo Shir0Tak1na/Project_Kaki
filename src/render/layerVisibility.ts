@@ -36,6 +36,22 @@ export const DEFAULT_LAYER_VISIBILITY: LayerVisibility = {
 }
 
 /**
+ * 每一层"管什么"的一句话说明（面板与设置页的悬停提示用）。
+ *
+ * 放在这里而不是各 UI 各写一份：用户看到的语义只该有一处来源，
+ * 否则"标记这一层到底含不含文字标注"这种事会两边说得不一样。
+ * 尤其是 `markers` 含文字标注、`labels` 指名称文字 —— 这两条最容易记混。
+ */
+export const LAYER_HINTS: Record<LayerKey, string> = {
+  terrain: '六边形地形的填色 / 图片',
+  grid: '六边形网格线',
+  regions: '半透明的领地范围',
+  paths: '河流 / 道路 / 贸易路线 / 边界',
+  markers: '地标标记与文字标注',
+  labels: '路径与区域的名称文字',
+}
+
+/**
  * 把任意输入收敛成完整的图层开关表。
  *
  * 缺项按**出厂默认（显示）**补齐，而不是按"false"：用户手工改坏 data.json 时，

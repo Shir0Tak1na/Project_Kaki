@@ -361,6 +361,11 @@ export default class ProjectKakiPlugin extends Plugin {
     this.registerView(MAP_PANEL_VIEW_TYPE, (leaf) => new MapPanelView(leaf, {
       getActions: () => this.getPanelActions(),
       getSummary: () => this.describePanelSummary(),
+      // 图层开关：状态与写入口都从插件这边注入（面板不认识插件实例）
+      getLayerVisibility: () => this.pluginSettings.layers,
+      onToggleLayer: (key, value) => {
+        void this.setLayerVisible(key, value)
+      },
     }))
 
     this.addRibbonIcon('map', 'Project Kaki：打开地图面板', () => {
@@ -790,6 +795,10 @@ export default class ProjectKakiPlugin extends Plugin {
     if (layers === this.pluginSettings.layers) return
     this.pluginSettings = { ...this.pluginSettings, layers }
     this.layers?.setLayers()
+    // 面板自己也显示这六个开关：工具条按钮、设置页、命令都能改图层，
+    // 所以刷新要在这里做（而不是只让"点面板的那一次"自己刷新），否则会出现
+    // "从别处改了图层，面板上的开关还亮着旧状态"。requestRender 会把同帧的重复请求合并掉。
+    this.refreshPanel()
     await this.saveData(this.pluginSettings)
   }
 

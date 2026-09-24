@@ -32,7 +32,6 @@ export interface MapToolbarOptions {
   onModeChanged: (mode: 'select' | 'paint') => void
   onUndo: () => void
   onRedo: () => void
-  onToggleLayer?: () => void
   /**
    * 当前样式调色板（来自插件设置）。
    *
@@ -96,7 +95,14 @@ export class MapToolbar {
   private readonly options: MapToolbarOptions
   private readonly root: HTMLElement
   private readonly modeButton: HTMLButtonElement
-  private readonly layerButton: HTMLButtonElement
+  /**
+   * 这里**刻意没有**「地图层」按钮。
+   *
+   * 它原来文案是"地图层"、提示是"停用当前地图层"，点了会把整个地图层关掉
+   * （地形消失、连工具条自己一起收起来）—— 用户的反馈是"不知道是干什么的"，
+   * 而且它与侧栏面板里的「启用/停用当前 Canvas 的地图层」是**重复功能**。
+   * 现在只保留面板里那一个入口；画布上的工具条不再有能把自己弄没的按钮。
+   */
   private readonly toolButtons = new Map<EditorTool, HTMLButtonElement>()
   /** 地形按钮按**地形 ID**索引（内置 + 自定义共用一套） */
   private readonly terrainButtons = new Map<string, HTMLButtonElement>()
@@ -138,13 +144,6 @@ export class MapToolbar {
       this.refresh()
     })
     this.root.appendChild(this.modeButton)
-
-    this.layerButton = doc.createElement('button')
-    this.layerButton.className = 'fc-toolbar-button fc-toolbar-layer'
-    this.layerButton.textContent = '地图层'
-    this.layerButton.title = '停用当前地图层'
-    this.layerButton.addEventListener('click', () => options.onToggleLayer?.())
-    this.root.appendChild(this.layerButton)
 
     // 工具切换
     const toolGroup = doc.createElement('div')

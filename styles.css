@@ -244,6 +244,65 @@
   height: 15px;
 }
 
+/* ---- 面板里的图层开关（六层：地形/网格/区域/路径/标记/名称） ---- */
+
+.fc-panel-layers {
+  /* 两列网格：六个开关占三行，侧边栏再窄也不至于把动作列表挤到屏幕外 */
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 6px;
+  align-items: center;
+}
+
+/* 分组标题独占一整行 */
+.fc-panel-layers > .fc-panel-group-title {
+  grid-column: 1 / -1;
+}
+
+.fc-layer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 3px 6px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.6;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.fc-layer-toggle:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border);
+}
+
+/* 打开的那一层：读得出来（颜色 + 圆点实心），不能只靠圆点形状 */
+.fc-layer-toggle.is-active {
+  color: var(--text-normal);
+  background: var(--background-modifier-active-hover, var(--background-secondary));
+  border-color: var(--background-modifier-border);
+}
+
+.fc-layer-toggle-mark {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: var(--text-faint);
+}
+
+.fc-layer-toggle.is-active .fc-layer-toggle-mark {
+  color: var(--text-accent);
+}
+
+.fc-layer-toggle-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---- 画布上的图例（默认隐藏，由工具条按钮切换） ---- */
 
 .fc-legend {
