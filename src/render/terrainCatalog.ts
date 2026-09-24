@@ -42,8 +42,14 @@ export const CUSTOM_TERRAIN_PREFIX = 'custom:'
 /** 用户可填的 ID 主体（不含前缀）；与"文件里能存什么"是两回事，见 `mapDocument.ts` */
 const TERRAIN_SLUG = /^[a-z][a-z0-9_-]{1,31}$/
 
-/** 支持的图片扩展名（Obsidian 能内联显示的位图与矢量图） */
-const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif']
+/**
+ * 支持的图片扩展名（Obsidian 能内联显示的位图与矢量图）。
+ *
+ * **导出**是为了让"选图片"和"校验路径"共用同一份白名单：如果选图弹窗能列出 `.txt`，
+ * 而校验又把它拒掉，用户就会遇到"选了却被拒"这种自相矛盾的体验 ——
+ * 而本项目已经因为"抄一份清单"出过真事故（缩略图曾自带一份与画布不同的调色板）。
+ */
+export const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif']
 
 /**
  * 自定义地形数量上限。

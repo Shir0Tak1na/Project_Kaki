@@ -1055,6 +1055,35 @@ const fakeObsidian = {
       this.onClose?.()
     }
   },
+  /**
+   * `FuzzySuggestModal` 的桩：存在的理由是"类定义阶段不能炸" ——
+   * `AssetSuggestModal extends FuzzySuggestModal`，而 extends 在**模块加载时**就求值，
+   * 缺这个基类会让整个 main.js 加载失败（报错位置与真实原因毫不相干）。
+   *
+   * ⚠️ 它**刻意不模拟**模糊搜索界面（那套 DOM 与键盘交互无法在假环境里可信复现）。
+   * 取而代之：需要断言行为的地方走**注入的替身**（`setImagePickerFactory`），
+   * 而真实弹窗自己的逻辑（清单筛选、短标签、选中回调）用 `getItems/getItemText/onChooseItem`
+   * 这三个方法直接验 —— 它们才是我们写的代码，模糊搜索本身是 Obsidian 的。
+   */
+  FuzzySuggestModal: class FakeFuzzySuggestModal {
+    constructor(app) {
+      this.app = app
+      this.placeholder = null
+      this.opened = false
+    }
+    setPlaceholder(value) {
+      this.placeholder = value
+      return this
+    }
+    open() {
+      this.opened = true
+      this.onOpen?.()
+    }
+    close() {
+      this.opened = false
+      this.onClose?.()
+    }
+  },
   Setting: FakeSetting,
   // 设置界面会 extends PluginSettingTab：桩里必须有这个类（否则类定义阶段就抛错）
   PluginSettingTab: class FakePluginSettingTab {    constructor(app, plugin) {
@@ -1386,6 +1415,10 @@ function makeVault(initialFiles = new Map()) {  const files = new Map()
     },
     getMarkdownFiles() {
       return [...files.keys()].filter((path) => path.endsWith('.md')).map((path) => fileFor(path))
+    },
+    /** 官方 API：库内全部文件（图片选择器要用它列候选） */
+    getFiles() {
+      return [...files.keys()].map((path) => fileFor(path))
     },
     /** 官方 API：把库内文件变成可以直接塞给 `img.src` 的地址 */
     getResourcePath(file) {
@@ -5291,6 +5324,177 @@ console.log('')
     noticeDurations.length === noticeLog.length && noticeDurations.every((value) => typeof value === 'number'),
     `${noticeDurations.length} vs ${noticeLog.length}`,
   )
+}
+
+console.log('\n场景 29：自定义地形的图片「从库里选」（不再手打路径）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath: 'Maps/World.canvas' })
+  await settleEvents()
+
+  // 库里放几张图（外加两个非图片文件，用来验证筛选）
+  app.vault.files.set('Assets/forest.png', '<png>')
+  app.vault.files.set('Assets/地形/reef.svg', '<svg>')
+  app.vault.files.set('Assets/notes.txt', '不是图片')
+  app.vault.files.set('Assets/data.json', '{}')
+
+  await plugin.addCustomTerrain({ id: 'marsh', label: '沼泽地', color: '#336655' })
+  await settleEvents()
+
+  /**
+   * 默认工厂要**在注入替身之前**拿到：注入之后再读 `plugin.imagePickerFactory` 拿到的就是替身了
+   * （我第一次就写错了，报错是 "real.getItems is not a function"）。
+   */
+  const defaultPickerFactory = plugin.imagePickerFactory
+
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  const imageRow = () => settingNamed('字形与图片 · 沼泽地')
+  const allNotes = () => collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').map((el) => el.textContent ?? '')
+  const noteText = () => allNotes().at(-1) ?? ''
+  const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
+  const imagePathInSettings = () => plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:marsh')?.imagePath
+
+  openSettings()
+  check('自定义地形那一行有「从库中选择…」按钮', imageRow()?.button !== undefined)
+  check(
+    '手打的输入框还在（两条路都要通：有人就喜欢粘贴路径）',
+    imageRow()?.text !== undefined,
+    JSON.stringify(Object.keys(imageRow() ?? {})),
+  )
+
+  // ---- 注入替身：精确控制"用户选了哪一项" ----
+  /** 替身选择器：记下 options，并按剧本回调 */
+  const makePickerDouble = (choice) => {
+    const calls = []
+    const factory = (_app, options) => {
+      calls.push(options)
+      return {
+        open() {
+          if (choice !== undefined) options.onChoose(choice)
+        },
+      }
+    }
+    return { factory, calls }
+  }
+
+  const good = makePickerDouble('Assets/forest.png')
+  plugin.setImagePickerFactory(good.factory)
+  clearNotices()
+  await imageRow().button.click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('选择器被打开了一次', good.calls.length === 1, String(good.calls.length))
+  check(
+    '列出的候选只含图片（非图片文件不能被列出来，否则会出现"选了却被拒"）',
+    JSON.stringify(good.calls[0]?.files) === JSON.stringify(['Assets/forest.png', 'Assets/地形/reef.svg']),
+    JSON.stringify(good.calls[0]?.files),
+  )
+  check('弹窗标题带上了是哪一条地形（用户要能确认自己在给谁选图）', (good.calls[0]?.title ?? '').includes('沼泽地'), String(good.calls[0]?.title))
+  check('选中的路径写进了设置', imagePathInSettings() === 'Assets/forest.png', String(imagePathInSettings()))
+  check('并且已落盘（不是只改了内存）', persisted()?.customTerrains?.[0]?.imagePath === 'Assets/forest.png', JSON.stringify(persisted()?.customTerrains))
+  const tab = plugin.settingTabs[0]
+  const noteDiag = () => {
+    const live = collectByClass(tab.containerEl, 'fc-settings-note')
+    return JSON.stringify({
+      noteElText: tab.noteEl?.textContent ?? null,
+      noteElStillInDom: live.includes(tab.noteEl),
+      liveNotes: live.map((el) => el.textContent ?? ''),
+    })
+  }
+  check(
+    '就地提示说明了选中的是哪张图',
+    allNotes().some((text) => text.includes('Assets/forest.png')),
+    noteDiag(),
+  )
+  // 重绘后再读（`display()` 会重建整页的 Setting，旧对象是过期的，必须重新取）
+  openSettings()
+  check(
+    '重绘后输入框里也是这条路径（两条路写的是同一份设置）',
+    imageRow()?.text?.value === 'Assets/forest.png',
+    JSON.stringify({
+      hasRow: imageRow() !== undefined,
+      hasText: imageRow()?.text !== undefined,
+      value: imageRow()?.text?.value ?? null,
+      settings: imagePathInSettings(),
+      names: FakeSetting.created.map((setting) => setting.info.name ?? '').slice(0, 8),
+    }),
+  )
+
+  // ---- 替身返回非法路径：必须被拒、给出原因、且不留下坏值 ----
+  const bad = makePickerDouble('Assets/notes.txt')
+  plugin.setImagePickerFactory(bad.factory)
+  clearNotices()
+  openSettings()
+  await imageRow().button.click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('非法选择被拒（设置里仍是上一张合法图片）', imagePathInSettings() === 'Assets/forest.png', String(imagePathInSettings()))
+  check('并给出可读原因（说的是支持哪些格式）', noteText().includes('只支持'), noteText())
+
+  // ---- 库里没有图片：给可读提示，不弹空列表 ----
+  const empty = makePickerDouble('Assets/forest.png')
+  plugin.setImagePickerFactory(empty.factory)
+  app.vault.files.delete('Assets/forest.png')
+  app.vault.files.delete('Assets/地形/reef.svg')
+  clearNotices()
+  openSettings()
+  await imageRow().button.click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('库里没有图片时不开空弹窗', empty.calls.length === 0, String(empty.calls.length))
+  const hint = noticeLog.at(-1) ?? ''
+  check('而是给一条可读提示（说清为什么没有、该做什么）', hint.includes('没有找到图片') && hint.includes('png'), hint)
+  check('提示时长在上界内（别又变成十几秒的横幅）', (noticeDurations.at(-1) ?? 0) <= 6000, String(noticeDurations.at(-1)))
+
+  // ---- 真实弹窗自己的逻辑（模糊搜索是 Obsidian 的，这里只验我们写的那三个方法）----
+  app.vault.files.set('Assets/forest.png', '<png>')
+  app.vault.files.set('Assets/地形/reef.svg', '<svg>')
+  const real = defaultPickerFactory(app, {
+    files: app.vault.getFiles().map((file) => file.path),
+    title: '选择图片',
+    onChoose: () => {},
+  })
+  check(
+    '真实弹窗的清单：只含图片且顺序确定',
+    JSON.stringify(real.getItems()) === JSON.stringify(['Assets/forest.png', 'Assets/地形/reef.svg']),
+    JSON.stringify(real.getItems()),
+  )
+  check(
+    '真实弹窗的条目文字带上所在文件夹（同名文件也能分辨）',
+    real.getItemText('Assets/地形/reef.svg') === 'reef.svg · Assets/地形',
+    real.getItemText('Assets/地形/reef.svg'),
+  )
+  check('真实弹窗把占位提示交给搜索框', real.placeholder === '选择图片', String(real.placeholder))
+  let chosen = null
+  const realForChoose = defaultPickerFactory(app, {
+    files: ['Assets/forest.png'],
+    onChoose: (path) => {
+      chosen = path
+    },
+  })
+  realForChoose.onChooseItem('Assets/forest.png')
+  check('真实弹窗选中后把路径交给回调', chosen === 'Assets/forest.png', String(chosen))
+
+  // ---- 手打这条路仍然能用 ----
+  plugin.setImagePickerFactory((_app, options) => ({ open: () => options.onChoose('unused') }))
+  openSettings()
+  await imageRow().text.type('Assets/手动粘贴.PNG')
+  check(
+    '手打路径（含大写扩展名）照样写进设置',
+    imagePathInSettings() === 'Assets/手动粘贴.PNG',
+    String(imagePathInSettings()),
+  )
+  openSettings()
+  await imageRow().text.type('http://example.com/a.png')
+  check('手打网址仍被拒（校验没有因为加了选择器而放松）', noteText().includes('只支持') || noteText().includes('网址'), noteText())
+  check('被拒的输入不会写进设置', imagePathInSettings() === 'Assets/手动粘贴.PNG', String(imagePathInSettings()))
+
+  plugin.onunload()
 }
 
 if (failures === 0) {

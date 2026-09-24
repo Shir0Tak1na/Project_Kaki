@@ -324,6 +324,39 @@ export class CartographerSettingTab extends PluginSettingTab {
               this.setNoteText('')
             }),
         )
+        .addButton((button) =>
+          button.setButtonText('从库中选择…').onClick(() => {
+            // 手打输入框保留在上面：有人就是习惯粘贴路径，两条路都通。
+            // 选择器只列**校验会接受的**图片（白名单同源，见 assetFiles.ts），
+            // 所以这里再校验一次只是兜底 —— 真出现不合法，说明两处白名单分叉了，必须说出来。
+            this.plugin.pickImageFile({
+              title: `选择「${terrain.label}」的图片`,
+              onChoose: (path) => {
+                const check = checkTerrainImagePath(path)
+                if (check.problem.length > 0) {
+                  this.setNoteText(`图片路径不可用：${check.problem}`)
+                  return
+                }
+                void this.plugin
+                  .updateCustomTerrain(index, { imagePath: check.path })
+                  .then(() => {
+                    // 顺序要紧：`display()` 会重建提示行，所以提示必须写在重绘**之后**，
+                    // 否则那句话刚写上去就被冲掉了（用户只会看到"点了没反应"）。
+                    this.display()
+                    this.setNoteText(`已选择图片：${check.path}`)
+                  })
+                  .catch((error: unknown) => {
+                    // 不吞异常：重绘失败时用户看到的是"点了没反应"，而真相只有控制台知道。
+                    // 这条 catch 是**实测逼出来的** —— 冒烟里提示行为空，正是因为它被 `void` 吞掉了。
+                    console.error('[project-kaki] 选择图片后刷新设置页失败', error)
+                    this.setNoteText(
+                      `图片已设置，但设置页刷新失败：${error instanceof Error ? error.message : String(error)}（重新打开设置页即可看到新值）`,
+                    )
+                  })
+              },
+            })
+          }),
+        )
     })
 
     // ---- 新建 ----

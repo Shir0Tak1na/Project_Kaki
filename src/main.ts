@@ -29,6 +29,7 @@ import { buildMapExportSvg } from './base/mapPreview.ts'
 import { exportBasePathFor, rasterizeSvgToPng, uniqueExportPath, type PngRasterDeps } from './base/pngExport.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
 import { ReportModal, type ReportModalFactory, type ReportModalOptions } from './ui/ReportModal.ts'
+import { AssetSuggestModal, type AssetPickerOptions, type ImagePickerFactory } from './ui/AssetSuggestModal.ts'
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type PluginAction } from './ui/MapPanel.ts'
 import {
   CartographerSettingTab,
@@ -52,6 +53,7 @@ import {
   type LayerKey,
 } from './render/layerVisibility.ts'
 import { legendLines } from './render/legend.ts'
+import { emptyImageListHint, listImagePaths } from './base/assetFiles.ts'
 import {
   MAX_CUSTOM_TERRAINS,
   isBuiltinTerrain,
@@ -111,6 +113,14 @@ export default class ProjectKakiPlugin extends Plugin {
    * 测试里替换成"只记下 options"的替身，就能直接断言报告正文，而不必去读界面。
    */
   private reportModalFactory: ReportModalFactory = (app, options) => new ReportModal(app, options)
+  /**
+   * 图片选择器的工厂：默认用真实的 `AssetSuggestModal`，可被替换（自动化测试）。
+   *
+   * 为什么必须是**惰性**的（箭头函数里才 `new`）：假 obsidian 里没有 `FuzzySuggestModal`
+   * 这个基类，而"类定义"在模块加载时就会求值 —— 直接 `new` 出去或者提前构造，
+   * 冒烟会在加载阶段就炸，且报错位置与真实原因（缺基类）毫不相干。
+   */
+  private imagePickerFactory: ImagePickerFactory = (app, options) => new AssetSuggestModal(app, options)
   /**
    * PNG 光栅化的环境依赖（仅自动化测试注入；`null` = 用真实实现）。
    *
@@ -851,6 +861,47 @@ export default class ProjectKakiPlugin extends Plugin {
    */
   setReportModalFactory(factory: ReportModalFactory): void {
     this.reportModalFactory = factory
+  }
+
+  /**
+   * 替换图片选择器（自动化测试用；不改动则为真实的库内文件选择弹窗）。
+   *
+   * 同 `setReportModalFactory`：替换后仍可读回 `imagePickerFactory` 拿到默认实现，
+   * 于是冒烟既能精确控制"用户选了哪一项"，又能顺手验证真实弹窗自己的清单与标签。
+   */
+  setImagePickerFactory(factory: ImagePickerFactory): void {
+    this.imagePickerFactory = factory
+  }
+
+  /**
+   * 让用户从库里挑一张图片；选中后交给 `onChoose`（**路径校验由调用方或本方法兜底**）。
+   *
+   * 三条退化路径都给了明确反馈，而不是静默什么都不做：
+   * - 库里没有可用图片 → 一条可读提示（告诉他支持哪些格式、先把图放进库），**不弹空列表**；
+   * - 弹窗构造失败（例如基类缺失）→ 控制台留错 + 一条提示；
+   * - 用户取消 → 什么都不做（这是正常操作，不该报错）。
+   */
+  pickImageFile(options: { title?: string; onChoose: (path: string) => void }): void {
+    const paths = this.app.vault.getFiles().map((file) => file.path)
+    const images = listImagePaths(paths)
+    if (images.length === 0) {
+      new Notice(emptyImageListHint(), NOTICE_MAX_MS)
+      return
+    }
+    const pickerOptions: AssetPickerOptions = {
+      files: images,
+      ...(options.title !== undefined ? { title: options.title } : {}),
+      onChoose: options.onChoose,
+    }
+    try {
+      this.imagePickerFactory(this.app, pickerOptions).open()
+    } catch (error) {
+      console.error('[project-kaki] 打开图片选择器失败', error)
+      new Notice(
+        `打开图片选择器失败：${error instanceof Error ? error.message : String(error)}\n可以直接把库内路径填进输入框。`,
+        NOTICE_MAX_MS,
+      )
+    }
   }
 
   // ------------------------------------------------------------ 报告面板
