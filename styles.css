@@ -530,6 +530,39 @@
   color: var(--text-warning);
 }
 
+/* ---- 导入定义文件的确认对话框 ---- */
+
+/* 来源文件（用户要能确认"我选的是哪一份"） */
+.fc-import-source {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  word-break: break-word;
+}
+
+/*
+ * 正文：逐条列出的多行文本（新增几条、哪些被保留、哪些不合法及原因）。
+ *
+ * `white-space: pre-wrap` 是必须的：换行与缩进要保留下来，否则"一条一行"的清单
+ * 会被折成一整段，用户根本读不出跳过了几条。行太长时按词换行，不出现横向滚动条
+ * （对话框宽度在窄窗口里是有限的）。样式与报告面板的正文区保持同一类观感。
+ */
+.fc-import-plan {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  max-height: 52vh;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ---- 地图面板（右侧边栏视图） ---- */
 
 /* 设置页标题下的一行译名（名字只在一处出现，别在每个标题里都写两遍） */

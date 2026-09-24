@@ -87,3 +87,40 @@ export function listImagePaths(paths: unknown): string[] {
 export function emptyImageListHint(): string {
   return `库里没有找到图片文件（支持 ${IMAGE_EXTENSIONS.join(' / ')}）。先把图片拖进库（例如放进 Assets/），再回来选。`
 }
+
+/**
+ * 定义文件的扩展名（唯一白名单）。
+ *
+ * 与图片那套一样：**列出来的必须都是校验会接受的**。定义文件就是 JSON，
+ * 这里只认 `.json`，于是"选文件"这一步不需要用户理解格式。
+ */
+export const BUNDLE_EXTENSIONS: readonly string[] = ['json']
+
+/** 是不是一份定义文件（按扩展名判断，大小写不敏感） */
+export function isBundlePath(path: unknown): boolean {
+  const extension = imageExtensionOf(path)
+  return extension.length > 0 && BUNDLE_EXTENSIONS.includes(extension)
+}
+
+/**
+ * 从"一串库内路径"里筛出定义文件，去重并确定排序。
+ *
+ * 排序规则与 `listImagePaths` 一致（码点比较，不用 `localeCompare`）：
+ * 同一份库在不同机器上必须排出同样的顺序。
+ */
+export function listBundlePaths(paths: unknown): string[] {
+  if (!Array.isArray(paths)) return []
+  const unique = new Set<string>()
+  for (const item of paths) {
+    if (typeof item !== 'string') continue
+    const text = item.trim().replace(/\\/g, '/')
+    if (!isBundlePath(text)) continue
+    unique.add(text)
+  }
+  return [...unique].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+/** 库里没有定义文件时的可读提示（与 `emptyImageListHint` 同一套写法） */
+export function emptyBundleListHint(): string {
+  return `库里没有找到定义文件（${BUNDLE_EXTENSIONS.map((extension) => `.${extension}`).join(' / ')}）。先用「导出定义文件…」生成一份，或者把别人给你的定义文件放进库。`
+}

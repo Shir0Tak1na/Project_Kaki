@@ -57,6 +57,7 @@ import {
   MAX_CUSTOM_PATH_TYPES,
   applyPathTypePatch,
   customPathTypeEntries,
+  normalizePathTypeEntries,
   pathColorsFromEntries,
   resetPathTypeStyles,
   validateCustomPathTypeInput,
@@ -70,7 +71,7 @@ import {
   type LayerKey,
 } from './render/layerVisibility.ts'
 import { legendLines } from './render/legend.ts'
-import { emptyImageListHint, listImagePaths } from './base/assetFiles.ts'
+import { emptyBundleListHint, emptyImageListHint, listBundlePaths, listImagePaths } from './base/assetFiles.ts'
 import {
   MAX_CUSTOM_TERRAINS,
   isBuiltinTerrain,
@@ -79,6 +80,21 @@ import {
   type CustomTerrain,
 } from './render/terrainCatalog.ts'
 import { MAX_CUSTOM_MARKERS, validateCustomMarkerInput, type CustomMarker } from './render/markerCatalog.ts'
+import {
+  buildResourceBundle,
+  bundleFileName,
+  describeImportPlan,
+  describeImportResult,
+  parseResourceBundle,
+  planBundleImport,
+  serializeResourceBundle,
+  type BundleImportPlan,
+} from './render/resourceBundle.ts'
+import {
+  ImportBundleModal,
+  type ImportBundleModalFactory,
+  type ImportBundleOutcome,
+} from './ui/ImportBundleModal.ts'
 import { TextPromptModal, type TextPromptOptions } from './ui/TextPromptModal.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
@@ -153,6 +169,19 @@ export default class ProjectKakiPlugin extends Plugin {
    * 可以完全绕开假 DOM，直接断言"用户选了哪个范围、哪种格式"之后发生了什么。
    */
   private exportModalFactory: ExportModalFactory = (app, options) => new ExportModal(app, options)
+  /**
+   * 导入定义文件对话框工厂（仅自动化测试注入；默认就是真实对话框）。
+   *
+   * 与导出对话框同一套路（惰性默认工厂）：冒烟要断言的是"这份文件导入之后设置变成了什么"，
+   * 而不是去模拟对话框里的点击，所以换掉工厂就能直接驱动它拿到的计划正文。
+   */
+  private importModalFactory: ImportBundleModalFactory = (app, options) => new ImportBundleModal(app, options)
+  /**
+   * 设置页实例：导入之后要让已经打开的设置页也跟着刷新（否则用户会看到一份过时的列表）。
+   *
+   * 保留引用是必须的：`addSettingTab` 不返回实例，而 Obsidian 只在用户打开设置时才调 `display()`。
+   */
+  private settingTab: CartographerSettingTab | null = null
   /** 不能用 `settings` 这个名字：Obsidian 的 Plugin 基类已经有同名成员 */
   private pluginSettings: CartographerSettings = normalizeSettings(null)
   /** Base 自定义视图是否可用（需要 Obsidian 1.10.0+） */
@@ -191,7 +220,8 @@ export default class ProjectKakiPlugin extends Plugin {
       },
     })
 
-    this.addSettingTab(new CartographerSettingTab(this.app, this))
+    this.settingTab = new CartographerSettingTab(this.app, this)
+    this.addSettingTab(this.settingTab)
 
     // 地图面板：右侧边栏视图 + 侧边栏图标（省掉每次都按 Ctrl+P）
     this.registerPanel()
@@ -377,6 +407,25 @@ export default class ProjectKakiPlugin extends Plugin {
         // 所以这里的描述要把这层关系讲清楚，否则用户会以为两条命令各画各的。
         describe: () => (hasLayer() ? '与 SVG 同源，转成位图（等于「导出地图…」选全部内容 + PNG）' : '需要先启用地图层'),
         run: () => this.exportActiveMapPng(),
+      },
+      {
+        id: 'export-resource-bundle',
+        // 名字里点明"包含哪些东西"：用户在命令面板里搜的是"我那些自定义地形怎么带走"
+        name: '导出定义文件…（自定义地形/标记/路径类型）',
+        icon: 'file-down',
+        group: 'file',
+        // 刻意**不给** `available`：这两件事只依赖插件设置，不需要地图层、也不需要打开 Canvas
+        // （其余 file 组动作都带 `available: hasLayer`，因为那些真的要有地图才能做）
+        describe: () => '把设置里的自定义地形、标记与路径类型打包成一份 JSON 写进库根目录',
+        run: () => this.exportResourceBundle(),
+      },
+      {
+        id: 'import-resource-bundle',
+        name: '导入定义文件…',
+        icon: 'file-up',
+        group: 'file',
+        describe: () => '从库里选一份定义文件；只做补充 —— 同 ID 保留你现有的定义，且不删除任何东西',
+        run: () => this.importResourceBundle(),
       },
       {
         id: 'diagnose-canvas',
@@ -1151,25 +1200,216 @@ export default class ProjectKakiPlugin extends Plugin {
    * - 用户取消 → 什么都不做（这是正常操作，不该报错）。
    */
   pickImageFile(options: { title?: string; onChoose: (path: string) => void }): void {
-    const paths = this.app.vault.getFiles().map((file) => file.path)
-    const images = listImagePaths(paths)
-    if (images.length === 0) {
-      new Notice(emptyImageListHint(), NOTICE_MAX_MS)
+    this.openAssetPicker({
+      ...(options.title !== undefined ? { title: options.title } : {}),
+      files: listImagePaths(this.app.vault.getFiles().map((file) => file.path)),
+      emptyHint: emptyImageListHint(),
+      onChoose: options.onChoose,
+    })
+  }
+
+  /**
+   * 打开"从库里选一个文件"的弹窗 —— **选文件这件事的唯一实现**。
+   *
+   * 图片选择器与定义文件导入都走这里，于是三条退化路径（库里没有候选、弹窗构造失败、
+   * 用户取消）的文案与行为只写了一遍。候选清单由调用方给（它才知道该列什么），
+   * 本方法只负责"没得选时说清原因、打不开时给退路、取消时什么都不做"。
+   */
+  private openAssetPicker(options: {
+    title?: string
+    files: string[]
+    emptyHint: string
+    onChoose: (path: string) => void
+  }): void {
+    if (options.files.length === 0) {
+      new Notice(options.emptyHint, NOTICE_MAX_MS)
       return
     }
     const pickerOptions: AssetPickerOptions = {
-      files: images,
+      files: options.files,
       ...(options.title !== undefined ? { title: options.title } : {}),
       onChoose: options.onChoose,
     }
     try {
       this.imagePickerFactory(this.app, pickerOptions).open()
     } catch (error) {
-      console.error('[project-kaki] 打开图片选择器失败', error)
+      console.error('[project-kaki] 打开文件选择器失败', error)
       new Notice(
-        `打开图片选择器失败：${error instanceof Error ? error.message : String(error)}\n可以直接把库内路径填进输入框。`,
+        `打开文件选择器失败：${error instanceof Error ? error.message : String(error)}`,
         NOTICE_MAX_MS,
       )
+    }
+  }
+
+  // ------------------------------------------------- 定义文件（导入 / 导出）
+
+  /**
+   * 导出定义文件：把设置里的自定义地形 / 标记 / 路径类型打包成一份 JSON 写进库里。
+   *
+   * 三条刻意的选择：
+   * 1. **写到库根目录**：这是插件级资源（与某一张地图无关），而且这两个动作用不着先打开地图 ——
+   *    放到"地图文件旁边"就会变成"没开地图就没法导出"。文件名与最终路径都进提示，
+   *    用户不必去猜它落在哪。
+   * 2. **重名绝不覆盖**：与 SVG/PNG/报告共用 `uniqueExportPath`（`-2`、`-3`……），
+   *    覆盖等于悄悄丢掉上一份备份。
+   * 3. **没有可导出的东西时干脆不写文件**：写出一份空文件只会让用户以为"导出成功了"，
+   *    然后拿着一个什么都没有的文件去导入。
+   */
+  private async exportResourceBundle(): Promise<void> {
+    const bundle = buildResourceBundle(
+      {
+        terrains: this.pluginSettings.customTerrains,
+        markers: this.pluginSettings.customMarkers,
+        pathTypes: this.pluginSettings.pathTypes,
+      },
+      { generator: `project-kaki ${this.manifest.version}` },
+    )
+    const counts = `地形 ${bundle.terrains.length} · 标记 ${bundle.markers.length} · 路径类型 ${bundle.pathTypes.length}`
+    if (bundle.terrains.length + bundle.markers.length + bundle.pathTypes.length === 0) {
+      new Notice('设置里还没有自定义地形、标记或路径类型，没有可导出的定义。', NOTICE_MAX_MS)
+      return
+    }
+
+    const basePath = bundleFileName().replace(/\.json$/i, '')
+    const path = uniqueExportPath(
+      basePath,
+      '.json',
+      (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null,
+    )
+    try {
+      const created = await this.app.vault.create(path, serializeResourceBundle(bundle))
+      new Notice(`已导出定义文件：${created.path}\n（${counts}）`, NOTICE_MAX_MS)
+    } catch (error) {
+      console.error('[project-kaki] 导出定义文件失败', error)
+      new Notice(`导出定义文件失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
+    }
+  }
+
+  /**
+   * 导入定义文件的入口：先选文件（只列 `.json`），再走"解析 → 计划 → 确认对话框"。
+   *
+   * 选择器复用图片那套（`AssetSuggestModal` + 可注入工厂）：**选文件这件事只有一份实现**，
+   * 于是"库里一个候选都没有"这类退化路径的文案与行为也是同一份。
+   */
+  private importResourceBundle(): void {
+    const files = this.app.vault.getFiles()
+    const candidates = listBundlePaths(files.map((file) => file.path))
+    this.openAssetPicker({
+      title: '导入定义文件',
+      files: candidates,
+      emptyHint: emptyBundleListHint(),
+      onChoose: (path) => {
+        void this.applyBundleFromPath(path)
+      },
+    })
+  }
+
+  /** 读一份定义文件并打开确认对话框（**这一步不改任何设置**） */
+  private async applyBundleFromPath(path: string): Promise<void> {
+    const file = this.app.vault.getFiles().find((candidate) => candidate.path === path)
+    if (!file) {
+      new Notice(`找不到文件：${path}`, NOTICE_MAX_MS)
+      return
+    }
+    let text = ''
+    try {
+      text = await this.app.vault.read(file)
+    } catch (error) {
+      console.error('[project-kaki] 读取定义文件失败', error)
+      new Notice(`读取失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
+      return
+    }
+
+    const parsed = parseResourceBundle(text)
+    if (!parsed.ok) {
+      // 单行、可读、说明"为什么"：不能只说"导入失败"（用户无从下手）
+      new Notice(`无法导入：${parsed.reason}`, NOTICE_MAX_MS)
+      return
+    }
+
+    const plan = planBundleImport(
+      {
+        terrains: this.pluginSettings.customTerrains,
+        markers: this.pluginSettings.customMarkers,
+        pathTypes: this.pluginSettings.pathTypes,
+      },
+      parsed.bundle,
+      // 解析阶段发现的"条目进来了但有一处被回退"（例如字形名本机不认识）一并带进对话框
+      { notes: parsed.notes },
+    )
+    try {
+      this.importModalFactory(this.app, {
+        source: path,
+        planText: describeImportPlan(plan),
+        // 没有可新增的条目时按钮是灰的：正文已经解释了"为什么一条都进不来"
+        //（同 ID 冲突、全部不合法……），点不动比点了报错好
+        canImport: plan.addedCount > 0,
+        onConfirm: () => this.commitBundleImport(plan),
+      }).open()
+    } catch (error) {
+      console.error('[project-kaki] 打开导入对话框失败', error)
+      new Notice('无法打开导入确认对话框，本次没有改动任何设置。', NOTICE_MAX_MS)
+    }
+  }
+
+  /**
+   * 真正写入设置。
+   *
+   * 顺序是"**先落盘、成功后才改内存**"（与 `setLayerVisible` 的"先广播后落盘"不同，
+   * 因为这里没有"必须立刻看到"的画面）：落盘失败时内存保持原样，用户看到的就是
+   * "导入失败：<原因>"，而不是"界面变了但重启后又变回去"。
+   *
+   * 计划是在打开对话框时算好的：这里只把它加上去。因为 `planBundleImport` 已经保证
+   * 新增的 ID 与现有条目都不冲突，所以直接追加即可（同 ID 一律保留现有 —— 见 resourceBundle）。
+   */
+  private async commitBundleImport(plan: BundleImportPlan): Promise<ImportBundleOutcome> {
+    const current = this.pluginSettings
+    const pathTypes = normalizePathTypeEntries([
+      ...current.pathTypes,
+      ...plan.pathTypes.added,
+    ])
+    const next: CartographerSettings = {
+      ...current,
+      customTerrains: [...current.customTerrains, ...plan.terrains.added],
+      customMarkers: [...current.customMarkers, ...plan.markers.added],
+      pathTypes,
+      // 旧字段跟着目录走（它不是渲染依据，但两处自相矛盾会让人看不懂 data.json）
+      pathColors: pathColorsFromEntries(pathTypes),
+    }
+
+    try {
+      await this.saveData(next)
+    } catch (error) {
+      console.error('[project-kaki] 保存导入结果失败', error)
+      return {
+        ok: false,
+        reason: `写入插件设置失败：${error instanceof Error ? error.message : String(error)}（设置未改动）`,
+      }
+    }
+    this.pluginSettings = next
+
+    // 工具条 / 图例 / 画布：一次调用全部刷新（与设置页里改定义走的是同一条路）
+    this.layers?.setStylePalette()
+    this.refreshPanel()
+    this.refreshSettingsTab()
+    new Notice(describeImportResult(plan), NOTICE_MAX_MS)
+    return { ok: true }
+  }
+
+  /**
+   * 刷新已经打开的设置页。
+   *
+   * 尽力而为：`display()` 在设置页没打开时也不该出错（它只是重建容器内容），
+   * 但真实环境里容器状态我们无法假设，所以包一层 try/catch —— 失败也不该让导入本身失败
+   *（关掉设置页再打开就能看到新定义，数据已经写进去了）。
+   */
+  private refreshSettingsTab(): void {
+    const tab = this.settingTab
+    if (!tab) return
+    try {
+      tab.display()
+    } catch (error) {
+      console.warn('[project-kaki] 刷新设置页失败（关闭设置页再打开即可看到新定义）', error)
     }
   }
 
@@ -1232,6 +1472,16 @@ export default class ProjectKakiPlugin extends Plugin {
    */
   setExportModalFactory(factory: ExportModalFactory | null): void {
     this.exportModalFactory = factory ?? ((app, options) => new ExportModal(app, options))
+  }
+
+  /**
+   * 替换导入对话框工厂（自动化测试用；传 `null` 恢复真实对话框）。
+   *
+   * 与导出对话框同一套路：测试要断言的是"这份文件导入之后设置变成了什么、跳过的是哪几条"，
+   * 而**不是**对话框里的像素，所以换掉工厂、直接驱动它拿到的计划正文即可。
+   */
+  setImportModalFactory(factory: ImportBundleModalFactory | null): void {
+    this.importModalFactory = factory ?? ((app, options) => new ImportBundleModal(app, options))
   }
 
   // ------------------------------------------------------------ 地图层

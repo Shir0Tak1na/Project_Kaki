@@ -893,13 +893,20 @@ class FakeSetting {
      * 按钮桩要覆盖真实 `ButtonComponent` 里**插件实际用到的**那些链式方法。
      * 缺一个（例如 `setCta`）就会在 `onOpen` 里抛错 —— 而这类错误只在
      * "真的把对话框打开一次"时才会出现，所以过去一直没被发现。
+     *
+     * `buttonEl` 同理（真实 `ButtonComponent` 一定有它）：导入对话框会往它身上挂
+     * `dataset.fcImportRole` 作为稳定标记。桩里缺这个成员不会报错，只会让标记无处可挂 ——
+     * 断言于是永远找不到按钮，失败信息看起来像"界面没渲染"，其实是假 DOM 少了一个成员。
      */
+    const buttonEl = makeEl({ tagName: 'button', className: 'mod-cta' })
     const button = {
       text: '',
       disabled: false,
       cta: false,
+      buttonEl,
       setButtonText(value) {
         this.text = value
+        buttonEl.textContent = value
         return this
       },
       setCta() {
@@ -1747,6 +1754,28 @@ function captureExportModals(plugin) {
     opened,
     last: () => opened.at(-1),
     restore: () => plugin.setExportModalFactory(defaultFactory),
+    defaultFactory,
+  }
+}
+
+/**
+ * 捕获「导入定义文件」对话框收到的选项（与 `captureExportModals` 同一套路）。
+ *
+ * 为什么要捕获：对话框里的正文（新增几条、跳过哪些、哪一段文件里没有）全是 `main.ts`
+ * 现算出来传进去的，而那才是我们写的逻辑。把**默认工厂**一并返回，就能用同一份选项
+ * 造一个真对话框，用假 DOM 驱动它的按钮。
+ */
+function captureImportModals(plugin) {
+  const opened = []
+  const defaultFactory = plugin.importModalFactory
+  plugin.setImportModalFactory((_app, options) => {
+    opened.push(options)
+    return { open() {} }
+  })
+  return {
+    opened,
+    last: () => opened.at(-1),
+    restore: () => plugin.setImportModalFactory(defaultFactory),
     defaultFactory,
   }
 }
@@ -7463,6 +7492,332 @@ console.log('\n场景 35：旧 data.json 迁移到路径类型目录（用户没
   await plugin.onload()
   check('迁移是幂等的：第二次加载结果完全相同', JSON.stringify(plugin.getSettings()) === once)
   check('目录里内置 4 种齐全', plugin.getSettings().pathTypes.length === 4, JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)))
+  plugin.onunload()
+}
+
+console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命令 → 库内文件 → 确认对话框 → 设置）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const commandById = (id) => plugin.commands.find((command) => command.id === id)
+  const panelAction = (id) => plugin.getPanelActions().find((action) => action.id === id)
+  const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
+  const jsonFiles = () => [...app.vault.files.keys()].filter((key) => key.endsWith('.json'))
+  const fileText = (path) => app.vault.files.get(path)
+  const wait = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  /** 替身选择器：记下 options，并按剧本回调（与场景 29 同一套路） */
+  const makePickerDouble = (choice) => {
+    const calls = []
+    const factory = (_app, options) => {
+      calls.push(options)
+      return {
+        open() {
+          if (choice !== undefined) options.onChoose(choice)
+        },
+      }
+    }
+    return { factory, calls }
+  }
+
+  // ---- 入口：一个动作同时变成面板按钮与命令（不许两份实现） ----
+  check('注册了「导出定义文件…」命令', commandById('export-resource-bundle') !== undefined)
+  check('注册了「导入定义文件…」命令', commandById('import-resource-bundle') !== undefined)
+  check(
+    '两个动作都在地图面板的「文件与导出」组里（面板按钮与命令来自同一份定义）',
+    panelAction('export-resource-bundle')?.group === 'file' && panelAction('import-resource-bundle')?.group === 'file',
+    `${panelAction('export-resource-bundle')?.group} / ${panelAction('import-resource-bundle')?.group}`,
+  )
+  check(
+    '这两个动作不受"必须先启用地图层"的限制（它们只依赖设置，不需要打开 Canvas）',
+    panelAction('export-resource-bundle')?.available === undefined &&
+      panelAction('import-resource-bundle')?.available === undefined,
+    'available 不该存在',
+  )
+
+  // ---- 一条自定义定义都没有时：不产出空文件（写出空文件会让人以为导出成功了） ----
+  clearNotices()
+  await runCommand(plugin, 'export-resource-bundle')
+  await wait()
+  check('没有可导出的定义时不产出文件', jsonFiles().length === 0, jsonFiles().join(','))
+  check('并且给出一句可读提示', noticeLog.some((line) => line.includes('还没有自定义')), noticeLog.join(' | '))
+
+  // ---- 造三条真实的自定义定义（走设置接口，与用户手点出来的一样） ----
+  await plugin.addCustomTerrain({ id: 'swamp', label: '沼泽地', color: '#336655', glyph: 'forest' })
+  await plugin.addCustomMarker({ id: 'lighthouse', label: '灯塔', icon: 'port', imagePath: 'Assets/lighthouse.png', mode: 'image' })
+  await plugin.addCustomPathType({ id: 'highway', label: '官道', color: '#c9a227', width: 9, dash: [16, 6] })
+
+  // ---- 导出 ----
+  clearNotices()
+  await runCommand(plugin, 'export-resource-bundle')
+  await wait()
+  const exported = jsonFiles()
+  check(
+    '导出到库根目录，文件名带日期（只用 ASCII）',
+    exported.length === 1 && /^project-kaki-definitions-\d{8}-\d{4}\.json$/.test(exported[0]),
+    exported.join(','),
+  )
+  const bundle = JSON.parse(fileText(exported[0]))
+  check('文件里 version 是 2', bundle.version === 2, String(bundle.version))
+  check(
+    '三段齐全（terrains / markers / pathTypes）',
+    Array.isArray(bundle.terrains) && Array.isArray(bundle.markers) && Array.isArray(bundle.pathTypes),
+    Object.keys(bundle).join(','),
+  )
+  check('自定义地形进了文件', bundle.terrains.map((item) => item.id).join(',') === 'custom:swamp', JSON.stringify(bundle.terrains))
+  check(
+    '标记的两套视觉都带走（切模式不会丢配置）',
+    bundle.markers.length === 1 &&
+      bundle.markers[0].icon === 'port' &&
+      bundle.markers[0].imagePath === 'Assets/lighthouse.png' &&
+      bundle.markers[0].mode === 'image',
+    JSON.stringify(bundle.markers),
+  )
+  check(
+    '内置 4 种路径类型不进文件（带过去只会得到一串"同 ID 已存在"）',
+    bundle.pathTypes.length === 1 && bundle.pathTypes[0].id === 'custom:highway',
+    JSON.stringify(bundle.pathTypes.map((entry) => entry.id)),
+  )
+  check(
+    '路径类型的参数完整（颜色/线宽/虚线/端点/连接）',
+    bundle.pathTypes[0].params.color === '#c9a227' &&
+      bundle.pathTypes[0].params.width === 9 &&
+      JSON.stringify(bundle.pathTypes[0].params.dash) === JSON.stringify([16, 6]) &&
+      typeof bundle.pathTypes[0].params.cap === 'string' &&
+      typeof bundle.pathTypes[0].params.join === 'string',
+    JSON.stringify(bundle.pathTypes[0].params),
+  )
+  check('提示里给出了落盘路径（用户不必去猜文件在哪）', noticeLog.some((line) => line.includes(exported[0])), noticeLog.join(' | '))
+  check('提示时长都在 6000ms 以内', Math.max(...noticeDurations) <= 6000, String(Math.max(...noticeDurations)))
+
+  // ---- 重名不覆盖：再导一次应当另起名字 ----
+  await runCommand(plugin, 'export-resource-bundle')
+  await wait()
+  const exported2 = jsonFiles()
+  check(
+    '同名时另起名字（-2），绝不覆盖上一份',
+    exported2.length === 2 && exported2.some((path) => path.includes('-2.json')) && fileText(exported[0]) !== undefined,
+    exported2.join(','),
+  )
+
+  // ---- 选择器：只列定义文件 ----
+  app.vault.files.set('Notes/readme.md', '# 笔记')
+  const capture = captureImportModals(plugin)
+  const picker = makePickerDouble(exported[0])
+  plugin.setImagePickerFactory(picker.factory)
+  clearNotices()
+  await runCommand(plugin, 'import-resource-bundle')
+  await wait()
+  check(
+    '选择器只列 .json（列出来的必须都是校验会接受的）',
+    JSON.stringify(picker.calls[0]?.files) === JSON.stringify([...exported2].sort()),
+    JSON.stringify(picker.calls[0]?.files),
+  )
+  check('弹窗标题是「导入定义文件」', picker.calls[0]?.title === '导入定义文件', String(picker.calls[0]?.title))
+
+  // ---- 幂等：刚导出的文件立刻再导入 = 0 新增 ----
+  const idempotent = capture.last()
+  check('打开的是导入确认对话框', idempotent !== undefined)
+  check('对话框里写明了来源文件', idempotent?.source === exported[0], String(idempotent?.source))
+  check(
+    '刚导出的文件再导入：一条都不新增（幂等）',
+    /没有可新增的定义/.test(idempotent?.planText ?? ''),
+    String(idempotent?.planText),
+  )
+  check(
+    '同 ID 冲突逐条说明"保留现有的"',
+    /保留现有的/.test(idempotent?.planText ?? ''),
+    String(idempotent?.planText),
+  )
+  check('没有可新增条目时确认按钮是灰的（点不动比点了报错好）', idempotent?.canImport === false, String(idempotent?.canImport))
+
+  // ---- 真对话框：假 DOM 里断言正文与按钮标记 ----
+  const realFactory = capture.defaultFactory
+  /**
+   * 造一个真对话框来驱动。
+   *
+   * `options` 可能是 `undefined`（实现坏掉时"命令根本没打开对话框"）：这时**不要**去构造
+   * 真对话框 —— 那会在 `onOpen` 里抛 TypeError 把整个场景打断，剩下的断言一条都不会跑，
+   * 看起来像"测试脚本坏了"而不是"功能坏了"（鉴别力验证时当场踩到过）。
+   */
+  const openRealImportModal = (modalOptions) => {
+    if (modalOptions === undefined) return null
+    FakeSetting.created.length = 0
+    const modal = realFactory(app, modalOptions)
+    modal.open()
+    return modal
+  }
+  /** 按钮桩 → 按 `dataset.fcImportRole` 取（稳定标记，不怕改文案） */
+  const buttonByRole = (role) =>
+    FakeSetting.created
+      .flatMap((setting) => setting.buttons ?? [])
+      .find((button) => button.buttonEl?.dataset?.fcImportRole === role)
+  const idleModal = openRealImportModal(idempotent)
+  check(
+    '正文用 <pre> 呈现（多行原因要保留换行）',
+    (collectByClass(idleModal?.contentEl, 'fc-import-plan')[0]?.textContent ?? '').includes('保留现有的'),
+    String(collectByClass(idleModal?.contentEl, 'fc-import-plan')[0]?.textContent),
+  )
+  check('来源文件也显示在正文区之外（用户能确认自己选的是哪一份）', (collectByClass(idleModal?.contentEl, 'fc-import-source')[0]?.textContent ?? '').includes(exported[0]))
+  check('确认按钮带稳定标记（断言不怕以后改文案）', buttonByRole('confirm') !== undefined)
+  check('取消按钮带稳定标记', buttonByRole('cancel') !== undefined)
+  check('灰掉的确认按钮 disabled 为真', buttonByRole('confirm')?.disabled === true, String(buttonByRole('confirm')?.disabled))
+
+  // ---- 真的导入：一份"别人给的"文件（一条新增 + 一条同 ID 冲突） ----
+  const incoming = JSON.stringify({
+    version: 2,
+    generator: 'someone-else',
+    terrains: [
+      { id: 'custom:volcano', label: '火山', color: '#aa4411', glyph: 'forest', imagePath: '', mode: 'color' },
+    ],
+    markers: [{ id: 'custom:lighthouse', label: '别人的灯塔', icon: 'city', imagePath: '', mode: 'glyph' }],
+    pathTypes: [
+      { id: 'custom:trail', label: '小径', kind: 'path', params: { color: '#7a5c3e', width: 3, dash: [6, 4] } },
+    ],
+  })
+  app.vault.files.set('Shared/other.json', incoming)
+  const settingsBefore = JSON.stringify(plugin.getSettings())
+  const picker2 = makePickerDouble('Shared/other.json')
+  plugin.setImagePickerFactory(picker2.factory)
+  await runCommand(plugin, 'import-resource-bundle')
+  await wait()
+  const plan = capture.last()
+  check(
+    '正文报出新增条数（地形 1 · 标记 0 · 路径类型 1）',
+    /将新增 2 条/.test(plan?.planText ?? '') && /custom:volcano/.test(plan?.planText ?? '') && /custom:trail/.test(plan?.planText ?? ''),
+    String(plan?.planText),
+  )
+  check('同 ID 的标记被列为"跳过"并说明原因', /跳过 1 条/.test(plan?.planText ?? '') && /custom:lighthouse/.test(plan?.planText ?? ''), String(plan?.planText))
+  check('这一段文件里没有缺失提示（三段都在）', !/没有「/.test(plan?.planText ?? ''), String(plan?.planText))
+  check('有东西可导入时确认按钮可用', plan?.canImport === true, String(plan?.canImport))
+  check('打开对话框这一步还没有改任何设置（要等用户确认）', JSON.stringify(plugin.getSettings()) === settingsBefore)
+
+  const realModal = openRealImportModal(plan)
+  check('真对话框的确认按钮此时可点', buttonByRole('confirm')?.disabled === false, String(buttonByRole('confirm')?.disabled))
+  // 设置页正开着：先渲染一次作为"导入前"的样子（下面要验证导入之后它自己刷新了）
+  const settingsHas = (text) => FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(text))
+  plugin.settingTabs[0].display()
+  check('前提：导入前设置页里还没有这份文件带来的地形', !settingsHas('火山'), '设置页里不该已经出现火山')
+  clearNotices()
+  await buttonByRole('confirm')?.click()
+  await wait()
+  const after = plugin.getSettings()
+  check('新地形进了设置', after.customTerrains.some((terrain) => terrain.id === 'custom:volcano'), JSON.stringify(after.customTerrains.map((t) => t.id)))
+  check('新路径类型进了设置', after.pathTypes.some((entry) => entry.id === 'custom:trail'), JSON.stringify(after.pathTypes.map((e) => e.id)))
+  const keptLighthouse = after.customMarkers.find((marker) => marker.id === 'custom:lighthouse')
+  check(
+    '同 ID 的标记保留现有定义（标签 / 字形 / 图片都没被外来文件改掉）',
+    keptLighthouse?.label === '灯塔' && keptLighthouse?.icon === 'port' && keptLighthouse?.imagePath === 'Assets/lighthouse.png',
+    JSON.stringify(keptLighthouse),
+  )
+  check('导入结果已落盘（不是只改了内存）', (persisted()?.customTerrains ?? []).some((terrain) => terrain.id === 'custom:volcano'), JSON.stringify(persisted()?.customTerrains))
+  check('旧字段 pathColors 与目录保持一致', persisted()?.pathColors?.river === plugin.getSettings().pathColors.river)
+  check(
+    '导入完成后给出一条短提示并报出新增数',
+    noticeLog.some((line) => line.includes('已导入定义') && line.includes('新增 2 条') && line.includes('跳过 1 条')),
+    noticeLog.join(' | '),
+  )
+  check('提示时长都在 6000ms 以内', Math.max(...noticeDurations) <= 6000, String(Math.max(...noticeDurations)))
+  check('导入成功后对话框关闭了', collectByClass(realModal?.contentEl, 'fc-import-plan').length === 0)
+  check(
+    '导入之后已打开的设置页自己刷新了（不需要用户关掉再打开设置）',
+    settingsHas('火山'),
+    FakeSetting.created.map((setting) => setting.info.name).join(' | '),
+  )
+  check('刷新后的设置页里也有新的路径类型', settingsHas('小径'))
+  capture.restore()
+
+  // ---- 取消 = 一个字节都不改 ----
+  const snapshot = JSON.stringify(plugin.getSettings())
+  const dataSnapshot = plugin._data
+  app.vault.files.set('Shared/third.json', JSON.stringify({ version: 2, terrains: [{ id: 'custom:newone', label: '新地', color: '#123456' }] }))
+  const capture2 = captureImportModals(plugin)
+  plugin.setImagePickerFactory(makePickerDouble('Shared/third.json').factory)
+  await runCommand(plugin, 'import-resource-bundle')
+  await wait()
+  const cancelModal = openRealImportModal(capture2.last())
+  check('取消路径也拿到了导入计划（对话框确实打开了）', cancelModal !== null, '没有打开导入对话框')
+  const cancelButton = FakeSetting.created
+    .flatMap((setting) => setting.buttons ?? [])
+    .find((button) => button.buttonEl?.dataset?.fcImportRole === 'cancel')
+  check('取消按钮存在', cancelButton !== undefined)
+  await cancelButton?.click()
+  await wait()
+  check(
+    '取消之后设置逐字段不变（一个字节都没改）',
+    JSON.stringify(plugin.getSettings()) === snapshot && plugin._data === dataSnapshot,
+    '设置或落盘数据被改动了',
+  )
+  check('取消不会把那条地形偷偷加进来', !plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:newone'))
+
+  // ---- v1 老文件（只有 terrains）：不许动用户的标记与路径类型 ----
+  app.vault.files.set('Shared/legacy.json', JSON.stringify({ version: 1, terrains: [{ id: 'custom:old', label: '旧地形', color: '#336655' }] }))
+  plugin.setImagePickerFactory(makePickerDouble('Shared/legacy.json').factory)
+  await runCommand(plugin, 'import-resource-bundle')
+  await wait()
+  const legacyPlan = capture2.last()
+  check('v1 文件照常能导入（老文件不许被判为非法）', legacyPlan !== undefined && legacyPlan.canImport === true, String(legacyPlan?.canImport))
+  check(
+    'v1 文件没有的段会被明说（否则用户以为标记也导进来了）',
+    /没有「标记、路径类型」一节/.test(legacyPlan?.planText ?? ''),
+    String(legacyPlan?.planText),
+  )
+  const beforeLegacy = { markers: plugin.getSettings().customMarkers.length, pathTypes: plugin.getSettings().pathTypes.length }
+  const capture3 = captureImportModals(plugin)
+  plugin.setImagePickerFactory(makePickerDouble('Shared/legacy.json').factory)
+  await runCommand(plugin, 'import-resource-bundle')
+  await wait()
+  const legacyModal = openRealImportModal(capture3.last())
+  check(
+    'v1 也能走到确认对话框（老文件不许被判为不可导入，否则这里根本没得点）',
+    legacyModal !== null,
+    '没有打开导入对话框',
+  )
+  await FakeSetting.created
+    .flatMap((setting) => setting.buttons ?? [])
+    .find((button) => button.buttonEl?.dataset?.fcImportRole === 'confirm')
+    ?.click()
+  await wait()
+  check('v1 导入后标记定义一条都没少', plugin.getSettings().customMarkers.length === beforeLegacy.markers)
+  check('v1 导入后路径类型定义一条都没少', plugin.getSettings().pathTypes.length === beforeLegacy.pathTypes)
+  check('v1 里的新地形确实进来了', plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:old'))
+  check('v1 导入没把对话框留在原地', collectByClass(legacyModal?.contentEl, 'fc-import-plan').length === 0)
+
+  // ---- 失败路径：坏文件必须给出可读原因，且**不打开确认对话框**、不改设置 ----
+  const beforeBroken = JSON.stringify(plugin.getSettings())
+  const capture4 = captureImportModals(plugin)
+  const brokenCases = [
+    ['Shared/broken.json', '{ 这不是 JSON', /JSON/],
+    ['Shared/future.json', JSON.stringify({ version: 99, terrains: [] }), /更新|升级/],
+    ['Shared/empty.json', JSON.stringify({ version: 2 }), /terrains|markers|pathTypes/],
+  ]
+  for (const [path, text, pattern] of brokenCases) {
+    app.vault.files.set(path, text)
+    plugin.setImagePickerFactory(makePickerDouble(path).factory)
+    clearNotices()
+    await runCommand(plugin, 'import-resource-bundle')
+    await wait()
+    check(
+      `坏文件给出可读原因（${path}）`,
+      noticeLog.some((line) => line.includes('无法导入') && pattern.test(line)),
+      noticeLog.join(' | '),
+    )
+  }
+  check('坏文件不会打开确认对话框（不让用户对着无效内容点确认）', capture4.opened.length === 0, String(capture4.opened.length))
+  check('坏文件不会改动设置', JSON.stringify(plugin.getSettings()) === beforeBroken)
+  check('坏文件的提示也在 6000ms 以内', Math.max(...noticeDurations) <= 6000, String(Math.max(...noticeDurations)))
+  capture4.restore()
+
+  // ---- 库里一份定义文件都没有：说清"去导出一份"，而不是弹一个空列表 ----
+  for (const path of jsonFiles()) app.vault.files.delete(path)
+  const pickerEmpty = makePickerDouble(undefined)
+  plugin.setImagePickerFactory(pickerEmpty.factory)
+  clearNotices()
+  await runCommand(plugin, 'import-resource-bundle')
+  await wait()
+  check('库里没有定义文件时给出可操作的提示', noticeLog.some((line) => line.includes('没有找到定义文件')), noticeLog.join(' | '))
+  check('这时根本不打开空的选择器', pickerEmpty.calls.length === 0, String(pickerEmpty.calls.length))
+
   plugin.onunload()
 }
 
