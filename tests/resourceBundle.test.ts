@@ -18,6 +18,7 @@ import {
   describeImportResult,
   mergeMarkers,
   mergePathTypes,
+  mergeRegionTypes,
   mergeTerrains,
   parseResourceBundle,
   planBundleImport,
@@ -25,6 +26,7 @@ import {
 } from '../src/render/resourceBundle.ts'
 import { MAX_CUSTOM_TERRAINS, type CustomTerrain } from '../src/render/terrainCatalog.ts'
 import type { CustomMarker } from '../src/render/markerCatalog.ts'
+import { defaultRegionTypeEntries, type RegionTypeEntry } from '../src/render/regionTypeCatalog.ts'
 import type { PathTypeEntry } from '../src/render/pathTypeCatalog.ts'
 
 const SAMPLE: CustomTerrain[] = [
@@ -226,6 +228,20 @@ const SAMPLE_PATH_TYPES: PathTypeEntry[] = [
   },
 ]
 
+/** 一条自定义区域类型：五个参数都要能往返（尤其 `borderColor: null` = 跟随填充色） */
+const SAMPLE_REGION_TYPES: RegionTypeEntry[] = [
+  {
+    id: 'custom:march',
+    label: '边疆',
+    params: { color: '#3355aa', opacity: 0.35, borderColor: null, borderWidth: 5, borderDash: [10, 6] },
+  },
+  {
+    id: 'custom:oasis',
+    label: '绿洲',
+    params: { color: '#33aa88', opacity: 0.4, borderColor: '#105040', borderWidth: 0, borderDash: [] },
+  },
+]
+
 test('v2 三段一起往返：标记（含两套视觉）与路径类型参数都不能丢', () => {
   const bundle = buildResourceBundle(
     { terrains: SAMPLE, markers: SAMPLE_MARKERS, pathTypes: SAMPLE_PATH_TYPES },
@@ -238,13 +254,38 @@ test('v2 三段一起往返：标记（含两套视觉）与路径类型参数�
   assert.deepEqual(parsed.bundle.markers, SAMPLE_MARKERS)
   assert.deepEqual(parsed.bundle.pathTypes, SAMPLE_PATH_TYPES)
   // 段必须被记录下来：合并只看"文件里出现过哪几段"
-  assert.deepEqual(parsed.bundle.sections, ['terrains', 'markers', 'pathTypes'])
+  // （四段永远都写出来，所以即使这份 bundle 没带区域类型，regionTypes 段也在）
+  assert.deepEqual(parsed.bundle.sections, ['terrains', 'markers', 'pathTypes', 'regionTypes'])
   // 标记的"另一套视觉"也要在文件里：只带当前模式那一套的话，
   // 导入方切一下模式就会发现配置是空的（用户以为切坏了）
   const lighthouse = parsed.bundle.markers.find((marker) => marker.id === 'custom:lighthouse')!
   assert.equal(lighthouse.mode, 'image')
   assert.equal(lighthouse.icon, 'port', '图片模式下也要带着字形')
   assert.equal(lighthouse.imagePath, 'Assets/lighthouse.png')
+})
+
+test('区域类型一起往返：五个参数一个都不能丢（含"边框跟随填充色"的 null）', () => {
+  const bundle = buildResourceBundle(
+    { terrains: [], regionTypes: SAMPLE_REGION_TYPES },
+    { now: new Date('2026-09-24T00:00:00Z') },
+  )
+  const parsed = parseResourceBundle(serializeResourceBundle(bundle))
+  assert.equal(parsed.ok, true, JSON.stringify(parsed))
+  if (!parsed.ok) return
+  assert.deepEqual(parsed.bundle.regionTypes, SAMPLE_REGION_TYPES)
+  // `borderColor: null` 是有意义的值（边框跟随填充色），不是"没写这个字段"：
+  // 丢掉它会让导入方拿到一个颜色被写死的边框，之后改填充色时边框不动
+  const march = parsed.bundle.regionTypes.find((entry) => entry.id === 'custom:march')!
+  assert.equal(march.params.borderColor, null)
+  assert.deepEqual(march.params.borderDash, [10, 6])
+  assert.equal(march.params.opacity, 0.35)
+  assert.equal(march.params.borderWidth, 5)
+})
+
+test('内置 6 种区域类型不进文件（带进去只会得到一串"同 ID 已存在"）', () => {
+  const withBuiltin = [...defaultRegionTypeEntries(), ...SAMPLE_REGION_TYPES]
+  const bundle = buildResourceBundle({ terrains: [], regionTypes: withBuiltin })
+  assert.deepEqual(bundle.regionTypes.map((entry) => entry.id), ['custom:march', 'custom:oasis'])
 })
 
 test('内置路径类型不进文件（带进去只会得到一串"同 ID 已存在"）', () => {
@@ -272,15 +313,39 @@ test('v1 文件（只有 terrains）仍然能导入，且不动用户的标记�
   assert.deepEqual(parsed.bundle.sections, ['terrains'], 'v1 文件没提标记与路径类型')
   assert.deepEqual(parsed.bundle.markers, [])
   assert.deepEqual(parsed.bundle.pathTypes, [])
+  assert.deepEqual(parsed.bundle.regionTypes, [])
 
   const plan = planBundleImport(
-    { terrains: [], markers: SAMPLE_MARKERS, pathTypes: SAMPLE_PATH_TYPES },
+    { terrains: [], markers: SAMPLE_MARKERS, pathTypes: SAMPLE_PATH_TYPES, regionTypes: SAMPLE_REGION_TYPES },
     parsed.bundle,
   )
   assert.deepEqual(plan.markers.added, [], 'v1 文件不许动用户的标记')
   assert.deepEqual(plan.pathTypes.added, [], 'v1 文件不许动用户的路径类型')
+  assert.deepEqual(plan.regionTypes.added, [], 'v1 文件不许动用户的区域类型')
   assert.equal(plan.skippedCount, 0, '缺失的段连"跳过"都不该报（它根本没提这件事）')
   assert.equal(plan.addedCount, 1)
+})
+
+test('v2 文件里没有 regionTypes 段时，同样不许动用户的区域类型定义', () => {
+  // 这条钉住的是**可观测的契约**：文件没提区域类型 → 计划里不算新增、正文明说缺了这一节。
+  // 注意别把它当成"has() 守卫"的证明：今天把那个守卫改成恒真也照样绿（合并只增不删，
+  // 空数组合并没有效果）。守卫本身的意义写在 planBundleImport 的注释里。
+  const v2WithoutRegions = JSON.stringify({
+    version: 2,
+    terrains: [],
+    markers: [],
+    pathTypes: [],
+  })
+  const parsed = parseResourceBundle(v2WithoutRegions)
+  assert.equal(parsed.ok, true, JSON.stringify(parsed))
+  if (!parsed.ok) return
+  assert.deepEqual(parsed.bundle.sections, ['terrains', 'markers', 'pathTypes'], 'regionTypes 段确实没出现过')
+  const plan = planBundleImport({ terrains: [], markers: [], pathTypes: [], regionTypes: SAMPLE_REGION_TYPES }, parsed.bundle)
+  assert.equal(plan.addedCount, 0)
+  assert.equal(plan.skippedCount, 0)
+  assert.deepEqual(plan.regionTypes.added, [])
+  // 计划里"缺少哪一段"必须说到区域类型，否则用户以为区域类型也导进来了
+  assert.match(describeImportPlan(plan), /没有「区域类型」一节/)
 })
 
 test('某一段类型不对时给出可读原因（说清是哪一段）', () => {
@@ -299,32 +364,49 @@ test('一段都没有的文件被拒绝（不像是本插件的定义文件）',
 })
 
 test('幂等：刚导出的文件立刻再导入 = 0 新增，且设置逐字段不变', () => {
-  const bundle = buildResourceBundle({ terrains: SAMPLE, markers: SAMPLE_MARKERS, pathTypes: SAMPLE_PATH_TYPES })
+  const bundle = buildResourceBundle({
+    terrains: SAMPLE,
+    markers: SAMPLE_MARKERS,
+    pathTypes: SAMPLE_PATH_TYPES,
+    regionTypes: SAMPLE_REGION_TYPES,
+  })
   const parsed = parseResourceBundle(serializeResourceBundle(bundle))
   assert.equal(parsed.ok, true)
   if (!parsed.ok) return
 
-  const current = { terrains: [] as CustomTerrain[], markers: [] as CustomMarker[], pathTypes: [] as PathTypeEntry[] }
+  const current = {
+    terrains: [] as CustomTerrain[],
+    markers: [] as CustomMarker[],
+    pathTypes: [] as PathTypeEntry[],
+    regionTypes: [] as RegionTypeEntry[],
+  }
   const first = planBundleImport(current, parsed.bundle)
-  assert.equal(first.addedCount, 5, JSON.stringify(first))
+  assert.equal(first.addedCount, 7, JSON.stringify(first))
   // 按计划写入（与 main.ts 的落盘逻辑同构）
   const after = {
     terrains: [...current.terrains, ...first.terrains.added],
     markers: [...current.markers, ...first.markers.added],
     pathTypes: [...current.pathTypes, ...first.pathTypes.added],
+    regionTypes: [...current.regionTypes, ...first.regionTypes.added],
   }
   assert.deepEqual(after.terrains, SAMPLE)
   assert.deepEqual(after.markers, SAMPLE_MARKERS)
   assert.deepEqual(after.pathTypes, SAMPLE_PATH_TYPES)
+  assert.deepEqual(after.regionTypes, SAMPLE_REGION_TYPES)
 
   const second = planBundleImport(after, parsed.bundle)
   assert.equal(second.addedCount, 0, '第二次导入不许再新增')
-  assert.equal(second.skippedCount, 5, '同 ID 冲突要逐条报出来')
+  assert.equal(second.skippedCount, 7, '同 ID 冲突要逐条报出来')
   assert.ok(second.terrains.skipped.every((item) => /保留现有的/.test(item.reason)), JSON.stringify(second.terrains.skipped))
+  assert.ok(
+    second.regionTypes.skipped.every((item) => /保留现有的/.test(item.reason)),
+    JSON.stringify(second.regionTypes.skipped),
+  )
   const afterSecond = {
     terrains: [...after.terrains, ...second.terrains.added],
     markers: [...after.markers, ...second.markers.added],
     pathTypes: [...after.pathTypes, ...second.pathTypes.added],
+    regionTypes: [...after.regionTypes, ...second.regionTypes.added],
   }
   assert.deepEqual(afterSecond, after, '第二次导入之后设置必须逐字段不变')
 })
@@ -382,19 +464,66 @@ test('路径类型里的非法虚线：整条跳过并给出原因（不许静�
   assert.match(parsed.skipped[0]!.reason, /偶数/)
 })
 
+test('合并区域类型：内置 ID 的冲突要单独解释，且上限只数自定义条目', () => {
+  const existing = [...defaultRegionTypeEntries(), SAMPLE_REGION_TYPES[0]!]
+  const incoming: RegionTypeEntry[] = [
+    // 内置 ID（手改文件时会出现）：必须明确说"内置的不能被替换"
+    { id: 'realm', label: '冒名顶替', params: { color: '#ff0000', opacity: 0.9, borderColor: null, borderWidth: 9, borderDash: [] } },
+    // 同 ID 的自定义条目：保留用户现有的
+    { ...SAMPLE_REGION_TYPES[0]!, label: '别人的边疆', params: { ...SAMPLE_REGION_TYPES[0]!.params, color: '#ff00ff' } },
+    SAMPLE_REGION_TYPES[1]!,
+  ]
+  const merged = mergeRegionTypes(existing, incoming)
+  assert.deepEqual(merged.added, ['custom:oasis'])
+  assert.match(merged.skipped[0]!.reason, /内置类型/)
+  assert.match(merged.skipped[1]!.reason, /保留现有的/)
+  const realm = merged.regionTypes.find((entry) => entry.id === 'realm')!
+  assert.notEqual(realm.params.color, '#ff0000', '内置参数不许被替换')
+  const march = merged.regionTypes.find((entry) => entry.id === 'custom:march')!
+  assert.equal(march.label, '边疆', '用户现有的定义不许被外来文件改掉')
+  // 上限按"自定义条目数"算：内置 6 种不占用户的名额
+  // （existing 里已经有一条自定义的 custom:march，所以上限 1 时 custom:oasis 会被挡住；
+  //  第一条 custom:march 走的是"同 ID 冲突"，所以这里要 some 而不是看第一条）
+  const many = mergeRegionTypes(existing, SAMPLE_REGION_TYPES, { maxRegionTypes: 1 })
+  assert.equal(many.added.length, 0)
+  assert.ok(
+    many.skipped.some((item) => /上限/.test(item.reason)),
+    JSON.stringify(many.skipped),
+  )
+})
+
+test('区域类型的非法边框虚线：整条跳过并给出原因（不许静默变成实线）', () => {
+  const text = JSON.stringify({
+    version: 2,
+    regionTypes: [
+      { id: 'custom:bad', label: '坏虚线', params: { color: '#123456', opacity: 0.3, borderWidth: 4, borderDash: [12, 8, 4] } },
+      { id: 'custom:good', label: '好虚线', params: { color: '#123456', opacity: 0.3, borderWidth: 4, borderDash: [12, 8] } },
+    ],
+  })
+  const parsed = parseResourceBundle(text)
+  assert.equal(parsed.ok, true, JSON.stringify(parsed))
+  if (!parsed.ok) return
+  assert.deepEqual(parsed.bundle.regionTypes.map((entry) => entry.id), ['custom:good'])
+  assert.equal(parsed.skipped.length, 1)
+  assert.match(parsed.skipped[0]!.reason, /偶数/)
+})
+
 test('计划正文说清三件事：新增几条、跳过哪些、哪一段文件里没有', () => {
   const parsed = parseResourceBundle(
     JSON.stringify({ version: 2, terrains: [], markers: SAMPLE_MARKERS }),
   )
   assert.equal(parsed.ok, true)
   if (!parsed.ok) return
-  const plan = planBundleImport({ terrains: [], markers: [SAMPLE_MARKERS[1]!], pathTypes: [] }, parsed.bundle)
+  const plan = planBundleImport(
+    { terrains: [], markers: [SAMPLE_MARKERS[1]!], pathTypes: [], regionTypes: [] },
+    parsed.bundle,
+  )
   const text = describeImportPlan(plan)
   assert.match(text, /将新增 1 条/)
   assert.match(text, /custom:lighthouse/)
   assert.match(text, /保留现有的/)
-  // 文件里没有 pathTypes 一段：必须说出来，否则用户会以为路径类型也导进来了
-  assert.match(text, /没有「路径类型」一节/)
+  // 文件里没有 pathTypes 与 regionTypes 两段：必须说出来，否则用户会以为它们也导进来了
+  assert.match(text, /没有「路径类型、区域类型」一节/)
   assert.match(text, /不会删除任何东西/)
   assert.match(describeImportResult(plan), /跳过 1 条/)
 })
@@ -403,7 +532,10 @@ test('没有可新增条目时正文要说清"为什么一条都进不来"', () 
   const parsed = parseResourceBundle(JSON.stringify({ version: 2, markers: SAMPLE_MARKERS }))
   assert.equal(parsed.ok, true)
   if (!parsed.ok) return
-  const plan = planBundleImport({ terrains: [], markers: SAMPLE_MARKERS, pathTypes: [] }, parsed.bundle)
+  const plan = planBundleImport(
+    { terrains: [], markers: SAMPLE_MARKERS, pathTypes: [], regionTypes: [] },
+    parsed.bundle,
+  )
   assert.equal(plan.addedCount, 0)
   const text = describeImportPlan(plan)
   assert.match(text, /没有可新增的定义/)
@@ -428,7 +560,7 @@ test('文件里的字形名本机不认识时：条目照样导入，但必须�
   assert.equal(parsed.notes.length, 2, JSON.stringify(parsed.notes))
   assert.ok(parsed.notes.every((note) => /不是内置/.test(note.reason)), JSON.stringify(parsed.notes))
 
-  const plan = planBundleImport({ terrains: [], markers: [], pathTypes: [] }, parsed.bundle, {
+  const plan = planBundleImport({ terrains: [], markers: [], pathTypes: [], regionTypes: [] }, parsed.bundle, {
     notes: parsed.notes,
   })
   assert.equal(plan.addedCount, 2)

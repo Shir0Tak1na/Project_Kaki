@@ -64,6 +64,7 @@ import {
   applyRegionTypePatch,
   customRegionTypeEntries,
   isBuiltinRegionType,
+  normalizeRegionTypeEntries,
   regionColorsFromEntries,
   resetRegionTypeStyles,
   validateCustomRegionTypeInput,
@@ -419,12 +420,13 @@ export default class ProjectKakiPlugin extends Plugin {
       {
         id: 'export-resource-bundle',
         // 名字里点明"包含哪些东西"：用户在命令面板里搜的是"我那些自定义地形怎么带走"
-        name: '导出定义文件…（自定义地形/标记/路径类型）',
+        // （区域类型同样必须写出来 —— 它是用户自己建的数据，不写会让人以为导出不带它）
+        name: '导出定义文件…（自定义地形/标记/路径类型/区域类型）',
         icon: 'file-down',
         group: 'file',
         // 刻意**不给** `available`：这两件事只依赖插件设置，不需要地图层、也不需要打开 Canvas
         // （其余 file 组动作都带 `available: hasLayer`，因为那些真的要有地图才能做）
-        describe: () => '把设置里的自定义地形、标记与路径类型打包成一份 JSON 写进库根目录',
+        describe: () => '把设置里的自定义地形、标记、路径类型与区域类型打包成一份 JSON 写进库根目录',
         run: () => this.exportResourceBundle(),
       },
       {
@@ -1347,7 +1349,7 @@ export default class ProjectKakiPlugin extends Plugin {
   // ------------------------------------------------- 定义文件（导入 / 导出）
 
   /**
-   * 导出定义文件：把设置里的自定义地形 / 标记 / 路径类型打包成一份 JSON 写进库里。
+   * 导出定义文件：把设置里的自定义地形 / 标记 / 路径类型 / 区域类型打包成一份 JSON 写进库里。
    *
    * 三条刻意的选择：
    * 1. **写到库根目录**：这是插件级资源（与某一张地图无关），而且这两个动作用不着先打开地图 ——
@@ -1364,12 +1366,16 @@ export default class ProjectKakiPlugin extends Plugin {
         terrains: this.pluginSettings.customTerrains,
         markers: this.pluginSettings.customMarkers,
         pathTypes: this.pluginSettings.pathTypes,
+        regionTypes: this.pluginSettings.regionTypes,
       },
       { generator: `project-kaki ${this.manifest.version}` },
     )
-    const counts = `地形 ${bundle.terrains.length} · 标记 ${bundle.markers.length} · 路径类型 ${bundle.pathTypes.length}`
-    if (bundle.terrains.length + bundle.markers.length + bundle.pathTypes.length === 0) {
-      new Notice('设置里还没有自定义地形、标记或路径类型，没有可导出的定义。', NOTICE_MAX_MS)
+    const counts = `地形 ${bundle.terrains.length} · 标记 ${bundle.markers.length} · 路径类型 ${bundle.pathTypes.length} · 区域类型 ${bundle.regionTypes.length}`
+    if (
+      bundle.terrains.length + bundle.markers.length + bundle.pathTypes.length + bundle.regionTypes.length ===
+      0
+    ) {
+      new Notice('设置里还没有自定义地形、标记、路径类型或区域类型，没有可导出的定义。', NOTICE_MAX_MS)
       return
     }
 
@@ -1435,6 +1441,7 @@ export default class ProjectKakiPlugin extends Plugin {
         terrains: this.pluginSettings.customTerrains,
         markers: this.pluginSettings.customMarkers,
         pathTypes: this.pluginSettings.pathTypes,
+        regionTypes: this.pluginSettings.regionTypes,
       },
       parsed.bundle,
       // 解析阶段发现的"条目进来了但有一处被回退"（例如字形名本机不认识）一并带进对话框
@@ -1471,6 +1478,10 @@ export default class ProjectKakiPlugin extends Plugin {
       ...current.pathTypes,
       ...plan.pathTypes.added,
     ])
+    const regionTypes = normalizeRegionTypeEntries([
+      ...current.regionTypes,
+      ...plan.regionTypes.added,
+    ])
     const next: CartographerSettings = {
       ...current,
       customTerrains: [...current.customTerrains, ...plan.terrains.added],
@@ -1478,6 +1489,8 @@ export default class ProjectKakiPlugin extends Plugin {
       pathTypes,
       // 旧字段跟着目录走（它不是渲染依据，但两处自相矛盾会让人看不懂 data.json）
       pathColors: pathColorsFromEntries(pathTypes),
+      regionTypes,
+      regionColors: regionColorsFromEntries(regionTypes),
     }
 
     try {

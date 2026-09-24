@@ -7656,6 +7656,15 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
 
   // ---- 入口：一个动作同时变成面板按钮与命令（不许两份实现） ----
   check('注册了「导出定义文件…」命令', commandById('export-resource-bundle') !== undefined)
+  // 命令名是用户搜索与判断"导出带不带我那些定义"的唯一线索：加了新的一类定义却不写进名字里，
+  // 用户就只能靠猜（区域类型这次就是这么被漏掉过一次）
+  check(
+    '导出命令的名字里列全了四类定义（含区域类型）',
+    ['地形', '标记', '路径类型', '区域类型'].every((word) =>
+      (commandById('export-resource-bundle')?.name ?? '').includes(word),
+    ),
+    String(commandById('export-resource-bundle')?.name),
+  )
   check('注册了「导入定义文件…」命令', commandById('import-resource-bundle') !== undefined)
   check(
     '两个动作都在地图面板的「文件与导出」组里（面板按钮与命令来自同一份定义）',
@@ -7676,10 +7685,20 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   check('没有可导出的定义时不产出文件', jsonFiles().length === 0, jsonFiles().join(','))
   check('并且给出一句可读提示', noticeLog.some((line) => line.includes('还没有自定义')), noticeLog.join(' | '))
 
-  // ---- 造三条真实的自定义定义（走设置接口，与用户手点出来的一样） ----
+  // ---- 造四条真实的自定义定义（走设置接口，与用户手点出来的一样） ----
   await plugin.addCustomTerrain({ id: 'swamp', label: '沼泽地', color: '#336655', glyph: 'forest' })
   await plugin.addCustomMarker({ id: 'lighthouse', label: '灯塔', icon: 'port', imagePath: 'Assets/lighthouse.png', mode: 'image' })
   await plugin.addCustomPathType({ id: 'highway', label: '官道', color: '#c9a227', width: 9, dash: [16, 6] })
+  // 区域类型同样是用户自己建的数据：它必须跟着定义文件一起走（否则换库/分享时用户的区域类型凭空消失）
+  const addedRegionType = await plugin.addCustomRegionType({
+    id: 'march',
+    label: '边疆',
+    color: '#3355aa',
+    opacity: 0.35,
+    borderWidth: 5,
+    borderDash: [10, 6],
+  })
+  check('前提：自定义区域类型建出来了（走的是设置接口）', addedRegionType.ok === true, JSON.stringify(addedRegionType))
 
   // ---- 导出 ----
   clearNotices()
@@ -7694,8 +7713,11 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   const bundle = JSON.parse(fileText(exported[0]))
   check('文件里 version 是 2', bundle.version === 2, String(bundle.version))
   check(
-    '三段齐全（terrains / markers / pathTypes）',
-    Array.isArray(bundle.terrains) && Array.isArray(bundle.markers) && Array.isArray(bundle.pathTypes),
+    '四段齐全（terrains / markers / pathTypes / regionTypes）',
+    Array.isArray(bundle.terrains) &&
+      Array.isArray(bundle.markers) &&
+      Array.isArray(bundle.pathTypes) &&
+      Array.isArray(bundle.regionTypes),
     Object.keys(bundle).join(','),
   )
   check('自定义地形进了文件', bundle.terrains.map((item) => item.id).join(',') === 'custom:swamp', JSON.stringify(bundle.terrains))
@@ -7722,6 +7744,20 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
     JSON.stringify(bundle.pathTypes[0].params),
   )
   check('提示里给出了落盘路径（用户不必去猜文件在哪）', noticeLog.some((line) => line.includes(exported[0])), noticeLog.join(' | '))
+  check(
+    '内置 6 种区域类型不进文件（带过去只会得到一串"同 ID 已存在"）',
+    bundle.regionTypes.length === 1 && bundle.regionTypes[0].id === 'custom:march',
+    JSON.stringify(bundle.regionTypes.map((entry) => entry.id)),
+  )
+  check(
+    '区域类型的五个参数完整（颜色/不透明度/边框色/边框宽/边框虚线）',
+    bundle.regionTypes[0].params.color === '#3355aa' &&
+      bundle.regionTypes[0].params.opacity === 0.35 &&
+      bundle.regionTypes[0].params.borderColor === null &&
+      bundle.regionTypes[0].params.borderWidth === 5 &&
+      JSON.stringify(bundle.regionTypes[0].params.borderDash) === JSON.stringify([10, 6]),
+    JSON.stringify(bundle.regionTypes[0].params),
+  )
   check('提示时长都在 6000ms 以内', Math.max(...noticeDurations) <= 6000, String(Math.max(...noticeDurations)))
 
   // ---- 重名不覆盖：再导一次应当另起名字 ----
@@ -7808,6 +7844,9 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
     pathTypes: [
       { id: 'custom:trail', label: '小径', kind: 'path', params: { color: '#7a5c3e', width: 3, dash: [6, 4] } },
     ],
+    regionTypes: [
+      { id: 'custom:oasis', label: '绿洲', params: { color: '#33aa88', opacity: 0.4, borderWidth: 0, borderDash: [] } },
+    ],
   })
   app.vault.files.set('Shared/other.json', incoming)
   const settingsBefore = JSON.stringify(plugin.getSettings())
@@ -7817,12 +7856,15 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   await wait()
   const plan = capture.last()
   check(
-    '正文报出新增条数（地形 1 · 标记 0 · 路径类型 1）',
-    /将新增 2 条/.test(plan?.planText ?? '') && /custom:volcano/.test(plan?.planText ?? '') && /custom:trail/.test(plan?.planText ?? ''),
+    '正文报出新增条数（地形 1 · 标记 0 · 路径类型 1 · 区域类型 1）',
+    /将新增 3 条/.test(plan?.planText ?? '') &&
+      /custom:volcano/.test(plan?.planText ?? '') &&
+      /custom:trail/.test(plan?.planText ?? '') &&
+      /custom:oasis/.test(plan?.planText ?? ''),
     String(plan?.planText),
   )
   check('同 ID 的标记被列为"跳过"并说明原因', /跳过 1 条/.test(plan?.planText ?? '') && /custom:lighthouse/.test(plan?.planText ?? ''), String(plan?.planText))
-  check('这一段文件里没有缺失提示（三段都在）', !/没有「/.test(plan?.planText ?? ''), String(plan?.planText))
+  check('这一段文件里没有缺失提示（四段都在）', !/没有「/.test(plan?.planText ?? ''), String(plan?.planText))
   check('有东西可导入时确认按钮可用', plan?.canImport === true, String(plan?.canImport))
   check('打开对话框这一步还没有改任何设置（要等用户确认）', JSON.stringify(plugin.getSettings()) === settingsBefore)
 
@@ -7838,6 +7880,41 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   const after = plugin.getSettings()
   check('新地形进了设置', after.customTerrains.some((terrain) => terrain.id === 'custom:volcano'), JSON.stringify(after.customTerrains.map((t) => t.id)))
   check('新路径类型进了设置', after.pathTypes.some((entry) => entry.id === 'custom:trail'), JSON.stringify(after.pathTypes.map((e) => e.id)))
+  check(
+    '新区域类型进了设置，且参数是文件里那一份（不是出厂值）',
+    after.regionTypes.some(
+      (entry) =>
+        entry.id === 'custom:oasis' &&
+        entry.label === '绿洲' &&
+        entry.params.color === '#33aa88' &&
+        entry.params.opacity === 0.4 &&
+        entry.params.borderWidth === 0 &&
+        JSON.stringify(entry.params.borderDash) === JSON.stringify([]),
+    ),
+    JSON.stringify(after.regionTypes.filter((entry) => entry.id === 'custom:oasis')),
+  )
+  check(
+    '导入没有动用户原有的区域类型（同 ID 之外的一条都没少、也没被改写）',
+    after.regionTypes.some((entry) => entry.id === 'custom:march' && entry.label === '边疆'),
+    JSON.stringify(after.regionTypes.map((entry) => [entry.id, entry.label])),
+  )
+  check(
+    '导入的区域类型已落盘（不是只改了内存）',
+    (persisted()?.regionTypes ?? []).some((entry) => entry.id === 'custom:oasis'),
+    JSON.stringify(persisted()?.regionTypes),
+  )
+  check(
+    '旧字段 regionColors 与目录里内置 6 种的颜色一致（镜像字段长度固定为 6，回退旧版插件也看得到）',
+    persisted()?.regionColors?.length === 6 &&
+      JSON.stringify(persisted()?.regionColors) ===
+        JSON.stringify(
+          plugin
+            .getSettings()
+            .regionTypes.filter((entry) => !entry.id.startsWith('custom:'))
+            .map((entry) => entry.params.color),
+        ),
+    JSON.stringify(persisted()?.regionColors),
+  )
   const keptLighthouse = after.customMarkers.find((marker) => marker.id === 'custom:lighthouse')
   check(
     '同 ID 的标记保留现有定义（标签 / 字形 / 图片都没被外来文件改掉）',
@@ -7848,7 +7925,7 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   check('旧字段 pathColors 与目录保持一致', persisted()?.pathColors?.river === plugin.getSettings().pathColors.river)
   check(
     '导入完成后给出一条短提示并报出新增数',
-    noticeLog.some((line) => line.includes('已导入定义') && line.includes('新增 2 条') && line.includes('跳过 1 条')),
+    noticeLog.some((line) => line.includes('已导入定义') && line.includes('新增 3 条') && line.includes('跳过 1 条')),
     noticeLog.join(' | '),
   )
   check('提示时长都在 6000ms 以内', Math.max(...noticeDurations) <= 6000, String(Math.max(...noticeDurations)))
@@ -7859,6 +7936,7 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
     FakeSetting.created.map((setting) => setting.info.name).join(' | '),
   )
   check('刷新后的设置页里也有新的路径类型', settingsHas('小径'))
+  check('刷新后的设置页里也有新的区域类型（导入后不必关掉设置再打开）', settingsHas('绿洲'))
   capture.restore()
 
   // ---- 取消 = 一个字节都不改 ----
@@ -7893,10 +7971,14 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   check('v1 文件照常能导入（老文件不许被判为非法）', legacyPlan !== undefined && legacyPlan.canImport === true, String(legacyPlan?.canImport))
   check(
     'v1 文件没有的段会被明说（否则用户以为标记也导进来了）',
-    /没有「标记、路径类型」一节/.test(legacyPlan?.planText ?? ''),
+    /没有「标记、路径类型、区域类型」一节/.test(legacyPlan?.planText ?? ''),
     String(legacyPlan?.planText),
   )
-  const beforeLegacy = { markers: plugin.getSettings().customMarkers.length, pathTypes: plugin.getSettings().pathTypes.length }
+  const beforeLegacy = {
+    markers: plugin.getSettings().customMarkers.length,
+    pathTypes: plugin.getSettings().pathTypes.length,
+    regionTypes: plugin.getSettings().regionTypes.length,
+  }
   const capture3 = captureImportModals(plugin)
   plugin.setImagePickerFactory(makePickerDouble('Shared/legacy.json').factory)
   await runCommand(plugin, 'import-resource-bundle')
@@ -7914,6 +7996,11 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   await wait()
   check('v1 导入后标记定义一条都没少', plugin.getSettings().customMarkers.length === beforeLegacy.markers)
   check('v1 导入后路径类型定义一条都没少', plugin.getSettings().pathTypes.length === beforeLegacy.pathTypes)
+  check(
+    'v1 导入后区域类型定义一条都没少（"段缺失 ≠ 段为空"对新增的段同样成立）',
+    plugin.getSettings().regionTypes.length === beforeLegacy.regionTypes,
+    `${beforeLegacy.regionTypes} → ${plugin.getSettings().regionTypes.length}`,
+  )
   check('v1 里的新地形确实进来了', plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:old'))
   check('v1 导入没把对话框留在原地', collectByClass(legacyModal?.contentEl, 'fc-import-plan').length === 0)
 

@@ -16,7 +16,7 @@
  *
  * ## 段（section）与"缺失 ≠ 清空"
  *
- * 文件里的三类定义各占一段。**一段缺失与一段为空是两件不同的事**：
+ * 文件里的四类定义各占一段。**一段缺失与一段为空是两件不同的事**：
  * - 缺失：这份文件根本没提这件事（v1 文件就没有标记与路径类型）→ 导入时**保持用户现有设置不动**；
  * - 为空：文件里明确写了"没有"（`"markers": []`）→ 合并结果自然也是什么都不加。
  * 解析结果里的 `sections` 记录"文件里真的出现过哪几段"，合并只看它。
@@ -24,8 +24,16 @@
  *
  * ## 版本策略
  *
- * `version` 升到 **2**（新增 `markers` / `pathTypes` 两段）。解析侧**接受 1 与 2**：
- * v1 视为"没有后两段"，于是老文件仍然能导入（回归项，测试里钉死）。
+ * `version` 停在 **2**（它同时带 `markers` / `pathTypes` / `regionTypes` 三段）。
+ * 解析侧**接受 1 与 2**：v1 视为"没有后面几段"，于是老文件仍然能导入（回归项，测试里钉死）。
+ *
+ * 为什么 `regionTypes` 加进来时**不**把版本升到 3：
+ * v2 是本轮开发周期里刚引入、**还没有发布给任何用户**的格式 —— 世上不存在"旧版插件写下的
+ * v2 文件"，因此没有需要区分的历史包袱；升到 v3 只会凭空制造一个版本号，
+ * 让以后读代码的人以为 v2 曾经对外发布过。
+ * ⚠️ 这条判断的**前提**是"v2 未发布"：v2 一旦随正式版本发出去，
+ * 之后任何字段变化都必须老实升版本号（否则旧插件读新文件时会静默丢字段）。
+ *
  * 比当前支持更高的版本仍**明确拒绝**并给出升级提示 —— 新字段我们看不懂，
  * "尽力解析"等于骗用户说导入成功了。
  */
@@ -45,6 +53,13 @@ import {
 } from './pathTypeCatalog.ts'
 import { describePathDashProblem } from './pathStyleSettings.ts'
 import {
+  MAX_CUSTOM_REGION_TYPES,
+  customRegionTypeEntries,
+  isBuiltinRegionType,
+  validateCustomRegionTypeInput,
+  type RegionTypeEntry,
+} from './regionTypeCatalog.ts'
+import {
   MAX_CUSTOM_TERRAINS,
   validateCustomTerrainInput,
   type CustomTerrain,
@@ -52,16 +67,17 @@ import {
 
 export const RESOURCE_BUNDLE_VERSION = 2
 
-/** 仍然接受的最低版本：v1 文件只带地形，导入时不动用户的标记与路径类型 */
+/** 仍然接受的最低版本：v1 文件只带地形，导入时不动用户的标记、路径类型与区域类型 */
 export const MIN_RESOURCE_BUNDLE_VERSION = 1
 
-/** 文件里的三个段（名字与 JSON 字段一致，便于把"哪一段"直接显示给用户） */
-export type BundleSection = 'terrains' | 'markers' | 'pathTypes'
+/** 文件里的四个段（名字与 JSON 字段一致，便于把"哪一段"直接显示给用户） */
+export type BundleSection = 'terrains' | 'markers' | 'pathTypes' | 'regionTypes'
 
 export const BUNDLE_SECTION_LABELS: Record<BundleSection, string> = {
   terrains: '地形',
   markers: '标记',
   pathTypes: '路径类型',
+  regionTypes: '区域类型',
 }
 
 export interface ResourceBundle {
@@ -80,6 +96,15 @@ export interface ResourceBundle {
    * 而不是遗漏（要分享整套样式需要另一条冲突规则，属于以后的功能）。
    */
   pathTypes: PathTypeEntry[]
+  /**
+   * **只含自定义区域类型**（内置 6 种不进文件）。
+   *
+   * 与内置路径类型同一条取舍、同一个理由：内置类型的 ID 在每个人的库里都存在
+   * （`realm` / `empire` …由代码定义），导出它们在导入侧只会得到一串"已有同 ID，保留现有的"——
+   * 既带不走任何东西，又让用户以为导入失败。
+   * 代价同样是"内置区域类型的画笔参数（颜色/不透明度/边框）不随文件分享"，这是取舍不是遗漏。
+   */
+  regionTypes: RegionTypeEntry[]
 }
 
 /** 解析结果：`sections` 记录文件里**真的出现过**哪几段（缺失的段不许动用户设置） */
@@ -110,11 +135,12 @@ export interface BundleNote {
   reason: string
 }
 
-/** 导出输入：三类自定义定义 */
+/** 导出输入：四类自定义定义 */
 export interface ResourceBundleInput {
   terrains: readonly CustomTerrain[]
   markers?: readonly CustomMarker[]
   pathTypes?: readonly PathTypeEntry[]
+  regionTypes?: readonly RegionTypeEntry[]
 }
 
 export interface BuildBundleOptions {
@@ -122,7 +148,7 @@ export interface BuildBundleOptions {
   now?: Date
 }
 
-/** 导出：把当前自定义地形 / 标记 / 路径类型打包成一份定义文件的内容 */
+/** 导出：把当前自定义地形 / 标记 / 路径类型 / 区域类型打包成一份定义文件的内容 */
 export function buildResourceBundle(input: ResourceBundleInput, options: BuildBundleOptions = {}): ResourceBundle {
   const now = options.now ?? new Date()
   return {
@@ -136,6 +162,11 @@ export function buildResourceBundle(input: ResourceBundleInput, options: BuildBu
       ...entry,
       params: { ...entry.params, dash: [...entry.params.dash] },
     })),
+    // 同上，内置 6 种区域类型也不进文件
+    regionTypes: customRegionTypeEntries(input.regionTypes ?? []).map((entry) => ({
+      ...entry,
+      params: { ...entry.params, borderDash: [...entry.params.borderDash] },
+    })),
   }
 }
 
@@ -145,7 +176,7 @@ export function buildResourceBundle(input: ResourceBundleInput, options: BuildBu
  * 键顺序固定（手写而不是 `JSON.stringify(bundle)`）：导出文件是要进 Git、要被 diff 的，
  * 稳定的字段顺序能让"只改了一条地形"在 diff 里只显示一行。
  *
- * 三段**永远都写出来**（哪怕是空数组）：这样"我什么都没自定义"导出的文件也是一份
+ * 四段**永远都写出来**（哪怕是空数组）：这样"我什么都没自定义"导出的文件也是一份
  * 自解释的文件，重新导入时是"0 新增"的一步干净操作，而不会被当成"这不像本插件的文件"。
  */
 export function serializeResourceBundle(bundle: ResourceBundle): string {
@@ -208,6 +239,26 @@ export function serializeResourceBundle(bundle: ResourceBundle): string {
     const comma = index === bundle.pathTypes.length - 1 ? '' : ','
     lines.push(`    { ${fields.join(', ')} }${comma}`)
   })
+  lines.push('  ],')
+  lines.push('  "regionTypes": [')
+  bundle.regionTypes.forEach((entry, index) => {
+    const params = [
+      `"color": ${JSON.stringify(entry.params.color)}`,
+      `"opacity": ${JSON.stringify(entry.params.opacity)}`,
+      // `null` 在这里是**有意义的值**（边框跟随填充色），与"没写这个字段"不是一回事：
+      // 丢掉它会让导入方拿到一个颜色被写死的边框，改填充色时边框不动。
+      `"borderColor": ${JSON.stringify(entry.params.borderColor)}`,
+      `"borderWidth": ${JSON.stringify(entry.params.borderWidth)}`,
+      `"borderDash": ${JSON.stringify(entry.params.borderDash)}`,
+    ]
+    const fields = [
+      `"id": ${JSON.stringify(entry.id)}`,
+      `"label": ${JSON.stringify(entry.label)}`,
+      `"params": { ${params.join(', ')} }`,
+    ]
+    const comma = index === bundle.regionTypes.length - 1 ? '' : ','
+    lines.push(`    { ${fields.join(', ')} }${comma}`)
+  })
   lines.push('  ]')
   lines.push('}')
   return `${lines.join('\n')}\n`
@@ -217,6 +268,7 @@ export interface ParseBundleOptions {
   maxTerrains?: number
   maxMarkers?: number
   maxPathTypes?: number
+  maxRegionTypes?: number
 }
 
 /** 某一段：取出数组（缺失 → `null`；类型不对 → 可读原因） */
@@ -244,6 +296,7 @@ export function parseResourceBundle(text: string, options: ParseBundleOptions = 
   const maxTerrains = options.maxTerrains ?? MAX_CUSTOM_TERRAINS
   const maxMarkers = options.maxMarkers ?? MAX_CUSTOM_MARKERS
   const maxPathTypes = options.maxPathTypes ?? MAX_CUSTOM_PATH_TYPES
+  const maxRegionTypes = options.maxRegionTypes ?? MAX_CUSTOM_REGION_TYPES
   if (typeof text !== 'string' || text.trim().length === 0) {
     return { ok: false, reason: '文件是空的，没有可导入的内容。' }
   }
@@ -257,7 +310,8 @@ export function parseResourceBundle(text: string, options: ParseBundleOptions = 
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return {
       ok: false,
-      reason: '文件内容应当是一个对象（形如 { "version": 2, "terrains": [], "markers": [], "pathTypes": [] }）。',
+      reason:
+        '文件内容应当是一个对象（形如 { "version": 2, "terrains": [], "markers": [], "pathTypes": [], "regionTypes": [] }）。',
     }
   }
 
@@ -284,22 +338,32 @@ export function parseResourceBundle(text: string, options: ParseBundleOptions = 
   if (!markerSection.ok) return { ok: false, reason: markerSection.reason }
   const pathTypeSection = readSection(source, 'pathTypes')
   if (!pathTypeSection.ok) return { ok: false, reason: pathTypeSection.reason }
+  const regionTypeSection = readSection(source, 'regionTypes')
+  if (!regionTypeSection.ok) return { ok: false, reason: regionTypeSection.reason }
 
-  if (terrainSection.list === null && markerSection.list === null && pathTypeSection.list === null) {
+  if (
+    terrainSection.list === null &&
+    markerSection.list === null &&
+    pathTypeSection.list === null &&
+    regionTypeSection.list === null
+  ) {
     return {
       ok: false,
-      reason: '文件里没有 terrains / markers / pathTypes 任何一段 —— 这不像是本插件导出的定义文件。',
+      reason: '文件里没有 terrains / markers / pathTypes / regionTypes 任何一段 —— 这不像是本插件导出的定义文件。',
     }
   }
 
   const terrains = terrainSection.list === null ? [] : parseTerrains(terrainSection.list, maxTerrains, skipped, notes)
   const markers = markerSection.list === null ? [] : parseMarkers(markerSection.list, maxMarkers, skipped, notes)
   const pathTypes = pathTypeSection.list === null ? [] : parsePathTypes(pathTypeSection.list, maxPathTypes, skipped)
+  const regionTypes =
+    regionTypeSection.list === null ? [] : parseRegionTypes(regionTypeSection.list, maxRegionTypes, skipped)
   if (terrainSection.list !== null) sections.push('terrains')
   if (markerSection.list !== null) sections.push('markers')
   if (pathTypeSection.list !== null) sections.push('pathTypes')
+  if (regionTypeSection.list !== null) sections.push('regionTypes')
 
-  const total = terrains.length + markers.length + pathTypes.length
+  const total = terrains.length + markers.length + pathTypes.length + regionTypes.length
   if (total === 0 && skipped.length > 0) {
     return { ok: false, reason: `文件里没有一条可用的定义。第一条的原因：${skipped[0]!.reason}` }
   }
@@ -313,6 +377,7 @@ export function parseResourceBundle(text: string, options: ParseBundleOptions = 
       terrains,
       markers,
       pathTypes,
+      regionTypes,
       sections,
     },
     skipped,
@@ -474,8 +539,57 @@ function parsePathTypes(list: unknown[], max: number, skipped: BundleSkip[]): Pa
   return out
 }
 
-/* ------------------------------------------------------------------ 合并 */
+/**
+ * 区域类型段：写法与路径类型段同构（`params` 嵌套或同级扁平都收）。
+ *
+ * 虚线的处理也照抄路径那一段：**在解析这一步就拒绝整条并给出原因**，
+ * 而不是像参数回退那样静默变实线 —— 边框虚线是"分享样式"的内容之一，
+ * 悄悄改掉它等于把别人的定义换了还不说。
+ */
+function parseRegionTypes(list: unknown[], max: number, skipped: BundleSkip[]): RegionTypeEntry[] {
+  const out: RegionTypeEntry[] = []
+  const seen = new Set<string>()
+  list.forEach((item, index) => {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      skipped.push({ id: `#${index + 1}`, reason: '这一项不是一个对象' })
+      return
+    }
+    const record = item as Record<string, unknown>
+    const params =
+      record.params !== null && typeof record.params === 'object' && !Array.isArray(record.params)
+        ? (record.params as Record<string, unknown>)
+        : record
+    const id = idOf(item)
+    // `params` 优先（嵌套写法），否则看条目自身的扁平字段 —— 与路径类型段逐字同规则
+    const borderDash = params.borderDash !== undefined ? params.borderDash : record.borderDash
+    const result = validateCustomRegionTypeInput({
+      id: record.id,
+      label: record.label,
+      color: params.color,
+      opacity: params.opacity,
+      borderColor: params.borderColor,
+      borderWidth: params.borderWidth,
+      ...(borderDash !== undefined ? { borderDash } : {}),
+    })
+    if (!result.ok) {
+      skipped.push({ id: id ?? `#${index + 1}`, reason: result.problem })
+      return
+    }
+    if (seen.has(result.entry.id)) {
+      skipped.push({ id: result.entry.id, reason: '文件里有重复 ID，只保留先出现的那条' })
+      return
+    }
+    if (out.length >= max) {
+      skipped.push({ id: result.entry.id, reason: `超过上限（最多 ${max} 条）` })
+      return
+    }
+    seen.add(result.entry.id)
+    out.push(result.entry)
+  })
+  return out
+}
 
+/* ------------------------------------------------------------------ 合并 */
 export interface MergeTerrainsResult {
   terrains: CustomTerrain[]
   added: string[]
@@ -495,6 +609,13 @@ export interface MergePathTypesResult {
   pathTypes: PathTypeEntry[]
   added: string[]
   addedItems: PathTypeEntry[]
+  skipped: BundleSkip[]
+}
+
+export interface MergeRegionTypesResult {
+  regionTypes: RegionTypeEntry[]
+  added: string[]
+  addedItems: RegionTypeEntry[]
   skipped: BundleSkip[]
 }
 
@@ -611,6 +732,50 @@ export function mergePathTypes(
 
 const CONFLICT_KEEP_EXISTING = '已有同 ID 的定义，保留现有的（导入是补充，不会覆盖）'
 
+/**
+ * 合并区域类型。
+ *
+ * 与路径类型合并**逐条同构**（所以两处的行为不会分叉）：
+ * 1. 上限只数**自定义**条目 —— 内置 6 种永远存在、不占用户的 32 个名额；
+ * 2. 与内置类型同 ID 的条目一定冲突（内置类型在每个库里都有），原因要写清"内置的不能被替换"。
+ */
+export function mergeRegionTypes(
+  existing: readonly RegionTypeEntry[],
+  incoming: readonly RegionTypeEntry[],
+  options: { maxRegionTypes?: number } = {},
+): MergeRegionTypesResult {
+  const existingCustom = customRegionTypeEntries(existing)
+  const base = [...existing]
+  const known = new Set(existing.map((entry) => entry.id))
+  const added: RegionTypeEntry[] = []
+  const addedIds: string[] = []
+  const skipped: BundleSkip[] = []
+  const max = options.maxRegionTypes ?? MAX_CUSTOM_REGION_TYPES
+  let customCount = existingCustom.length
+
+  for (const entry of incoming) {
+    if (known.has(entry.id)) {
+      skipped.push({
+        id: entry.id,
+        reason: isBuiltinRegionType(entry.id)
+          ? '内置类型在每个库里都有，不能替换（导入是补充，不会覆盖）'
+          : CONFLICT_KEEP_EXISTING,
+      })
+      continue
+    }
+    if (customCount >= max) {
+      skipped.push({ id: entry.id, reason: `超过上限（最多 ${max} 条自定义区域类型）` })
+      continue
+    }
+    known.add(entry.id)
+    customCount += 1
+    added.push(entry)
+    addedIds.push(entry.id)
+  }
+
+  return { regionTypes: [...base, ...added], added: addedIds, addedItems: added, skipped }
+}
+
 /** 合并结果 → 计划里那一段（计划只关心"新增了哪些条目"与"跳过了哪些、为什么"） */
 function pickAdded<T>(merged: { addedItems: T[]; skipped: BundleSkip[] }): { added: T[]; skipped: BundleSkip[] } {
   return { added: merged.addedItems, skipped: merged.skipped }
@@ -624,6 +789,7 @@ export interface BundleImportPlan {
   terrains: { added: CustomTerrain[]; skipped: BundleSkip[] }
   markers: { added: CustomMarker[]; skipped: BundleSkip[] }
   pathTypes: { added: PathTypeEntry[]; skipped: BundleSkip[] }
+  regionTypes: { added: RegionTypeEntry[]; skipped: BundleSkip[] }
   /** 将新增的条目总数 */
   addedCount: number
   /** 被跳过的条目总数（同 ID 冲突 + 非法 + 超上限） */
@@ -643,6 +809,14 @@ export interface BundleImportCurrent {
   terrains: readonly CustomTerrain[]
   markers: readonly CustomMarker[]
   pathTypes: readonly PathTypeEntry[]
+  /**
+   * 用户当前的区域类型目录。
+   *
+   * ⚠️ 刻意**必填**：它决定"文件里这条区域类型算新增还是算冲突"，
+   * 漏传会让计划把已有的条目说成"将新增"（而落盘时会因为 ID 重复而被收敛掉）——
+   * 于是"对话框里说的"与"实际做的"分叉，而这正是导入最该避免的缺陷。
+   */
+  regionTypes: readonly RegionTypeEntry[]
 }
 
 /**
@@ -658,6 +832,15 @@ export function planBundleImport(
   options: PlanBundleOptions = {},
 ): BundleImportPlan {
   const sections = bundle.sections
+  /**
+   * "文件里出现过这一段吗"。
+   *
+   * ⚠️ 今天这道判断**不可观测**：解析侧对缺失的段给的是空数组，而下面的合并只增不删，
+   * 于是"合并空数组"与"跳过合并"结果完全一样（鉴别力验证时实测：把 `has()` 改成恒真，
+   * 一条断言都不会红）。真正保护用户定义的是**合并语义只增不删**，`has()` 是第二道防线 ——
+   * 它的价值在未来：一旦有人把合并改成"以文件为准的替换"，这道判断就是唯一挡住
+   * "一份 v1 老文件清空用户标记"的东西。所以留着，但别把它当成当前的保护伞。
+   */
   const has = (section: BundleSection) => sections.includes(section)
 
   const terrains: { added: CustomTerrain[]; skipped: BundleSkip[] } = has('terrains')
@@ -669,15 +852,21 @@ export function planBundleImport(
   const pathTypes: { added: PathTypeEntry[]; skipped: BundleSkip[] } = has('pathTypes')
     ? pickAdded(mergePathTypes(current.pathTypes, bundle.pathTypes, { maxPathTypes: options.maxPathTypes }))
     : { added: [], skipped: [] }
+  const regionTypes: { added: RegionTypeEntry[]; skipped: BundleSkip[] } = has('regionTypes')
+    ? pickAdded(mergeRegionTypes(current.regionTypes, bundle.regionTypes, { maxRegionTypes: options.maxRegionTypes }))
+    : { added: [], skipped: [] }
 
-  const addedCount = terrains.added.length + markers.added.length + pathTypes.added.length
-  const skippedCount = terrains.skipped.length + markers.skipped.length + pathTypes.skipped.length
+  const addedCount =
+    terrains.added.length + markers.added.length + pathTypes.added.length + regionTypes.added.length
+  const skippedCount =
+    terrains.skipped.length + markers.skipped.length + pathTypes.skipped.length + regionTypes.skipped.length
 
   return {
     sections,
     terrains: { added: terrains.added, skipped: terrains.skipped },
     markers: { added: markers.added, skipped: markers.skipped },
     pathTypes: { added: pathTypes.added, skipped: pathTypes.skipped },
+    regionTypes: { added: regionTypes.added, skipped: regionTypes.skipped },
     addedCount,
     skippedCount,
     notes: [...(options.notes ?? [])],
@@ -703,18 +892,24 @@ export function describeImportPlan(plan: BundleImportPlan): string {
   const lines: string[] = []
   lines.push(
     plan.addedCount > 0
-      ? `将新增 ${plan.addedCount} 条定义（地形 ${plan.terrains.added.length} · 标记 ${plan.markers.added.length} · 路径类型 ${plan.pathTypes.added.length}）。`
+      ? `将新增 ${plan.addedCount} 条定义（地形 ${plan.terrains.added.length} · 标记 ${plan.markers.added.length} · 路径类型 ${plan.pathTypes.added.length} · 区域类型 ${plan.regionTypes.added.length}）。`
       : '没有可新增的定义：这份文件里的条目在你库里都已经有了（或全部不合法）。',
   )
   for (const line of [
     describeAdded('地形', plan.terrains.added.map((item) => item.id)),
     describeAdded('标记', plan.markers.added.map((item) => item.id)),
     describeAdded('路径类型', plan.pathTypes.added.map((item) => item.id)),
+    describeAdded('区域类型', plan.regionTypes.added.map((item) => item.id)),
   ]) {
     if (line !== null) lines.push(line)
   }
 
-  const skipped = [...plan.terrains.skipped, ...plan.markers.skipped, ...plan.pathTypes.skipped]
+  const skipped = [
+    ...plan.terrains.skipped,
+    ...plan.markers.skipped,
+    ...plan.pathTypes.skipped,
+    ...plan.regionTypes.skipped,
+  ]
   if (skipped.length > 0) {
     lines.push(`跳过 ${skipped.length} 条（不会被写入）：`)
     for (const item of skipped.slice(0, 12)) lines.push(`　· ${item.id} —— ${item.reason}`)
@@ -722,7 +917,7 @@ export function describeImportPlan(plan: BundleImportPlan): string {
   }
 
   // "哪一段没被提到"必须说出来：否则用户会以为文件里的标记也导进来了
-  const missing = (['terrains', 'markers', 'pathTypes'] as BundleSection[]).filter(
+  const missing = (['terrains', 'markers', 'pathTypes', 'regionTypes'] as BundleSection[]).filter(
     (section) => !plan.sections.includes(section),
   )
   if (missing.length > 0) {
@@ -743,7 +938,7 @@ export function describeImportPlan(plan: BundleImportPlan): string {
 
 /** 计划 → 一条短提示（导入完成之后；详细原因在对话框里已经看过） */
 export function describeImportResult(plan: BundleImportPlan): string {
-  const counts = `地形 ${plan.terrains.added.length} · 标记 ${plan.markers.added.length} · 路径类型 ${plan.pathTypes.added.length}`
+  const counts = `地形 ${plan.terrains.added.length} · 标记 ${plan.markers.added.length} · 路径类型 ${plan.pathTypes.added.length} · 区域类型 ${plan.regionTypes.added.length}`
   const extra: string[] = []
   if (plan.skippedCount > 0) extra.push(`跳过 ${plan.skippedCount} 条`)
   // 回退也报一下：否则"导入成功了但视觉不一样"就没了线索（详情在对话框里）
