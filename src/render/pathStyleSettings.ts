@@ -1,21 +1,24 @@
 /**
- * 路径样式设置：让每种路径类型（河流/道路/贸易路线/边界）的**线宽、虚线、末端变细、平滑**
- * 都能由用户调整，而不只是颜色。
+ * 路径样式的**旧字段兼容层** + 数值收敛的公共工具。
  *
- * 与 `stylePalette.ts` 的关系：那边管的是"颜色 + 字体"，这里是"整条线的画法"。
- * 颜色是这里的 `color` 字段的一部分 —— 但**不要**因此就以为可以两处各存一份：
- * `stylePalette.pathColors` 会被视为**旧字段**，由 `fromLegacyPathColors()` 迁移进来，
- * 迁移之后颜色只有一个来源（设置里那份完整样式表）。
+ * ⚠️ 从 ⑤-1 起，"每种路径类型的参数"的唯一来源是 `pathTypeCatalog.ts` 里的目录
+ * （内置 4 种 + 用户自定义，颜色/线宽/虚线/变细/平滑/端点/连接都在 `PathTypeEntry.params`）。
+ * 本模块的职责**只剩两件**：
+ * 1. 把旧一代的字段（只有颜色的 `stylePalette.pathColors`、以及 `pathStyleOverrides`）
+ *    读一次并交给目录迁移，之后旧字段只读兼容、**不再是渲染依据**；
+ * 2. 提供 `normalizePathWidth` / `normalizePathDash` 这两个被目录复用的收敛函数
+ *    —— 它们的语义（尤其虚线的三态）已经付过代价，不重新发明。
  *
- * 三条校验原则（都是"静默变形"的高发区）：
- * 1. **线宽夹取而不是接受任意值**：0.1 px 的线看不见、500 px 的线糊满屏幕，
- *    两者都不是"用户想要的效果"，而是"设置被写坏了"；
- * 2. **虚线数组要整体校验**：长度必须是偶数（实-空成对）、全为有限非负数、且**不能全为 0**
- *    （全 0 会让线彻底消失，而画布不会报错）；
+ * 因此：**不要**在渲染或设置界面里直接调用本模块的 `resolvePathStyleFull` /
+ * `normalizePathStyleOverrides`；那只在迁移路径上出现（见 `pathTypeCatalog.migratedBuiltinParams`）。
+ *
+ * 三条原样保留的校验原则（都是"静默变形"的高发区）：
+ * 1. **线宽夹取而不是接受任意值**：0.1 px 的线看不见、500 px 的线糊满屏幕；
+ * 2. **虚线数组要整体校验**：长度必须是偶数（实-空成对）、全为有限非负数、且**不能全为 0**；
  * 3. **未知键丢弃、缺项补齐**：与设置里其它部分同一口径（`data.json` 可能被手工改坏）。
  */
 
-import { PATH_TYPES, type PathType } from '../data/mapDocument.ts'
+import { PATH_TYPES, type BuiltinPathType } from '../data/mapDocument.ts'
 import { PATH_STYLES, type PathStyle } from './shapeStyle.ts'
 import { normalizeColor } from './stylePalette.ts'
 
@@ -28,7 +31,7 @@ export const PATH_DASH_MAX_SEGMENTS = 8
 const PATH_DASH_SEGMENT_MAX = 64
 
 export interface PathStyleOverride {
-  /** 线颜色（与 `stylePalette.pathColors` 是同一件事，迁移后只留这一处） */
+  /** 线颜色（与 `stylePalette.pathColors` 是同一件事，迁移后只留目录里那一处） */
   color: string
   /** 线宽（世界单位） */
   width: number
@@ -40,7 +43,14 @@ export interface PathStyleOverride {
   smooth: boolean
 }
 
-export type PathStyleOverrides = Record<PathType, PathStyleOverride>
+/**
+ * 旧字段的形状：按**内置类型**索引的一张表。
+ *
+ * 键类型刻意是 `BuiltinPathType`（不是放宽后的 `PathType`）：这张表只描述出厂 4 种，
+ * 自定义与未知类型从来不属于它。运行时仍可能被手工改坏（缺项），
+ * 所以下面读它的地方一律带兜底。
+ */
+export type PathStyleOverrides = Record<BuiltinPathType, PathStyleOverride>
 
 /** 出厂样式：直接取 `PATH_STYLES`，不在这里再抄一份数值 */
 export function defaultPathStyleOverrides(): PathStyleOverrides {
@@ -104,7 +114,7 @@ export function describePathDashProblem(value: unknown): string | null {
   return null
 }
 
-function normalizeOne(type: PathType, raw: unknown, fallback: PathStyleOverride): PathStyleOverride {
+function normalizeOne(type: BuiltinPathType, raw: unknown, fallback: PathStyleOverride): PathStyleOverride {
   const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   // 缺失 → 出厂虚线；显式 [] → 实线；其余不合法 → 出厂虚线（见 normalizePathDash 的说明）
   const dash = source.dash === undefined ? [...fallback.dash] : (normalizePathDash(source.dash) ?? [...fallback.dash])
@@ -131,7 +141,7 @@ export function normalizePathStyleOverrides(
   const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   const out = {} as PathStyleOverrides
   for (const type of PATH_TYPES) {
-    const base = fallback[type]
+    const base = fallback[type] ?? factoryOverrideOf(type)
     const migrated =
       source[type] === undefined && legacyPathColors !== undefined
         ? { ...base, color: normalizeColor(legacyPathColors[type], base.color) }
@@ -141,6 +151,7 @@ export function normalizePathStyleOverrides(
   return out
 }
 
+
 /** 从旧的"只有颜色"设置迁移出一整张样式表（供 settings 归一化调用） */
 export function fromLegacyPathColors(legacyPathColors: unknown): PathStyleOverrides {
   const source = legacyPathColors !== null && typeof legacyPathColors === 'object' ? (legacyPathColors as Record<string, unknown>) : {}
@@ -148,14 +159,16 @@ export function fromLegacyPathColors(legacyPathColors: unknown): PathStyleOverri
 }
 
 /**
- * 解析成绘制层用的 `PathStyle`（出厂结构 + 用户覆盖）。
+ * 解析成绘制层用的 `PathStyle`（出厂结构 + 旧字段覆盖）。
  *
- * 与 `stylePalette.resolvePathStyle` 的区别：这里**所有字段**都可覆盖，
- * 而那边只覆盖颜色。接线完成后，绘制层统一走这一条路径（颜色也包含在内）。
+ * ⚠️ **只用于旧字段迁移**（`pathTypeCatalog.migratedBuiltinParams`）：它只认内置 4 种
+ * （基准样式取自 `PATH_STYLES`）。渲染与设置界面一律走
+ * `pathTypeCatalog.resolvedPathStyle()` —— 那里才认识自定义与未知类型。
  */
-export function resolvePathStyleFull(type: PathType, overrides: PathStyleOverrides): PathStyle {
+export function resolvePathStyleFull(type: BuiltinPathType, overrides: PathStyleOverrides): PathStyle {
   const base = PATH_STYLES[type]
-  const override = overrides?.[type] ?? defaultPathStyleOverrides()[type]
+  // 取不到覆盖（表是空的 / 被手工改坏）时用出厂值：**绝不**让"没有覆盖"变成"没有样式"
+  const override = overrides?.[type] ?? defaultPathStyleOverrides()[type] ?? factoryOverrideOf(type)
   const style: PathStyle = {
     type: base.type,
     label: base.label,
@@ -168,12 +181,25 @@ export function resolvePathStyleFull(type: PathType, overrides: PathStyleOverrid
   return style
 }
 
+/** 出厂样式 → 一份覆盖表（只在表查询落空时兜底，见 `resolvePathStyleFull` / `normalizePathStyleOverrides`） */
+function factoryOverrideOf(type: BuiltinPathType): PathStyleOverride {
+  const base = PATH_STYLES[type]
+  return {
+    color: base.color,
+    width: base.width,
+    dash: base.dash ? [...base.dash] : [],
+    taper: base.taper === true,
+    smooth: base.smooth === true,
+  }
+}
+
 /** 是否全部等于出厂样式（设置页据此显示"已改动/恢复默认"） */
 export function isDefaultPathStyleOverrides(overrides: PathStyleOverrides): boolean {
   const fallback = defaultPathStyleOverrides()
   return PATH_TYPES.every((type) => {
     const a = overrides[type]
     const b = fallback[type]
+    if (a === undefined || b === undefined) return a === b
     return (
       a.color === b.color &&
       a.width === b.width &&

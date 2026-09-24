@@ -102,8 +102,10 @@ function makeDocument(): MapDocument {
 
 const deps = {
   resolveTerrain: (type: string) => ({ label: `地形:${type}`, color: type === 'custom-bog' ? '#6b8f71' : '#3f7d3f' }),
-  resolvePath: (type: keyof typeof PATH_STYLES) => {
-    const style = PATH_STYLES[type]
+  // 类型放宽成 string：自定义/未知类型也要能进图例（内置表只在认识 ID 时用得着）
+  resolvePath: (type: string) => {
+    const style = (PATH_STYLES as Record<string, (typeof PATH_STYLES)[keyof typeof PATH_STYLES]>)[type]
+    if (!style) return { label: `未知:${type}`, color: '#000000' }
     return { label: style.label, color: style.color, ...(style.dash ? { dash: style.dash } : {}) }
   },
   resolveRegion: (color: string) => ({ label: color === '#44cf6e' ? '王国' : '水域' }),

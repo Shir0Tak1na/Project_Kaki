@@ -237,6 +237,58 @@
   border: 1px solid rgba(0, 0, 0, 0.35);
 }
 
+/* ---------------------------------------------------------------- 路径类型下拉
+   路径类型可能有很多（内置 4 种 + 最多 32 个自定义），一排按钮会把工具条挤爆，
+   所以收进一个下拉。菜单是**绝对定位**的浮层：它不能把下面的控件顶走。 */
+.fc-toolbar-path-group {
+  position: relative;
+}
+
+.fc-toolbar-path-trigger {
+  gap: 6px;
+}
+
+.fc-toolbar-path-caret {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.fc-toolbar-path-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+  /* 类型多的时候要能滚：32 项 + 内置 4 项远超一屏 */
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+.fc-toolbar-path-option {
+  justify-content: flex-start;
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+}
+
+.fc-toolbar-path-option.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.fc-toolbar-path-option:hover {
+  background: var(--background-modifier-hover);
+}
+
 .fc-toolbar-brush {
   min-width: 16px;
   text-align: center;

@@ -16,16 +16,12 @@ import type { CustomTerrain } from '../render/terrainCatalog.ts'
 import { normalizeCustomTerrains } from '../render/terrainCatalog.ts'
 import type { CustomMarker } from '../render/markerCatalog.ts'
 import { normalizeCustomMarkers } from '../render/markerCatalog.ts'
+import type { PathTypeEntry } from '../render/pathTypeCatalog.ts'
+import { normalizePathTypeEntries, pathColorsFromEntries } from '../render/pathTypeCatalog.ts'
 import type { LayerVisibility } from '../render/layerVisibility.ts'
 import { DEFAULT_LAYER_VISIBILITY, layerVisibilityFromLegacy } from '../render/layerVisibility.ts'
 import type { PathColorMap, StylePalette } from '../render/stylePalette.ts'
-import {
-  defaultPathColors,
-  defaultRegionColors,
-  normalizeFontFamily,
-  normalizePathColors,
-  normalizeRegionColors,
-} from '../render/stylePalette.ts'
+import { defaultRegionColors, normalizeFontFamily, normalizeRegionColors } from '../render/stylePalette.ts'
 
 export interface CartographerSettings {
   /** 名称字号倍率（1 = 默认）。范围 0.5–3.0，步长 0.1。 */
@@ -35,7 +31,20 @@ export interface CartographerSettings {
    * 关着时这些命令会从命令面板里**隐藏**，避免误触。
    */
   developerMode: boolean
-  /** 每种路径类型的默认颜色（新画的路径用它） */
+  /**
+   * **每种路径类型的参数**（内置 4 种 + 用户自定义）—— 路径样式的唯一来源。
+   *
+   * 颜色、线宽、虚线、末端变细、平滑、端点、连接全都住在这里的 `params` 里。
+   * 内置 4 种永远存在且顺序固定；自定义项由用户在设置页增删。
+   */
+  pathTypes: PathTypeEntry[]
+  /**
+   * 每种路径类型的颜色 —— **旧字段**，只读兼容。
+   *
+   * 它已经不再是渲染依据（渲染一律走 `pathTypes`）。保留是为了：
+   * 1. 迁移上一代 `data.json`（那里只有这一个字段）；
+   * 2. 写回时让旧字段与目录保持一致，用户回退到旧版插件仍能看到自己改过的颜色。
+   */
   pathColors: PathColorMap
   /** 区域预设色（新画的区域用它） */
   regionColors: string[]
@@ -69,10 +78,14 @@ export interface CartographerSettings {
   showLegend: boolean
 }
 
+/** 出厂路径类型目录（内置 4 种、参数即出厂值） */
+const DEFAULT_PATH_TYPES: PathTypeEntry[] = normalizePathTypeEntries(undefined)
+
 export const DEFAULT_SETTINGS: CartographerSettings = {
   labelScale: 1,
   developerMode: false,
-  pathColors: defaultPathColors(),
+  pathTypes: DEFAULT_PATH_TYPES,
+  pathColors: pathColorsFromEntries(DEFAULT_PATH_TYPES),
   regionColors: defaultRegionColors(),
   labelFontFamily: '',
   customTerrains: [],
@@ -109,13 +122,24 @@ export function normalizeLabelScale(value: unknown): number {
  * 2. **缺项按出厂默认补齐**，而不是留 `undefined`：调用方各处 `?? 兜底` 才是真正的隐患来源；
  * 3. **布尔字段只在明确为 `true` 时为真**（`showLegend` / `developerMode`），
  *    垃圾值一律当"关" —— 反过来（垃圾值当"开"）会让用户莫名其妙多出一个面板。
+ *
+ * 迁移：`pathColors`（上一代唯一的路径样式字段）与 `pathStyleOverrides`（更早的画法表）
+ * 都只作为**迁移输入**读一次，结果进 `pathTypes`；之后目录就是唯一来源。
+ * 迁移是幂等的（再跑一次结果相同），而且**用户没改过任何东西时结果等于出厂值** ——
+ * 也就是"迁移前后视觉完全一致"。
  */
 export function normalizeSettings(raw: unknown): CartographerSettings {
   const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const pathTypes = normalizePathTypeEntries(source.pathTypes, {
+    pathColors: asRecord(source.pathColors),
+    pathStyleOverrides: asRecord(source.pathStyleOverrides),
+  })
   return {
     labelScale: normalizeLabelScale(source.labelScale),
     developerMode: source.developerMode === true,
-    pathColors: normalizePathColors(source.pathColors),
+    pathTypes,
+    // 旧字段与目录保持一致（不是第二个来源：渲染从不读它，见 CartographerSettings.pathColors）
+    pathColors: pathColorsFromEntries(pathTypes),
     regionColors: normalizeRegionColors(source.regionColors),
     labelFontFamily: normalizeFontFamily(source.labelFontFamily),
     // 自定义地形逐条独立校验：data.json 被手工改坏时只丢坏的那一条，其余照常可用
@@ -128,6 +152,13 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     layers: layerVisibilityFromLegacy({ showGrid: source.showGrid, layers: source.layers }),
     showLegend: source.showLegend === true,
   }
+}
+
+/** 只把"对象"当成迁移输入；数字、字符串、数组一律当没给（旧字段可能被手工改坏） */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
 }
 
 /** 设置 → 绘制层消费的调色板 */

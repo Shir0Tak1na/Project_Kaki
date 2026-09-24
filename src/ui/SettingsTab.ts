@@ -16,8 +16,23 @@
 
 import { PluginSettingTab, Setting, type App } from 'obsidian'
 import type ProjectKakiPlugin from '../main.ts'
-import { MARKER_ICONS, PATH_TYPES } from '../data/mapDocument.ts'
-import { PATH_STYLES, REGION_PRESETS } from '../render/shapeStyle.ts'
+import { MARKER_ICONS } from '../data/mapDocument.ts'
+import { REGION_PRESETS } from '../render/shapeStyle.ts'
+import {
+  CUSTOM_PATH_TYPE_PREFIX,
+  DEFAULT_CUSTOM_PATH_COLOR,
+  DEFAULT_CUSTOM_PATH_WIDTH,
+  MAX_CUSTOM_PATH_TYPES,
+  PATH_CAP_LABELS,
+  PATH_JOIN_LABELS,
+  customPathTypeEntries,
+  describePathTypeParams,
+  isDefaultPathTypeStyles,
+  listPathTypeEntries,
+  parsePathDashInput,
+  pathTypeIdProblem,
+  resolvePathType,
+} from '../render/pathTypeCatalog.ts'
 import {
   CUSTOM_MARKER_PREFIX,
   DEFAULT_CUSTOM_MARKER_MODE,
@@ -38,7 +53,7 @@ import {
 } from '../render/terrainCatalog.ts'
 import { listTerrainStyles } from '../render/terrainStyle.ts'
 import { LAYER_KEYS, LAYER_LABELS, isLayerVisible, type LayerKey } from '../render/layerVisibility.ts'
-import { isDefaultPathColors, isDefaultRegionColors } from '../render/stylePalette.ts'
+import { isDefaultRegionColors } from '../render/stylePalette.ts'
 
 /**
  * 自定义地形的两种模式（设置页的分段控件用）。
@@ -91,6 +106,8 @@ export class CartographerSettingTab extends PluginSettingTab {
   private noteEl: HTMLElement | null = null
   /** 自定义标记区底部那一行就地提示（与地形那行分开，见 `setMarkerNoteText`） */
   private markerNoteEl: HTMLElement | null = null
+  /** 路径类型区底部那一行就地提示（同样分开：三节同屏，提示必须出现在出问题的那一节下面） */
+  private pathTypeNoteEl: HTMLElement | null = null
 
   constructor(app: App, plugin: ProjectKakiPlugin) {
     super(app, plugin)
@@ -193,27 +210,17 @@ export class CartographerSettingTab extends PluginSettingTab {
         }),
       )
 
-    // ---- 样式（路径颜色 / 区域颜色 / 字体）----
+    // ---- 样式（路径类型参数 / 区域颜色 / 字体）----
     containerEl.createEl('h3', { text: '样式' })
     containerEl.createEl('div', {
       cls: 'fc-settings-note',
       // 设置说明是纯文本（不是 Markdown），所以这里不要写 ** 强调
       text:
-        '这些颜色只决定新画的路径与区域用什么颜色。已经画好的对象把颜色存在地图文件里' +
-        '（path.color / region.color），改设置不会改动它们。',
+        '这些参数只决定新画的路径与区域用什么样式。已经画好的对象把样式存在地图文件里' +
+        '（path.color / path.width / path.dash / path.cap / path.join），改设置不会改动它们。',
     })
 
-    for (const type of PATH_TYPES) {
-      const style = PATH_STYLES[type]
-      new Setting(containerEl)
-        .setName(`路径颜色 · ${style.label}`)
-        .setDesc(`新画的${style.label}用它（线宽 ${style.width}、${style.dash ? '虚线' : '实线'}等保持出厂设定）`)
-        .addColorPicker((picker) =>
-          picker.setValue(settings.pathColors[type]).onChange((value) => {
-            void this.plugin.setPathColor(type, value)
-          }),
-        )
-    }
+    this.renderPathTypes(containerEl, settings)
 
     REGION_PRESETS.forEach((preset, index) => {
       new Setting(containerEl)
@@ -242,10 +249,17 @@ export class CartographerSettingTab extends PluginSettingTab {
           }),
       )
 
-    const dirty = !isDefaultPathColors(settings.pathColors) || !isDefaultRegionColors(settings.regionColors) || settings.labelFontFamily.length > 0
+    const dirty =
+      !isDefaultPathTypeStyles(settings.pathTypes) ||
+      !isDefaultRegionColors(settings.regionColors) ||
+      settings.labelFontFamily.length > 0
     new Setting(containerEl)
       .setName('恢复出厂样式')
-      .setDesc(dirty ? '当前样式已被改动。点这里把所有颜色与字体恢复为出厂默认。' : '当前就是出厂默认样式。')
+      .setDesc(
+        dirty
+          ? '当前样式已被改动。点这里把内置 4 种路径类型的参数、区域颜色与字体恢复为出厂默认（自定义路径类型定义不会被删）。'
+          : '当前就是出厂默认样式。',
+      )
       .addButton((button) =>
         button.setButtonText('恢复默认').onClick(() => {
           void this.plugin.resetStylePalette()
@@ -770,9 +784,198 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
   }
 
+  /**
+   * 路径类型参数（内置 4 种 + 自定义）+ 自定义类型的新建/删除。
+   *
+   * 为什么每种类型用**两个** Setting 而不是七个：一屏要放下最多 36 种类型，
+   * 每个字段一行会让用户永远滚不到底。按"视觉（颜色/端点/连接）"与"尺寸（线宽/虚线）"
+   * 分成两行，仍然每行都有名字与说明。
+   *
+   * 为什么错误信息就地显示：同自定义地形那一节 —— 弹出去的通知会遮住输入框，
+   * 而用户往往需要边改边看原因。
+   */
+  private renderPathTypes(containerEl: HTMLElement, settings: CartographerSettings): void {
+    const pathTypes = listPathTypeEntries(settings.pathTypes)
+    const custom = customPathTypeEntries(settings.pathTypes)
+
+    containerEl.createEl('h3', { text: '路径类型' })
+    containerEl.createEl('div', {
+      cls: 'fc-settings-note',
+      text:
+        '每种路径类型的颜色、线宽、虚线、端点与连接都在这里改。内置 4 种的名字固定，' +
+        '自定义类型的名字随时可改（改名字不影响已经画好的路径）。' +
+        '虚线填成 实-空 成对的数字（例如 14,10），留空 = 实线。',
+    })
+
+    for (const entry of pathTypes) {
+      const resolved = resolvePathType(entry.id, settings.pathTypes)
+      const isCustom = !resolved.builtin
+      const dashText = entry.params.dash.join(',')
+
+      new Setting(containerEl)
+        .setName(`${entry.label}${isCustom ? '（自定义）' : ''}`)
+        .setDesc(`ID ${entry.id} · ${describePathTypeParams(entry.params)}`)
+        .addColorPicker((picker) =>
+          picker.setValue(entry.params.color).onChange((value) => {
+            void this.plugin.updatePathType(entry.id, { color: value }).then((result) => {
+              if (!result.ok) this.setPathTypeNoteText(result.problem)
+            })
+          }),
+        )
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOptions(PATH_CAP_LABELS)
+            .setValue(entry.params.cap)
+            .onChange((value) => {
+              void this.plugin.updatePathType(entry.id, { cap: value })
+            }),
+        )
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOptions(PATH_JOIN_LABELS)
+            .setValue(entry.params.join)
+            .onChange((value) => {
+              void this.plugin.updatePathType(entry.id, { join: value })
+            }),
+        )
+
+      new Setting(containerEl)
+        .setName(`线宽与虚线 · ${entry.label}`)
+        .setDesc('线宽是世界单位（1–40）；虚线留空 = 实线')
+        .addText((text) =>
+          text
+            .setPlaceholder('线宽，例如 5')
+            .setValue(String(entry.params.width))
+            .onChange((value) => {
+              void this.plugin.updatePathType(entry.id, { width: value })
+            }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('虚线，例如 14,10；留空 = 实线')
+            .setValue(dashText)
+            .onChange((value) => {
+              const parsed = parsePathDashInput(value)
+              if (!parsed.ok) {
+                this.setPathTypeNoteText(`「${entry.label}」的虚线：${parsed.problem}`)
+                return
+              }
+              void this.plugin.updatePathType(entry.id, { dash: parsed.dash }).then((result) => {
+                this.setPathTypeNoteText(result.ok ? '' : `「${entry.label}」的虚线：${result.problem}`)
+              })
+            }),
+        )
+        // 删除只给自定义类型：内置 4 种删掉会让旧地图的路径全部变成"未知类型"
+        .addButton((button) => {
+          if (!isCustom) return
+          button.setButtonText('删除').setWarning().setTooltip(`删除自定义类型 ${entry.id}`).onClick(() => {
+            void this.plugin.removeCustomPathType(entry.id).then(() => this.display())
+          })
+        })
+    }
+
+    // ---- 新建（与自定义地形/标记同构）----
+    const atLimit = custom.length >= MAX_CUSTOM_PATH_TYPES
+    const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
+    note.dataset.fcNote = 'pathType'
+    this.pathTypeNoteEl = note
+    const pending: { id: string; label: string; color: string; width: string; dash: string } = {
+      id: '',
+      label: '',
+      color: DEFAULT_CUSTOM_PATH_COLOR,
+      width: String(DEFAULT_CUSTOM_PATH_WIDTH),
+      dash: '',
+    }
+
+    new Setting(containerEl)
+      .setName('新增自定义路径类型')
+      .setDesc(
+        atLimit
+          ? `已达上限（${MAX_CUSTOM_PATH_TYPES} 个）`
+          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+              `前缀 ${CUSTOM_PATH_TYPE_PREFIX} 会自动补上，避免与内置 4 种重名。` +
+              '建好之后同样可以改颜色、线宽、端点与连接。',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('ID（例如 highway）')
+          .setValue('')
+          .onChange((value) => {
+            pending.id = value
+            // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
+            this.setPathTypeNoteText(value.trim().length === 0 ? '' : (pathTypeIdProblem(value) ?? ''))
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('显示名（留空 = 用 ID）')
+          .setValue('')
+          .onChange((value) => {
+            pending.label = value
+          }),
+      )
+      .addColorPicker((picker) =>
+        picker.setValue(pending.color).onChange((value) => {
+          pending.color = value
+        }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('线宽（默认 4）')
+          .setValue('')
+          .onChange((value) => {
+            pending.width = value
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('虚线（留空 = 实线）')
+          .setValue('')
+          .onChange((value) => {
+            pending.dash = value
+          }),
+      )
+      .addButton((button) =>
+        button.setButtonText('新增').onClick(() => {
+          const problem = pathTypeIdProblem(pending.id)
+          if (problem !== null) {
+            this.setPathTypeNoteText(problem)
+            return
+          }
+          const dash = parsePathDashInput(pending.dash)
+          if (!dash.ok) {
+            this.setPathTypeNoteText(`虚线：${dash.problem}`)
+            return
+          }
+          void this.plugin
+            .addCustomPathType({
+              id: pending.id,
+              label: pending.label,
+              color: pending.color,
+              // 线宽留空 = 用工厂默认值（`validateCustomPathTypeInput` 收到 undefined 就走默认）
+              width: pending.width.trim().length > 0 ? pending.width : undefined,
+              dash: dash.dash,
+            })
+            .then((result) => {
+              if (!result.ok) {
+                this.setPathTypeNoteText(result.problem)
+                return
+              }
+              this.setPathTypeNoteText('')
+              this.display()
+            })
+        }),
+      )
+  }
+
   /** 设置页里那一行就地提示（错误原因、保存结果） */
   private setNoteText(text: string): void {
     if (this.noteEl) this.noteEl.textContent = text
+  }
+
+  /** 路径类型区底部那一行提示（与地形/标记两节分开，理由见 `setMarkerNoteText`） */
+  private setPathTypeNoteText(text: string): void {
+    if (this.pathTypeNoteEl) this.pathTypeNoteEl.textContent = text
   }
 
   /**

@@ -85,6 +85,72 @@ test('版本高于当前支持时必须拒绝（只读打开，绝不写回）',
   assert.ok(result.issues.some((issue) => issue.message.includes('高于本插件支持')))
 })
 
+test('未知路径类型**保留整条路径**（旧版本会把它整条丢掉：一保存就永久丢数据）', () => {
+  const raw = validRaw()
+  raw.paths = [
+    // 别的库/别的版本写下的类型：本机设置里没有
+    { id: 'p1', type: 'custom:highway', pts: [[0, 0], [10, 20]], width: 6, color: '#ff8800' },
+    { id: 'p2', type: 'spaceship-lane', pts: [[0, 0], [5, 5]], width: 4, color: '#123456' },
+    // 内置类型照常
+    { id: 'p3', type: 'river', pts: [[0, 0], [1, 1]], width: 8, color: '#4a9fd8' },
+  ]
+  const result = parseMapDocument(raw)
+  assert.equal(result.ok, true)
+  const paths = result.document!.paths
+  assert.equal(paths.length, 3, '三条都要在 —— 不认识的类型不等于坏数据')
+  assert.deepEqual(
+    paths.map((path) => path.type),
+    ['custom:highway', 'spaceship-lane', 'river'],
+    '类型原样保留（不改写、不猜测）',
+  )
+  // 自定义命名空间不告警（解析层读不到用户设置，无权判断"这个自定义类型有没有定义"）
+  assert.equal(
+    result.issues.some((issue) => issue.path === 'paths[0].type'),
+    false,
+    'custom: 前缀的未知类型不该在解析层告警（那是绘制层的事）',
+  )
+  const warning = result.issues.find((issue) => issue.path === 'paths[1].type')
+  assert.ok(warning, '完全不在命名空间里的类型必须告警')
+  assert.ok(warning.message.includes('已保留'), warning.message)
+  assert.ok(warning.message.includes('spaceship-lane'), warning.message)
+  // 往返：写回去之后这两条还在
+  const roundTrip = parseMapDocument(JSON.parse(serializeMapDocument(result.document!)))
+  assert.deepEqual(roundTrip.document!.paths.map((path) => path.type), ['custom:highway', 'spaceship-lane', 'river'])
+})
+
+test('路径类型不是合法字符串时回退为 river（而不是丢掉整条路径）', () => {
+  const raw = validRaw()
+  raw.paths = [
+    { id: 'p1', type: '', pts: [[0, 0], [1, 1]], width: 4, color: '#fff' },
+    { id: 'p2', type: 'has space', pts: [[0, 0], [1, 1]], width: 4, color: '#fff' },
+    { id: 'p3', pts: [[0, 0], [1, 1]], width: 4, color: '#fff' },
+    { id: 'p4', type: 42, pts: [[0, 0], [1, 1]], width: 4, color: '#fff' },
+  ]
+  const result = parseMapDocument(raw)
+  const paths = result.document!.paths
+  assert.equal(paths.length, 4, '宁可画成河流，也不能让路径消失')
+  assert.deepEqual(paths.map((path) => path.type), ['river', 'river', 'river', 'river'])
+  assert.equal(result.issues.filter((issue) => issue.path.endsWith('.type')).length, 3, '空串/带空白/数字都给告警（缺字段不算错）')
+})
+
+test('路径的端点/连接样式：合法值原样保留，非法值告警且不写进结果（绘制层回退 round）', () => {
+  const raw = validRaw()
+  raw.paths = [
+    { id: 'p1', type: 'road', pts: [[0, 0], [1, 1]], width: 4, color: '#fff', cap: 'butt', join: 'miter' },
+    { id: 'p2', type: 'road', pts: [[0, 0], [1, 1]], width: 4, color: '#fff', cap: 'wobbly', join: 'nope' },
+    { id: 'p3', type: 'road', pts: [[0, 0], [1, 1]], width: 4, color: '#fff' },
+  ]
+  const result = parseMapDocument(raw)
+  const paths = result.document!.paths
+  assert.equal(paths[0]!.cap, 'butt')
+  assert.equal(paths[0]!.join, 'miter')
+  assert.equal(paths[1]!.cap, undefined, '非法值不写进结果')
+  assert.equal(paths[1]!.join, undefined)
+  assert.equal(paths[2]!.cap, undefined, '老数据没有这两个字段（于是观感与升级前一致）')
+  assert.ok(result.issues.some((issue) => issue.path === 'paths[1].cap' && issue.message.includes('round')))
+  assert.ok(result.issues.some((issue) => issue.path === 'paths[1].join' && issue.message.includes('round')))
+})
+
 test('单条目错误只跳过该条目并告警，其余数据保持可用', () => {
   const raw = validRaw()
   raw.terrain = {

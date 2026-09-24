@@ -12,7 +12,7 @@
 
 import type { Point } from '../core/hex.ts'
 import { polygonAnchor, polylineMidpoint } from '../render/shapeGeometry.ts'
-import type { MapDocument, MapPath, PathType } from '../data/mapDocument.ts'
+import type { BuiltinPathType, MapDocument, MapPath } from '../data/mapDocument.ts'
 import type { NoteMapProps } from './noteCoordinates.ts'
 import { iconOrDefault } from './noteCoordinates.ts'
 
@@ -47,16 +47,38 @@ export interface NoteRowInput {
   props: NoteMapProps
 }
 
-export const PATH_KIND_LABELS: Record<PathType, string> = {
+/**
+ * 内置路径类型的中文名。
+ *
+ * 自定义类型与未知 ID 不在表里 —— 它们的名字由**目录**决定（见 `pathTypeLabels`），
+ * 因为那份目录在插件设置里，本模块（纯函数）无权也读不到它。查不到时的兜底是 ID 原文，
+ * 至少用户能照着 ID 去设置里找。
+ */
+export const PATH_KIND_LABELS: Record<BuiltinPathType, string> = {
   river: '河流',
   road: '道路',
   'trade-route': '贸易路线',
   border: '边界',
 }
 
-function pathDetail(path: MapPath): string {
-  const type = PATH_KIND_LABELS[path.type] ?? path.type
-  return `${type} · ${path.pts.length} 点`
+/**
+ * 路径类型 → 显示名：目录给的解析器优先，其次内置表，最后 ID 原文。
+ *
+ * 传**函数**而不是一张表：未知类型（别的版本写的、定义被删掉的）也要显示成
+ * 「未知（ID）」，而那张表里不会有它的条目 —— 表查不到就只能给出裸 ID，
+ * 看起来像"插件不认识自己写下的数据"。
+ */
+export function pathKindLabel(
+  type: string,
+  resolveLabel?: ((type: string) => string) | undefined,
+): string {
+  const fromCatalog = resolveLabel?.(type)
+  if (typeof fromCatalog === 'string' && fromCatalog.length > 0) return fromCatalog
+  return PATH_KIND_LABELS[type as BuiltinPathType] ?? type
+}
+
+function pathDetail(path: MapPath, resolveLabel?: ((type: string) => string) | undefined): string {
+  return `${pathKindLabel(path.type, resolveLabel)} · ${path.pts.length} 点`
 }
 
 /**
@@ -65,7 +87,11 @@ function pathDetail(path: MapPath): string {
  * 区域用面积质心、路径用弧长中点作为"代表性坐标"：
  * 与名称标签画在同一处，用户看到的位置和表里的坐标能对上。
  */
-export function rowsFromDocument(document: MapDocument, mapPath: string): MapRow[] {
+export function rowsFromDocument(
+  document: MapDocument,
+  mapPath: string,
+  resolvePathTypeLabel?: ((type: string) => string) | undefined,
+): MapRow[] {
   const rows: MapRow[] = []
 
   for (const marker of document.markers) {
@@ -99,10 +125,13 @@ export function rowsFromDocument(document: MapDocument, mapPath: string): MapRow
       id: `map:path:${path.id}`,
       source: 'map',
       kind: 'path',
-      name: path.label && path.label.length > 0 ? path.label : `（未命名${PATH_KIND_LABELS[path.type] ?? path.type}）`,
+      name:
+        path.label && path.label.length > 0
+          ? path.label
+          : `（未命名${pathKindLabel(path.type, resolvePathTypeLabel)}）`,
       point: anchor ? anchor.point : null,
       filePath: path.link ?? mapPath,
-      detail: pathDetail(path),
+      detail: pathDetail(path, resolvePathTypeLabel),
     })
   }
 
@@ -145,10 +174,12 @@ export function buildMapRows(options: {
   document: MapDocument | null
   mapPath: string | null
   notes: readonly NoteRowInput[]
+  /** 目录里的路径类型显示名解析器（自定义与未知类型靠它才不会在表里显示成裸 ID） */
+  resolvePathTypeLabel?: ((type: string) => string) | undefined
 }): MapRow[] {
   const rows = options.notes ? rowsFromNotes(options.notes) : []
   if (options.document && options.mapPath) {
-    rows.push(...rowsFromDocument(options.document, options.mapPath))
+    rows.push(...rowsFromDocument(options.document, options.mapPath, options.resolvePathTypeLabel))
   }
   return rows
 }

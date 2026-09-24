@@ -323,7 +323,16 @@ function makeRecordingContext() {
       calls.clearRect += 1
     },
     beginPath() {
-      current = { points: [], strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, beziers: 0 }
+      // 端点/连接样式也要在 `beginPath` 时快照下来：`drawPath` 正是先设这两项、再 beginPath，
+      // 而"某条路径用的是平头还是圆头"只存在于这两个属性里 —— 不记录就断言不出来
+      current = {
+        points: [],
+        strokeStyle: context.strokeStyle,
+        lineWidth: context.lineWidth,
+        lineCap: context.lineCap,
+        lineJoin: context.lineJoin,
+        beziers: 0,
+      }
     },
     moveTo(x, y) {
       if (current) current.points.push({ x, y })
@@ -645,6 +654,25 @@ function makeEl({
 const fakeDocument = {
   activeElement: null,
   defaultView: null,
+  /**
+   * `document` 上的监听（真实 DOM 一定有）。
+   *
+   * 工具条的「点外面就把下拉收起来」正是往 document 上挂捕获阶段监听 ——
+   * 假 document 缺这两个方法时，那段逻辑要么抛错、要么（更糟）静默不生效，
+   * 而"点地图不会顺手画一个点"这条行为就再也断言不出来了。
+   */
+  _listeners: new Map(),
+  addEventListener(type, handler) {
+    if (!fakeDocument._listeners.has(type)) fakeDocument._listeners.set(type, new Set())
+    fakeDocument._listeners.get(type).add(handler)
+  },
+  removeEventListener(type, handler) {
+    fakeDocument._listeners.get(type)?.delete(handler)
+  },
+  dispatchEvent(event) {
+    for (const handler of [...(fakeDocument._listeners.get(event.type) ?? [])]) handler(event)
+    return true
+  },
   createElement(tagName) {
     // 与真实 DOM 同构：`createElement('img')` 给出的是图片对象（有 onload/onerror/complete/naturalWidth），
     // 不是通用元素。PNG 导出正是走这条路，早先的桩在这里少了一个成员，
@@ -1723,8 +1751,16 @@ function captureExportModals(plugin) {
   }
 }
 
-/** 递归收集某个 class 的所有后代元素（按**完整 class 词**匹配，避免前缀误伤） */function collectByClass(root, className) {
+/**
+ * 递归收集某个 class 的所有后代元素（按**完整 class 词**匹配，避免前缀误伤）。
+ *
+ * `root` 允许为 `undefined`：断言里常常写 `collectByClass(某个可能没找到的元素, ...)`，
+ * 让它在"元素不存在"时返回空数组，失败信息才会落在**那条断言**上；
+ * 否则会抛 TypeError，看起来像测试脚本坏了，而不是被测行为不对。
+ */
+function collectByClass(root, className) {
   const out = []
+  if (root === undefined || root === null) return out
   const walk = (node) => {
     if (typeof node.className === 'string' && node.className.split(/\s+/).includes(className)) out.push(node)
     for (const child of node.children ?? []) walk(child)
@@ -1848,7 +1884,13 @@ function attachFaithfulRect(canvasElement, canvas) {
   }
 }
 
-/** 派发一个带常用方法的通用事件（click / contextmenu 等） */function fireEvent(element, type, init = {}) {
+/**
+ * 派发一个带常用方法的通用事件（click / contextmenu 等）。
+ *
+ * `element` 允许为 `undefined`（"本以为存在的元素没找到"）：这时直接返回，
+ * 让后续断言去失败，而不是在这里抛 TypeError —— 报错位置应当在断言上。
+ */
+function fireEvent(element, type, init = {}) {
   let prevented = false
   let stopped = false
   const event = {
@@ -1864,6 +1906,7 @@ function attachFaithfulRect(canvasElement, canvas) {
       stopped = true
     },
   }
+  if (element === undefined || element === null) return { prevented, stopped }
   element.dispatchEvent(event)
   return { prevented, stopped }
 }
@@ -4157,24 +4200,40 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
   const defaultRiver = '#4a9fd8'
 
   // ---- 设置界面 ----
+  // ⑤-1 起"路径颜色"那种一行一个色块的做法换成**每种类型一条参数行**：
+  // 名字就是类型名（内置 4 种没有后缀），第二行是"线宽与虚线 · <名字>"。
   openSettings()
-  const riverPicker = pickerNamed('路径颜色 · 河流')
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  const riverPicker = pickerNamed('河流')
   const regionPicker = pickerNamed('区域颜色 · 公国')
   const fontText = textNamed('名称字体族')
-  check('设置页有每种路径的颜色选择器', pickerNamed('路径颜色 · 河流') && pickerNamed('路径颜色 · 边界') ? true : false)
+  check(
+    '设置页有每种路径类型的参数行（含颜色选择器）',
+    pickerNamed('河流') !== undefined && pickerNamed('边界') !== undefined && pickerNamed('贸易路线') !== undefined ? true : false,
+  )
   check('设置页有每个区域预设的颜色选择器', pickerNamed('区域颜色 · 王国') !== undefined && pickerNamed('区域颜色 · 海域') !== undefined)
   check('设置页有名称字体族输入框', fontText !== undefined && fontText.placeholder === '留空 = 跟随主题', String(fontText?.placeholder))
   check('选择器带出当前值（出厂默认）', riverPicker?.value === defaultRiver, String(riverPicker?.value))
   check('字体族默认为空（= 跟随主题）', fontText?.value === '', JSON.stringify(fontText?.value))
+  check(
+    '每种路径类型都有端点与连接两个下拉（都要带出当前值）',
+    (settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
+    JSON.stringify((settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
+  )
 
   // ---- 改路径颜色：只影响**之后**新画的对象 ----
   await riverPicker.pick('#ff0000')
-  check('路径颜色写进了设置', plugin.getSettings().pathColors.river === '#ff0000', JSON.stringify(plugin.getSettings().pathColors))
+  check('路径颜色写进了路径类型目录', plugin.getSettings().pathTypes.find((entry) => entry.id === 'river')?.params.color === '#ff0000', JSON.stringify(plugin.getSettings().pathTypes.map((entry) => [entry.id, entry.params.color])))
+  check(
+    '旧字段 pathColors 与目录保持一致（回退到旧版插件仍看到自己改过的颜色）',
+    plugin.getSettings().pathColors.river === '#ff0000',
+    JSON.stringify(plugin.getSettings().pathColors),
+  )
   const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
   check(
     '路径颜色已落盘（真实 JSON 往返，不是只存在内存里）',
-    persisted()?.pathColors?.river === '#ff0000',
-    JSON.stringify(persisted()?.pathColors),
+    persisted()?.pathTypes?.find((entry) => entry.id === 'river')?.params?.color === '#ff0000',
+    JSON.stringify(persisted()?.pathTypes),
   )
   const afterPath = drawPath(-500, 300)
   check('新画的路径用了新颜色', afterPath.color === '#ff0000', String(afterPath.color))
@@ -4184,12 +4243,15 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     `第一条 ${doc().paths[0].color} · 第二条 ${afterPath.color}`,
   )
 
-  // ---- 工具条色块跟随设置，且**不重建 DOM** ----
+  // ---- 工具条下拉：色块跟随设置，且**不重建 DOM** ----
   const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
-  const riverButtonBefore = collectByClass(toolbarEl, 'fc-toolbar-path').find((button) => button.title === '河流')
-  const swatchBefore = collectByClass(riverButtonBefore, 'fc-toolbar-swatch')[0]
-  check('工具条上的色块已变成新颜色', swatchBefore?.style.backgroundColor === '#ff0000', String(swatchBefore?.style.backgroundColor))
-  check('色块刷新是原地改样式，没有重建按钮', collectByClass(toolbarEl, 'fc-toolbar-path').find((button) => button.title === '河流') === riverButtonBefore)
+  const pathOptionBefore = collectByClass(toolbarEl, 'fc-toolbar-path-option').find((button) => button.dataset.pathType === 'river')
+  const swatchBefore = collectByClass(pathOptionBefore, 'fc-toolbar-swatch')[0]
+  check('工具条下拉里的色块已变成新颜色', swatchBefore?.style.backgroundColor === '#ff0000', String(swatchBefore?.style.backgroundColor))
+  check(
+    '色块刷新是原地改样式，没有重建选项',
+    collectByClass(toolbarEl, 'fc-toolbar-path-option').find((button) => button.dataset.pathType === 'river') === pathOptionBefore,
+  )
 
   // ---- 区域颜色：按下标选色 ----
   await regionPicker.pick('#123456')
@@ -4250,10 +4312,17 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
   await buttonNamed('恢复出厂样式').click()
   const restored = plugin.getSettings()
   check(
-    '「恢复默认」把颜色与字体都还原',
-    restored.pathColors.river === defaultRiver && restored.labelFontFamily === '' && restored.regionColors[2] === '#a882ff',
-    JSON.stringify({ river: restored.pathColors.river, font: restored.labelFontFamily, region2: restored.regionColors[2] }),
+    '「恢复默认」把路径类型参数、区域颜色与字体都还原',
+    restored.pathTypes.find((entry) => entry.id === 'river')?.params.color === defaultRiver &&
+      restored.labelFontFamily === '' &&
+      restored.regionColors[2] === '#a882ff',
+    JSON.stringify({
+      river: restored.pathTypes.find((entry) => entry.id === 'river')?.params.color,
+      font: restored.labelFontFamily,
+      region2: restored.regionColors[2],
+    }),
   )
+  check('旧字段 pathColors 也跟着目录还原了', restored.pathColors.river === defaultRiver, String(restored.pathColors.river))
   check('未改动的键没有被写进设置（normalize 会过滤未知键）', !('extra' in restored.pathColors))
 
   plugin.onunload()
@@ -6948,6 +7017,452 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
     JSON.stringify(reloaded.issues.map((issue) => issue.message)),
   )
 
+  plugin.onunload()
+}
+
+console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具条下拉 → 画布 → 文件；未知类型不再丢数据）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const file = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+
+  /**
+   * 文件里先塞一条**别的版本写下的**未知类型路径。
+   *
+   * 这一条是 ⑤-1 最重要的回归：旧版本 `parsePath` 遇到不认识的 type 会把整条路径丢掉，
+   * 用户打开一次别人的地图再保存，那条路就永久消失了。这里让它走完整的
+   * 「文件 → 解析 → 画布 → 保存 → 再解析」一圈。
+   */
+  const FALLBACK_PATH_COLOR = '#9aa4ad'
+  const seeded = await store.load(file)
+  seeded.document.paths.push({
+    id: 'p-foreign',
+    type: 'spaceship-lane',
+    pts: [[-900, -700], [-500, -600]],
+    width: 6,
+    color: '#ff00ff',
+  })
+  await store.writeNow(file, seeded.document, 'World', [canvasPath])
+  await settleEvents()
+
+  const prompts = []
+  plugin.setPromptModalFactory((_app, options, onSubmit) => {
+    prompts.push({ options, onSubmit })
+    return { open() {} }
+  })
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const doc = () => layers.getDocument(canvasPath)
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const clickAt = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+  }
+  /** 画一条路径（跳过命名），返回刚提交的那条 */
+  const drawPath = (x0, y0, x1, y1) => {
+    editor.setMode('paint')
+    editor.setTool('path')
+    clickAt({ x: x0, y: y0 })
+    clickAt({ x: x1, y: y1 })
+    clickAt({ x: x1, y: y1 })
+    flushFrames()
+    prompts[prompts.length - 1].onSubmit('')
+    flushFrames()
+    return doc().paths[doc().paths.length - 1]
+  }
+  const openSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  /** 路径类型区底部那一行就地提示（按 `dataset.fcNote` 取，见 SettingsTab） */
+  const pathNote = () =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'pathType')
+      ?.textContent ?? ''
+  const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
+  const pathOptions = () => collectByClass(toolbarEl(), 'fc-toolbar-path-option')
+  const pathOption = (id) => pathOptions().find((button) => button.dataset.pathType === id)
+  const pathTrigger = () => collectByClass(toolbarEl(), 'fc-toolbar-path-trigger')[0]
+  const pathMenu = () => collectByClass(toolbarEl(), 'fc-toolbar-path-menu')[0]
+  const triggerSwatch = () => collectByClass(pathTrigger(), 'fc-toolbar-swatch')[0]
+  const optionSwatch = (id) => collectByClass(pathOption(id), 'fc-toolbar-swatch')[0]
+  const entryOf = (id) => plugin.getSettings().pathTypes.find((entry) => entry.id === id)
+  /** 某一帧里所有描边中用到的颜色（用来断言"这条路径画成了什么颜色"） */
+  const strokeColors = () => frame().groups.map((group) => group.strokeStyle)
+
+  // ---------------------------------------------------------- 设置页：内置 4 种都有参数行
+  openSettings()
+  check(
+    '内置 4 种路径各有参数行（颜色 + 端点 + 连接）',
+    ['河流', '道路', '贸易路线', '边界'].every((label) => {
+      const setting = FakeSetting.created.find((item) => item.info.name === label)
+      return (setting?.colorPickers?.length ?? 0) === 1 && (setting?.dropdowns?.length ?? 0) === 2
+    }),
+  )
+  check(
+    '端点/连接下拉带出当前值（出厂 round/round）',
+    (settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
+    JSON.stringify((settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
+  )
+  check(
+    '端点下拉里有三个选项（平头/圆头/方头）',
+    (settingNamed('河流')?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'butt,round,square',
+    JSON.stringify(settingNamed('河流')?.dropdowns?.[0]?.options),
+  )
+  check(
+    '线宽/虚线两行带出当前值（河流：8、实线）',
+    settingNamed('线宽与虚线 · 河流')?.texts?.[0]?.value === '8' && settingNamed('线宽与虚线 · 河流')?.texts?.[1]?.value === '',
+    `${String(settingNamed('线宽与虚线 · 河流')?.texts?.[0]?.value)} / ${String(settingNamed('线宽与虚线 · 河流')?.texts?.[1]?.value)}`,
+  )
+  check('道路的虚线带出来了（14,10）', settingNamed('线宽与虚线 · 道路')?.texts?.[1]?.value === '14,10', String(settingNamed('线宽与虚线 · 道路')?.texts?.[1]?.value))
+
+  // ---------------------------------------------------------- 改参数 → 只影响之后新画的
+  await settingNamed('线宽与虚线 · 河流').texts[0].type('20')
+  check('线宽写进目录', entryOf('river')?.params.width === 20, JSON.stringify(entryOf('river')?.params))
+  await settingNamed('河流').dropdowns[0].select('butt')
+  check('端点样式写进目录', entryOf('river')?.params.cap === 'butt', JSON.stringify(entryOf('river')?.params))
+  check('改端点不影响其它字段（线宽还是 20）', entryOf('river')?.params.width === 20)
+  check(
+    '旧字段 pathColors 与目录保持一致',
+    plugin.getSettings().pathColors.river === entryOf('river')?.params.color,
+    JSON.stringify(plugin.getSettings().pathColors),
+  )
+
+  const riverPath = drawPath(-500, -200, -200, -100)
+  check('新画的河流用了新线宽', riverPath.width === 20, String(riverPath.width))
+  check('新画的河流把端点样式**存进了文件**（改设置不会影响它）', riverPath.cap === 'butt' && riverPath.join === 'round', JSON.stringify({ cap: riverPath.cap, join: riverPath.join }))
+  const riverStrokes = frame().groups.filter((group) => group.strokeStyle === entryOf('river')?.params.color)
+  check(
+    '端点样式真的画在了画布上（ctx.lineCap = butt）',
+    riverStrokes.length > 0 && riverStrokes.every((group) => group.lineCap === 'butt'),
+    JSON.stringify(riverStrokes.map((group) => group.lineCap)),
+  )
+  check(
+    '已经画好的路径不受设置影响（种子那条宽度仍是 6）',
+    doc().paths.find((path) => path.id === 'p-foreign')?.width === 6,
+    JSON.stringify(doc().paths.find((path) => path.id === 'p-foreign')),
+  )
+
+  // 草稿预览也要用当前类型的端点样式：选的类型是"平头"却在预览里画成圆头，松手一变又是所见非所得
+  editor.setMode('paint')
+  editor.setTool('path')
+  clickAt({ x: -900, y: 200 })
+  const draftStrokes = frame().groups.filter((group) => group.strokeStyle === entryOf('river')?.params.color)
+  check(
+    '草稿预览也用当前类型的端点样式',
+    draftStrokes.length > 0 && draftStrokes.every((group) => group.lineCap === 'butt'),
+    JSON.stringify(draftStrokes.map((group) => group.lineCap)),
+  )
+  editor.setMode('select')
+
+  // 非法虚线：就地给原因，且**不写进设置**（静默回退到出厂值会让用户以为填的生效了）
+  openSettings()
+  const riverDashBefore = entryOf('river')?.params.dash.join(',')
+  await settingNamed('线宽与虚线 · 河流').texts[1].type('1')
+  check('奇数段虚线被拒绝并给出原因', pathNote().includes('偶数'), pathNote())
+  check('非法虚线没有改写目录', entryOf('river')?.params.dash.join(',') === riverDashBefore, String(entryOf('river')?.params.dash.join(',')))
+
+  // ---------------------------------------------------------- 自定义路径类型：新增
+  openSettings()
+  const addSetting = settingNamed('新增自定义路径类型')
+  check('设置页有「新增自定义路径类型」一节', addSetting !== undefined)
+  check('新增区有 ID / 显示名 / 线宽 / 虚线四个文本框 + 一个颜色选择器', (addSetting?.texts?.length ?? 0) === 4 && (addSetting?.colorPickers?.length ?? 0) === 1, `texts=${addSetting?.texts?.length} pickers=${addSetting?.colorPickers?.length}`)
+  check('新增区的说明写清了 ID 规则与自动前缀', (addSetting?.info.desc ?? '').includes('custom:'), addSetting?.info.desc)
+
+  await addSetting.texts[0].type('Bad Id!')
+  check('非法类型 ID 就地给出可读原因', pathNote().includes('ID'), pathNote())
+  await addSetting.button.click()
+  check(
+    '非法 ID 点「新增」不会写进设置',
+    plugin.getSettings().pathTypes.length === 4,
+    JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)),
+  )
+
+  await addSetting.texts[0].type('HighWay')
+  await addSetting.texts[1].type('官道')
+  await addSetting.colorPickers[0].pick('#00aa88')
+  await addSetting.texts[2].type('7')
+  await addSetting.texts[3].type('12,4')
+  await addSetting.button.click()
+  check(
+    '新增的自定义类型 ID 收敛为 custom:highway（小写 + 自动前缀）',
+    entryOf('custom:highway') !== undefined,
+    JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)),
+  )
+  check(
+    '显示名/颜色/线宽/虚线都按填的存下来了',
+    JSON.stringify(entryOf('custom:highway')?.params) ===
+      JSON.stringify({ color: '#00aa88', width: 7, dash: [12, 4], taper: false, smooth: false, cap: 'round', join: 'round' }),
+    JSON.stringify(entryOf('custom:highway')?.params),
+  )
+  check(
+    '自定义类型已落盘（真实 JSON 往返）',
+    JSON.parse(plugin._data ?? '{}')?.pathTypes?.some((entry) => entry.id === 'custom:highway'),
+    String(plugin._data).slice(0, 160),
+  )
+
+  // 重复 ID（大小写不同）必须被拒绝：同一个 ID 两条定义说不清该用哪条
+  openSettings()
+  await settingNamed('新增自定义路径类型').texts[0].type('highway')
+  await settingNamed('新增自定义路径类型').button.click()
+  check('重复 ID 被拒绝', plugin.getSettings().pathTypes.filter((entry) => entry.id === 'custom:highway').length === 1)
+
+  // ---------------------------------------------------------- 工具条下拉
+  editor.setMode('paint')
+  editor.setTool('path')
+  frame()
+  check(
+    '工具条下拉里是内置 4 种 + 自定义（数一数）',
+    pathOptions().length === 5,
+    JSON.stringify(pathOptions().map((button) => button.dataset.pathType)),
+  )
+  check(
+    '下拉项用 ID 索引、显示名可读（界面文字与数据解耦）',
+    pathOption('custom:highway') !== undefined && (pathOption('custom:highway').textContent ?? '').includes('官道'),
+    String(pathOption('custom:highway')?.textContent),
+  )
+  check('下拉项带自己的颜色小色块', optionSwatch('custom:highway')?.style.backgroundColor === '#00aa88', String(optionSwatch('custom:highway')?.style.backgroundColor))
+  check('展开前下拉是收起的（不挡画布）', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
+  fireEvent(pathTrigger(), 'click')
+  check('点触发按钮后下拉展开', pathMenu()?.style.display === '' , String(pathMenu()?.style.display))
+  check(
+    '展开时往 document 上挂了「点外面收起」的监听',
+    (fakeDocument._listeners.get('pointerdown')?.size ?? 0) === 1,
+    String(fakeDocument._listeners.get('pointerdown')?.size),
+  )
+  // 真实浏览器里画布上的 pointerdown 会冒泡/捕获经过 document；假 DOM 不模拟事件传播，
+  // 所以这里按**契约**在 document 上派发同一个事件，target 指向下拉之外的画布元素。
+  fakeDocument.dispatchEvent({ type: 'pointerdown', target: wrapper })
+  check('点在画布上（下拉外面）时下拉收起 —— 否则那一击会顺手在地图上画一个点', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
+  check(
+    '收起之后监听被摘掉（不留全局残留）',
+    (fakeDocument._listeners.get('pointerdown')?.size ?? 0) === 0,
+    String(fakeDocument._listeners.get('pointerdown')?.size),
+  )
+  fireEvent(pathTrigger(), 'click')
+  check('再点一次又展开', pathMenu()?.style.display === '', String(pathMenu()?.style.display))
+  fakeDocument.dispatchEvent({ type: 'pointerdown', target: pathOption('river') })
+  check('点在下拉**内部**时不收起（由选项自己的 handler 负责）', pathMenu()?.style.display === '', String(pathMenu()?.style.display))
+  fireEvent(pathOption('custom:highway'), 'click')
+  check('选中后下拉自动收起', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
+  check('选中项就是编辑器当前类型', editor.getStatus().pathType === 'custom:highway', editor.getStatus().pathType)
+  frame()
+  check('触发按钮上写的是当前类型的名字', (pathTrigger().textContent ?? '').includes('官道'), String(pathTrigger().textContent))
+  check('触发按钮上的色块是当前类型的颜色', triggerSwatch()?.style.backgroundColor === '#00aa88', String(triggerSwatch()?.style.backgroundColor))
+  check('当前类型在下拉里高亮', pathOption('custom:highway')?.classList.contains('is-active') === true)
+  check('其它类型没有高亮', pathOption('river')?.classList.contains('is-active') === false)
+
+  // 用自定义类型画一条：颜色/线宽/虚线都来自目录，并且都存进文件
+  const customPath = drawPath(-200, 400, 300, 500)
+  check('新路径的 type 就是自定义 ID', customPath.type === 'custom:highway', String(customPath.type))
+  check(
+    '画法参数来自目录（颜色/线宽/虚线）',
+    customPath.color === '#00aa88' && customPath.width === 7 && JSON.stringify(customPath.dash) === JSON.stringify([12, 4]),
+    JSON.stringify({ color: customPath.color, width: customPath.width, dash: customPath.dash }),
+  )
+  check('画布上用目录里的颜色描边', strokeColors().includes('#00aa88'), JSON.stringify(strokeColors()))
+
+  // ---------------------------------------------------------- 图例跟随目录
+  await plugin.setShowLegend(true)
+  frame()
+  const legendRows = () => collectByClass(wrapper, 'fc-legend-row')
+  check(
+    '图例里有自定义类型（只遍历内置会漏掉用户自己建的类型）',
+    legendRows().some((row) => (row.textContent ?? '').includes('官道')),
+    JSON.stringify(legendRows().map((row) => row.textContent)),
+  )
+  check(
+    '图例里未知类型也在（按 ID 字母序排在内置之后）',
+    legendRows().some((row) => (row.textContent ?? '').includes('未知（spaceship-lane）')),
+    JSON.stringify(legendRows().map((row) => row.textContent)),
+  )
+  check(
+    '图例里内置类型仍按 PATH_TYPES 的顺序在前',
+    legendRows()
+      .filter((row) => row.dataset.kind === 'path')
+      .map((row) => collectByClass(row, 'fc-legend-label')[0]?.textContent)
+      .slice(0, 2)
+      .join(',') === '河流,官道',
+    JSON.stringify(legendRows().filter((row) => row.dataset.kind === 'path').map((row) => row.textContent)),
+  )
+  await plugin.setShowLegend(false)
+
+  // ---------------------------------------------------------- 未知类型：画布回退 + 数据不丢
+  check(
+    '打开时未知类型的路径还在文档里',
+    doc().paths.some((path) => path.type === 'spaceship-lane'),
+    JSON.stringify(doc().paths.map((path) => path.type)),
+  )
+  check(
+    '未知类型的路径照样被画出来（用的还是文件里存的那个颜色，不是被换成别的）',
+    strokeColors().includes('#ff00ff'),
+    JSON.stringify(strokeColors()),
+  )
+  store.scheduleSave(file, doc(), 'World', [canvasPath])
+  await store.flush()
+  await settleEvents()
+  const savedText = app.vault.files.get(file.path) ?? ''
+  check('落盘后的文件里仍然有未知类型', savedText.includes('spaceship-lane'), savedText.match(/"type":"[^"]*"/g)?.join(' ') ?? '')
+  check('落盘后的文件里仍然有自定义类型', savedText.includes('custom:highway'))
+  const reloaded = await store.load(file)
+  check(
+    '重新解析后两条路径一个都没少（这轮往返就是"保存会不会删数据"的答案）',
+    reloaded.document?.paths.length === doc().paths.length &&
+      reloaded.document?.paths.some((path) => path.type === 'spaceship-lane') &&
+      reloaded.document?.paths.some((path) => path.type === 'custom:highway'),
+    JSON.stringify(reloaded.document?.paths.map((path) => path.type)),
+  )
+  check(
+    '重新解析时未知类型会给出可读告警（用户排查时看得见）',
+    reloaded.issues.some((issue) => issue.level === 'warning' && issue.message.includes('已保留') && issue.message.includes('spaceship-lane')),
+    JSON.stringify(reloaded.issues.map((issue) => issue.message)),
+  )
+  check(
+    '端点/连接样式经文件往返仍然保留',
+    reloaded.document?.paths.find((path) => path.type === 'custom:highway') !== undefined,
+  )
+
+  // ---------------------------------------------------------- Base 行也用目录里的名字
+  {
+    const registration = plugin.basesViews[0]?.registration
+    const baseContainer = makeEl({ className: 'bases-view-container' })
+    const baseView = registration.factory({ type: 'bases' }, baseContainer)
+    baseView.config = makeBasesConfig({ mapFile: file.path, sortBy: 'name' })
+    baseView.data = { data: [] }
+    baseView.onDataUpdated()
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const rowText = collectByClass(baseContainer, 'fc-base-row')
+      .map((row) => row.textContent ?? '')
+      .join(' | ')
+    check('Base 行里显示的是目录里的显示名（不是冷冰冰的 custom:highway）', rowText.includes('官道'), rowText.slice(0, 300))
+    check(
+      'Base 行里未知类型显示为「未知（ID）」（与图例同一套解析）',
+      rowText.includes('未知（spaceship-lane）'),
+      rowText.slice(0, 300),
+    )
+  }
+
+  // ---------------------------------------------------------- 删除定义：数据不动，画布回退
+  openSettings()
+  const deleteSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('官道') && (setting.buttons ?? []).some((button) => button.text === '删除'))
+  check('自定义类型那两行里有一行带「删除」按钮（内置类型没有）', deleteSetting !== undefined)
+  check(
+    '内置类型行里没有「删除」按钮',
+    !(FakeSetting.created.find((setting) => setting.info.name === '河流')?.buttons ?? []).some((button) => button.text === '删除'),
+  )
+  const optionsBeforeDelete = pathOptions().length
+  await deleteSetting.buttons.find((button) => button.text === '删除').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check(
+    '删除后设置里没有它了',
+    plugin.getSettings().pathTypes.every((entry) => entry.id !== 'custom:highway'),
+    JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)),
+  )
+  frame()
+  check('工具条选项跟着减少', pathOptions().length === optionsBeforeDelete - 1, `${optionsBeforeDelete} → ${pathOptions().length}`)
+  check(
+    '当前类型被删掉后，触发按钮显示「未知（custom:highway）」而不是空着',
+    (pathTrigger().textContent ?? '').includes('未知'),
+    String(pathTrigger().textContent),
+  )
+  check(
+    '被删掉定义的路径仍然在文档里（数据没被连带删除）',
+    doc().paths.some((path) => path.type === 'custom:highway'),
+    JSON.stringify(doc().paths.map((path) => path.type)),
+  )
+  check(
+    '已经画好的那条仍然用文件里的颜色画出来（数据驱动，不因为设置里没定义就消失）',
+    strokeColors().includes('#00aa88'),
+    JSON.stringify(strokeColors()),
+  )
+  check(
+    '触发按钮的色块换成回退色（未知类型也必须看得见，不能是透明）',
+    triggerSwatch()?.style.backgroundColor === FALLBACK_PATH_COLOR,
+    String(triggerSwatch()?.style.backgroundColor),
+  )
+  // 定义没了还接着画：新路径必须拿到**回退参数**（这是"未知类型不消失"的另一半）
+  const orphanPath = drawPath(-700, 600, -300, 700)
+  check(
+    '定义被删掉后新画的路径用回退参数（颜色/线宽/虚线都来自目录的兜底）',
+    orphanPath.type === 'custom:highway' &&
+      orphanPath.color === FALLBACK_PATH_COLOR &&
+      orphanPath.width === 4 &&
+      JSON.stringify(orphanPath.dash) === JSON.stringify([12, 8]),
+    JSON.stringify({ type: orphanPath.type, color: orphanPath.color, width: orphanPath.width, dash: orphanPath.dash }),
+  )
+
+  // ---------------------------------------------------------- 上限
+  const atLimit = []
+  for (let index = 0; plugin.getSettings().pathTypes.filter((entry) => entry.id.startsWith('custom:')).length < 32; index += 1) {
+    atLimit.push(await plugin.addCustomPathType({ id: `filler${index}` }))
+  }
+  check('加到 32 个都成功', atLimit.every((result) => result.ok), JSON.stringify(atLimit.filter((result) => !result.ok)))
+  const overflow = await plugin.addCustomPathType({ id: 'onemore' })
+  check(
+    '超过上限时给出明确原因（不静默失败）',
+    overflow.ok === false && overflow.problem.includes('32'),
+    JSON.stringify(overflow),
+  )
+  openSettings()
+  check(
+    '设置页在上限时写明「已达上限」',
+    (settingNamed('新增自定义路径类型')?.info.desc ?? '').includes('已达上限'),
+    settingNamed('新增自定义路径类型')?.info.desc,
+  )
+
+  plugin.onunload()
+}
+
+console.log('\n场景 35：旧 data.json 迁移到路径类型目录（用户没改过的东西视觉必须一模一样）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  // 上一代的设置：只有 pathColors（还改过一个颜色），没有任何目录字段
+  plugin._data = JSON.stringify({
+    labelScale: 1,
+    pathColors: { river: '#ff0000', road: 'var(--x)' },
+    regionColors: [],
+  })
+  await plugin.onload()
+  const settings = plugin.getSettings()
+  const river = settings.pathTypes.find((entry) => entry.id === 'river')
+  check('迁移后颜色进目录（老用户改过的颜色没丢）', river?.params.color === '#ff0000', JSON.stringify(river?.params))
+  check('非法旧颜色回退出厂色', settings.pathTypes.find((entry) => entry.id === 'road')?.params.color === '#b08968')
+  check(
+    '结构字段仍取出厂值（迁移前后视觉一致）',
+    river?.params.width === 8 && river?.params.taper === true && river?.params.smooth === true && river?.params.cap === 'round',
+    JSON.stringify(river?.params),
+  )
+  check(
+    '旧字段 pathColors 被镜像成同一份颜色（回退旧版插件也看得到）',
+    settings.pathColors.river === '#ff0000' && settings.pathColors.border === '#b3452f',
+    JSON.stringify(settings.pathColors),
+  )
+  await plugin.saveData(settings)
+  const once = JSON.stringify(plugin.getSettings())
+  // 再走一遍归一化（模拟"再次启动"）：必须完全相同（幂等）
+  await plugin.onload()
+  check('迁移是幂等的：第二次加载结果完全相同', JSON.stringify(plugin.getSettings()) === once)
+  check('目录里内置 4 种齐全', plugin.getSettings().pathTypes.length === 4, JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)))
   plugin.onunload()
 }
 

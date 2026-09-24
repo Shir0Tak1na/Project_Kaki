@@ -17,7 +17,7 @@
 import { axialToWorld, parseCellKey } from '../core/hex.ts'
 import { projectionWorldBBox, type ClientProjection } from '../core/projection.ts'
 import type { BBox } from '../core/viewport.ts'
-import type { MapDocument, PathType } from '../data/mapDocument.ts'
+import type { MapDocument, PathCapStyle, PathJoinStyle, PathType } from '../data/mapDocument.ts'
 import { cellIntersectsBBox } from './hexGrid.ts'
 import { isLayerVisible, type LayerVisibility } from './layerVisibility.ts'
 import { bboxOverlaps, shapeBounds } from './shapeGeometry.ts'
@@ -83,6 +83,9 @@ export interface RenderPlanPath {
   dash?: number[]
   taper?: boolean
   smooth?: boolean
+  /** 端点 / 连接样式；缺省（旧路径）由绘制层取 `DEFAULT_PATH_CAP` / `DEFAULT_PATH_JOIN` */
+  cap?: PathCapStyle
+  join?: PathJoinStyle
 }
 
 export interface RenderPlanRegion {

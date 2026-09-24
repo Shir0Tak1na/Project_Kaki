@@ -21,6 +21,8 @@ import type {
   MapPath,
   MapRegion,
   MarkerId,
+  PathCapStyle,
+  PathJoinStyle,
   PathType,
   TerrainCell,
   TerrainId,
@@ -30,17 +32,24 @@ import { History, applyOp, opsFromPrevious, type MapOp } from './history.ts'
 import { nextLabelId, nextMarkerId, snapToCellCenter } from '../render/markerPlacement.ts'
 import { hitTestPolygon, hitTestPolyline, visiblePolyline } from '../render/shapeGeometry.ts'
 import {
+  DEFAULT_PATH_CAP,
+  DEFAULT_PATH_JOIN,
   DEFAULT_REGION_BORDER_WIDTH,
   DEFAULT_REGION_OPACITY,
+  type PathStyle,
 } from '../render/shapeStyle.ts'
 import {
-  defaultPathColors,
   defaultRegionColors,
   normalizeColor,
   resolveDefaultRegionColor,
-  resolvePathStyle,
   type StylePalette,
 } from '../render/stylePalette.ts'
+import {
+  defaultPathTypeEntries,
+  pathColorsFromEntries,
+  resolvedPathStyle,
+  type PathTypeEntry,
+} from '../render/pathTypeCatalog.ts'
 
 /** 路径/区域 id：与标记共用"避开已用 id"的策略 */
 function nextShapeId(document_: MapDocument, prefix: string): string {
@@ -90,6 +99,14 @@ export interface MapDraft {
    */
   smooth: boolean
   taper: boolean
+  /**
+   * 端点 / 连接样式（预览用）。
+   *
+   * 同 `smooth` / `taper`：预览必须与提交后的渲染一致 ——
+   * 选的类型是"平头端点"却在预览里画成圆头，松手一变又是一次"所见非所得"。
+   */
+  cap: PathCapStyle
+  join: PathJoinStyle
 }
 
 export interface MapEditorOptions {
@@ -108,6 +125,13 @@ export interface MapEditorOptions {
    * 缺省时退回出厂样式（单元测试/无设置上下文时也能构造编辑器）。
    */
   getPalette?: () => StylePalette
+  /**
+   * 当前生效的**路径类型目录**（来自插件设置）—— 路径样式的唯一来源。
+   *
+   * 与 `getPalette` 分开是因为它同时管内置与自定义类型（颜色 + 线宽 + 虚线 + 端点 + 连接），
+   * 而 `getPalette` 只剩下区域颜色与字体还在用。缺省 = 出厂目录。
+   */
+  getPathTypes?: () => readonly PathTypeEntry[]
   historyLimit?: number
 }
 
@@ -221,7 +245,17 @@ export class MapEditor {
 
   /** 当前调色板（缺省即出厂默认，见 `MapEditorOptions.getPalette`） */
   getPalette(): StylePalette {
-    return this.options.getPalette?.() ?? { pathColors: defaultPathColors(), regionColors: defaultRegionColors(), fontFamily: '' }
+    return this.options.getPalette?.() ?? { pathColors: pathColorsFromEntries(defaultPathTypeEntries()), regionColors: defaultRegionColors(), fontFamily: '' }
+  }
+
+  /** 当前路径类型目录（缺省即出厂目录，见 `MapEditorOptions.getPathTypes`） */
+  getPathTypes(): readonly PathTypeEntry[] {
+    return this.options.getPathTypes?.() ?? defaultPathTypeEntries()
+  }
+
+  /** 当前路径类型的完整样式（颜色/线宽/虚线/变细/平滑/端点/连接）—— 新画的路径用它 */
+  currentPathStyle(): PathStyle {
+    return resolvedPathStyle(this.pathType, this.getPathTypes())
   }
 
   /** 当前区域颜色：由预设下标 → 调色板解析出来（所以改设置后新区域立刻用新色） */
@@ -462,7 +496,7 @@ export class MapEditor {
    */
   beginDraft(kind: 'path' | 'region', world: Point): void {
     if (this.mode !== 'paint') return
-    const style = resolvePathStyle(this.pathType, this.getPalette().pathColors)
+    const style = this.currentPathStyle()
     // 沿格边模式下，落点先吸附到最近的网格顶点
     const start = this.snapDraftPoint(world)
     this.draft = {
@@ -476,6 +510,9 @@ export class MapEditor {
       // 沿格边模式**不做平滑**：平滑会把格边抹成曲线，正好毁掉"整洁"的目的。
       smooth: kind === 'path' && style.smooth === true && this.geometryMode === 'interior',
       taper: kind === 'path' && style.taper === true,
+      // 端点/连接也照抄当前类型：否则"平头端点"的类型在预览里会画成圆头
+      cap: style.cap ?? DEFAULT_PATH_CAP,
+      join: style.join ?? DEFAULT_PATH_JOIN,
     }
     this.options.onChanged()
     this.options.onStateChanged?.()
@@ -598,7 +635,7 @@ export class MapEditor {
 
   private buildPathFrom(points: Point[]): MapOp {
     const document_ = this.options.getDocument()!
-    const style = resolvePathStyle(this.pathType, this.getPalette().pathColors)
+    const style = this.currentPathStyle()
     // 沿格边模式：顶点之间也要沿格边走（否则远处两点之间仍是一条斜穿格子的直线）
     const geometry = this.commitGeometry(points, false)
     const path: MapPath = {
@@ -607,6 +644,8 @@ export class MapEditor {
       pts: geometry.map((point) => [point.x, point.y] as [number, number]),
       width: style.width,
       color: style.color,
+      cap: style.cap ?? DEFAULT_PATH_CAP,
+      join: style.join ?? DEFAULT_PATH_JOIN,
       mode: this.geometryMode,
     }
     if (style.dash) path.dash = [...style.dash]

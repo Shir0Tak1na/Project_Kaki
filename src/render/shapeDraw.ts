@@ -10,6 +10,7 @@
 
 import type { Point } from '../core/hex.ts'
 import type { MapDraft } from '../editor/MapEditor.ts'
+import { DEFAULT_PATH_CAP, DEFAULT_PATH_JOIN } from './shapeStyle.ts'
 import type { RenderPlanLayer, RenderPlanPath, RenderPlanRegion } from './renderPlan.ts'
 import { worldToRaster } from './renderPlan.ts'
 import {
@@ -398,8 +399,10 @@ export function drawPath(
   const needsDense = path.taper === true || hasLabel
   const dense = needsDense ? denseWorldPolyline(points, smooth) : null
 
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
+  // 端点/连接：**这条路径自己存的**样式（画的时候从设置抄进文件），缺字段的旧路径取默认值 ——
+  // 也就是升级前硬编码的 round/round，于是老地图的观感一点没变。
+  ctx.lineCap = path.cap ?? DEFAULT_PATH_CAP
+  ctx.lineJoin = path.join ?? DEFAULT_PATH_JOIN
   ctx.strokeStyle = path.color
   if (path.dash && path.dash.length > 0) {
     ctx.setLineDash(path.dash.map((value) => value * layer.deviceScale))
@@ -448,8 +451,9 @@ export function drawDraft(ctx: CanvasRenderingContext2D, layer: RenderPlanLayer,
 
   ctx.strokeStyle = draft.color
   ctx.lineWidth = Math.max(1.5, draft.width * layer.deviceScale)
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
+  // 预览也照抄当前类型的端点/连接（见 MapDraft.cap / join）
+  ctx.lineCap = draft.cap
+  ctx.lineJoin = draft.join
 
   if (draft.kind === 'path') {
     const worldPoints = draft.cursor ? [...points, draft.cursor] : points

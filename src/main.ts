@@ -48,13 +48,21 @@ import {
   type CartographerSettings,
 } from './ui/SettingsTab.ts'
 import {
-  defaultPathColors,
   defaultRegionColors,
   normalizeFontFamily,
-  normalizePathColors,
   normalizeRegionColors,
   type StylePalette,
 } from './render/stylePalette.ts'
+import {
+  MAX_CUSTOM_PATH_TYPES,
+  applyPathTypePatch,
+  customPathTypeEntries,
+  pathColorsFromEntries,
+  resetPathTypeStyles,
+  validateCustomPathTypeInput,
+  type PathTypeEntry,
+  type PathTypePatch,
+} from './render/pathTypeCatalog.ts'
 import {
   allLayersHidden,
   hiddenLayerLabels,
@@ -70,7 +78,6 @@ import {
   validateCustomTerrainInput,
   type CustomTerrain,
 } from './render/terrainCatalog.ts'
-import type { PathType } from './data/mapDocument.ts'
 import { MAX_CUSTOM_MARKERS, validateCustomMarkerInput, type CustomMarker } from './render/markerCatalog.ts'
 import { TextPromptModal, type TextPromptOptions } from './ui/TextPromptModal.ts'
 
@@ -166,8 +173,10 @@ export default class ProjectKakiPlugin extends Plugin {
       promptModalFactory: (app, options, onSubmit) => this.promptModalFactory(app, options, onSubmit),
       // 名称字号倍率：设置界面改完立即生效
       getLabelScale: () => this.pluginSettings.labelScale,
-      // 样式（路径/区域颜色、名称字体族）：地图层每帧现读，改完设置立刻生效
+      // 样式（区域颜色、名称字体族）：地图层每帧现读，改完设置立刻生效
       getStylePalette: () => this.getStylePalette(),
+      // 路径类型目录（内置 4 种 + 自定义，含全部画法参数）：路径样式的唯一来源
+      getPathTypes: () => this.getPathTypes(),
       getCustomTerrains: () => this.getCustomTerrains(),
       getCustomMarkers: () => this.getCustomMarkers(),
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
@@ -505,6 +514,8 @@ export default class ProjectKakiPlugin extends Plugin {
           app: this.app,
           store: this.store!,
           getCustomTerrains: () => this.getCustomTerrains(),
+          // Base 行的路径类型显示名也要跟着目录走（否则自定义类型在表里显示成 custom:xxx）
+          getPathTypes: () => this.getPathTypes(),
         }),
       options: () => [
         // 几何数据留在 .map.md 里，靠文件选项指过去 —— 不进 YAML
@@ -840,6 +851,86 @@ export default class ProjectKakiPlugin extends Plugin {
     this.layers?.setStylePalette()
   }
 
+  /** 当前路径类型目录（地图层、工具条、设置页都现读它）—— 路径样式的唯一来源 */
+  getPathTypes(): readonly PathTypeEntry[] {
+    return this.pluginSettings.pathTypes
+  }
+
+  /**
+   * 改一种路径类型的参数（颜色 / 线宽 / 虚线 / 变细 / 平滑 / 端点 / 连接）。
+   *
+   * 全部校验在 `applyPathTypePatch` 里（纯函数）：非法虚线**整条拒绝**并返回可读原因，
+   * 而不是"悄悄回退到出厂值"——后者会让用户以为自己填的生效了。
+   *
+   * 只影响**之后新画**的路径：已经画好的路径把参数存在地图文件里。
+   */
+  async updatePathType(
+    id: string,
+    patch: PathTypePatch,
+  ): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const index = this.pluginSettings.pathTypes.findIndex((entry) => entry.id === id)
+    if (index < 0) return { ok: false, problem: `没有这个路径类型：${id}` }
+    const current = this.pluginSettings.pathTypes[index]!
+    const next = applyPathTypePatch(current, patch)
+    if (!next.ok) return next
+    const list = [...this.pluginSettings.pathTypes]
+    list[index] = next.entry
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      pathTypes: list,
+      // 旧字段跟着目录走，避免同一份颜色在两处自相矛盾（它不再是渲染依据）
+      pathColors: pathColorsFromEntries(list),
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+    return { ok: true }
+  }
+
+  /**
+   * 新增一个自定义路径类型。
+   *
+   * 与 `addCustomTerrain` / `addCustomMarker` 逐字同构：校验全在
+   * `validateCustomPathTypeInput` 里（纯函数），这里只负责落盘与通知渲染层。
+   * 重名会被拒绝：同一个 ID 两条定义会让"画出来是哪一条"变成说不清的问题。
+   */
+  async addCustomPathType(input: {
+    id: unknown
+    label?: unknown
+    color?: unknown
+    width?: unknown
+    dash?: unknown
+    cap?: unknown
+    join?: unknown
+  }): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const result = validateCustomPathTypeInput(input)
+    if (!result.ok) return result
+    if (this.pluginSettings.pathTypes.some((entry) => entry.id === result.entry.id)) {
+      return { ok: false, problem: `已经有一个路径类型用了 ID ${result.entry.id}` }
+    }
+    if (customPathTypeEntries(this.pluginSettings.pathTypes).length >= MAX_CUSTOM_PATH_TYPES) {
+      return { ok: false, problem: `最多 ${MAX_CUSTOM_PATH_TYPES} 个自定义路径类型` }
+    }
+    const list = [...this.pluginSettings.pathTypes, result.entry]
+    this.pluginSettings = { ...this.pluginSettings, pathTypes: list, pathColors: pathColorsFromEntries(list) }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+    return { ok: true }
+  }
+
+  /**
+   * 删除一个自定义路径类型。
+   *
+   * **不动地图数据**：已经用了这个类型的路径仍然留在文件里，只是画成回退样式。
+   * 反过来做（顺手把路径删掉）是不可逆的，而用户通常只是想清理一下列表。
+   */
+  async removeCustomPathType(id: string): Promise<void> {
+    const list = this.pluginSettings.pathTypes.filter((entry) => entry.id !== id)
+    if (list.length === this.pluginSettings.pathTypes.length) return
+    this.pluginSettings = { ...this.pluginSettings, pathTypes: list, pathColors: pathColorsFromEntries(list) }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
   /** 当前自定义标记（地图层、工具条、放置对话框都现读它） */
   getCustomMarkers(): readonly CustomMarker[] {
     return this.pluginSettings.customMarkers
@@ -937,15 +1028,6 @@ export default class ProjectKakiPlugin extends Plugin {
     this.layers?.redrawAll()
   }
 
-  /** 改一种路径类型的默认颜色（只影响之后新画的路径） */
-  async setPathColor(type: PathType, color: string): Promise<void> {
-    const next = normalizePathColors({ ...this.pluginSettings.pathColors, [type]: color })
-    if (next[type] === this.pluginSettings.pathColors[type]) return
-    this.pluginSettings = { ...this.pluginSettings, pathColors: next }
-    await this.saveData(this.pluginSettings)
-    this.layers?.setStylePalette()
-  }
-
   /** 改第 index 个区域预设色（工具条上按顺序对应的色块） */
   async setRegionColor(index: number, color: string): Promise<void> {
     const list = [...this.pluginSettings.regionColors]
@@ -966,11 +1048,18 @@ export default class ProjectKakiPlugin extends Plugin {
     this.layers?.setStylePalette()
   }
 
-  /** 样式恢复出厂（设置页的「恢复默认」）—— **不动自定义地形**：那是数据，不是样式偏好 */
+  /**
+   * 样式恢复出厂（设置页的「恢复默认」）。
+   *
+   * **不动自定义地形 / 标记 / 路径类型定义**：那些是数据，不是样式偏好。
+   * 路径类型只把**内置 4 种**的参数恢复成工厂值（自定义类型的参数是用户建的定义，留着）。
+   */
   async resetStylePalette(): Promise<void> {
+    const pathTypes = resetPathTypeStyles(this.pluginSettings.pathTypes)
     this.pluginSettings = {
       ...this.pluginSettings,
-      pathColors: defaultPathColors(),
+      pathTypes,
+      pathColors: pathColorsFromEntries(pathTypes),
       regionColors: defaultRegionColors(),
       labelFontFamily: '',
     }

@@ -7,20 +7,31 @@
  *    - 非法颜色字符串到了 canvas 上是**静默忽略**（该次 fill 沿用上一个颜色）；
  *    - `ctx.font` 里只要出现 `var()` 或斜杠等简写语法，整条声明**静默失效**、字号退回 10px。
  *    所以这里一律"先校验、不合法就回退到默认值"，绝不把用户输入原样透传。
- * 2. **默认值的唯一来源** —— `PATH_STYLES` / `REGION_PRESETS` 是出厂默认，
- *    用户设置只覆盖颜色，宽度/虚线/平滑这些结构性的东西不受影响。
+ * 2. **默认值的唯一来源** —— `PATH_STYLES` / `REGION_PRESETS` 是出厂默认。
+ *
+ * 路径类型参数的唯一来源是 `pathTypeCatalog.ts`（见下面 `pathColors` 那段说明）。
  *
  * 注意语义边界：设置里的颜色只决定**新画的对象**用什么颜色；
  * 已经画好的对象把颜色存在地图文件里（`path.color` / `region.color`），
  * 渲染时直接用它 —— 换句话说，改设置**不会**悄悄改掉你已有的地图。
  */
 
-import type { PathType } from '../data/mapDocument.ts'
+/**
+ * 路径与区域的默认颜色。
+ *
+ * ⚠️ 路径部分（`pathColors` / `resolvePathStyle`）自 ⑤-1 起是**旧字段兼容层**：
+ * 每种路径类型的参数（颜色 + 线宽 + 虚线 + 端点 + 连接）唯一来源是
+ * `pathTypeCatalog.ts` 的目录，渲染与设置界面都读那里。这里保留它们只为两件事：
+ * 迁移旧 `data.json`（见 `pathTypeCatalog.normalizePathTypeEntries`）以及区域预设色
+ * （区域这一轮不动）。**不要在渲染路径上新增对本模块的调用。**
+ */
+
+import type { BuiltinPathType } from '../data/mapDocument.ts'
 import { PATH_TYPES } from '../data/mapDocument.ts'
 import { PATH_STYLES, REGION_PRESETS, type PathStyle, type RegionPreset } from './shapeStyle.ts'
 
 /** 每种路径类型的颜色 */
-export type PathColorMap = Record<PathType, string>
+export type PathColorMap = Record<BuiltinPathType, string>
 
 /** 出厂默认：路径颜色直接取 `PATH_STYLES` 里的颜色，保证两处永远一致 */
 export function defaultPathColors(): PathColorMap {
@@ -119,8 +130,8 @@ export function normalizeFontFamily(value: unknown): string {
 
 /* ------------------------------------------------- 解析成绘制层用的样式 */
 
-/** 路径样式 = 出厂结构 + 用户颜色（宽度/虚线/平滑等不开放给设置） */
-export function resolvePathStyle(type: PathType, colors: PathColorMap): PathStyle {
+/** 路径样式 = 出厂结构 + 用户颜色（宽度/虚线/平滑等不开放给这里） */
+export function resolvePathStyle(type: BuiltinPathType, colors: PathColorMap): PathStyle {
   const base = PATH_STYLES[type]
   const color = normalizeColor(colors?.[type], base.color)
   return color === base.color ? base : { ...base, color }
@@ -144,7 +155,7 @@ export function normalizePathColors(raw: unknown): PathColorMap {
   const fallback = defaultPathColors()
   const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   const out = {} as PathColorMap
-  for (const type of PATH_TYPES) out[type] = normalizeColor(source[type], fallback[type])
+  for (const type of PATH_TYPES) out[type] = normalizeColor(source[type], fallback[type] ?? PATH_STYLES[type].color)
   return out
 }
 
@@ -158,7 +169,7 @@ export function normalizeRegionColors(raw: unknown): string[] {
 /** 判断颜色表是否已经等于出厂默认（设置页据此显示"已改动"） */
 export function isDefaultPathColors(colors: PathColorMap): boolean {
   const fallback = defaultPathColors()
-  return PATH_TYPES.every((type) => canonicalColor(colors[type]) === canonicalColor(fallback[type]))
+  return PATH_TYPES.every((type) => canonicalColor(colors[type] ?? '') === canonicalColor(fallback[type] ?? ''))
 }
 
 export function isDefaultRegionColors(colors: readonly string[]): boolean {

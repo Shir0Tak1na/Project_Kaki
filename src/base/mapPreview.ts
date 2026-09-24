@@ -9,6 +9,7 @@ import { hexCorners, parseCellKey } from '../core/hex.ts'
 import type { BBox } from '../core/viewport.ts'
 import type { MapDocument, MapPath, MapRegion } from '../data/mapDocument.ts'
 import { resolveTerrainStyle, type CustomTerrain } from '../render/terrainCatalog.ts'
+import { DEFAULT_PATH_CAP, DEFAULT_PATH_JOIN } from '../render/shapeStyle.ts'
 import type { MapRow } from './mapRows.ts'
 
 export interface MapPreviewOptions {
@@ -147,7 +148,11 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
 
     for (const path of document.paths) {
       const points = pathPointsToSvg(path, bounds, width, height, padding)
-      content.push(`<polyline data-row-id="map:path:${path.id}" points="${points}" fill="none" stroke="${path.color ?? '#4e9bd6'}" stroke-width="${Math.max(1.2, path.width / 14)}" stroke-linecap="round" stroke-linejoin="round" style="cursor:pointer" />`)
+      // 端点/连接用**这条路径自己存的**值；缺字段的旧路径取 round —— 与画布同一套默认值，
+      // 否则"画布上平头、导出里圆头"这种不一致只有用户自己会发现
+      const cap = path.cap ?? DEFAULT_PATH_CAP
+      const join = path.join ?? DEFAULT_PATH_JOIN
+      content.push(`<polyline data-row-id="map:path:${path.id}" points="${points}" fill="none" stroke="${path.color ?? '#4e9bd6'}" stroke-width="${Math.max(1.2, path.width / 14)}" stroke-linecap="${cap}" stroke-linejoin="${join}" style="cursor:pointer" />`)
     }
 
     for (const label of document.labels) {

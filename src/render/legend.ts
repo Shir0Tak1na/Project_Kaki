@@ -11,7 +11,7 @@
  * - 于是本模块是纯函数，可以脱离 Obsidian 与设置单测。
  */
 
-import type { MapDocument, PathType } from '../data/mapDocument.ts'
+import type { MapDocument } from '../data/mapDocument.ts'
 import { PATH_TYPES, TERRAIN_TYPES } from '../data/mapDocument.ts'
 import { isLayerVisible, type LayerVisibility } from './layerVisibility.ts'
 
@@ -29,8 +29,8 @@ export interface LegendEntry {
 export interface LegendDeps {
   /** 地形 ID → 样式（内置或用户自定义，由 terrainCatalog 决定） */
   resolveTerrain: (type: string) => { label: string; color: string }
-  /** 路径类型 → 样式 */
-  resolvePath: (type: PathType) => { label: string; color: string; dash?: number[] }
+  /** 路径类型 → 样式（内置、自定义、未知都由 `pathTypeCatalog` 决定） */
+  resolvePath: (type: string) => { label: string; color: string; dash?: number[] }
   /** 区域颜色 → 样式（能对上预设就给预设名，否则给一个通用名） */
   resolveRegion: (color: string) => { label: string }
 }
@@ -63,10 +63,16 @@ export function buildLegendEntries(
     }
   }
 
-  // ---- 路径：按 PATH_TYPES 的固定顺序 ----
+  // ---- 路径：内置 4 种按 PATH_TYPES 的出厂顺序，其余（自定义 / 未知）按字母序排在后面 ----
   if (visibility === undefined || isLayerVisible(visibility, 'paths')) {
-    for (const type of PATH_TYPES) {
-      const count = document.paths.filter((path) => path.type === type).length
+    const counts = new Map<string, number>()
+    for (const path of document.paths) {
+      const type = typeof path?.type === 'string' ? path.type : ''
+      if (type.length === 0) continue
+      counts.set(type, (counts.get(type) ?? 0) + 1)
+    }
+    for (const type of sortPathTypes([...counts.keys()])) {
+      const count = counts.get(type) ?? 0
       if (count === 0) continue
       const style = deps.resolvePath(type)
       const entry: LegendEntry = { kind: 'path', label: style.label, color: style.color, count }
@@ -99,6 +105,26 @@ export function buildLegendEntries(
  */
 function sortTerrainTypes(types: string[]): string[] {
   const builtinOrder = TERRAIN_TYPES as readonly string[]
+  return [...types].sort((a, b) => {
+    const indexA = builtinOrder.indexOf(a)
+    const indexB = builtinOrder.indexOf(b)
+    if (indexA >= 0 && indexB >= 0) return indexA - indexB
+    if (indexA >= 0) return -1
+    if (indexB >= 0) return 1
+    return a < b ? -1 : a > b ? 1 : 0
+  })
+}
+
+/**
+ * 路径类型的展示顺序：内置 4 种的出厂顺序在前（用户熟悉的顺序），
+ * 其余（自定义类型、别的版本写的未知类型）按 ID 字母序排在后面。
+ *
+ * 为什么不再"只遍历 `PATH_TYPES`"：自定义类型从 ⑤-1 起是一等公民，
+ * 只遍历内置会让图例**漏掉**用户自己建的类型 —— 而图例漏项比顺序错更糟
+ * （用户会以为自己画的那条路没画上）。顺序仍然确定，测试可以钉住。
+ */
+function sortPathTypes(types: string[]): string[] {
+  const builtinOrder = PATH_TYPES as readonly string[]
   return [...types].sort((a, b) => {
     const indexA = builtinOrder.indexOf(a)
     const indexB = builtinOrder.indexOf(b)

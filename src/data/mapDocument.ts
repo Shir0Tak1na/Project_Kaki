@@ -75,8 +75,39 @@ export const MARKER_ICONS: readonly MarkerIcon[] = [
  */
 export type MarkerId = string
 
-export type PathType = 'river' | 'road' | 'trade-route' | 'border'
-export const PATH_TYPES: readonly PathType[] = ['river', 'road', 'trade-route', 'border']
+/** 内置路径类型（出厂 4 种）—— 只有它们有出厂样式（见 `shapeStyle.PATH_STYLES`） */
+export type BuiltinPathType = 'river' | 'road' | 'trade-route' | 'border'
+export const PATH_TYPES: readonly BuiltinPathType[] = ['river', 'road', 'trade-route', 'border']
+
+/**
+ * 路径类型标识。
+ *
+ * 刻意**不是** `BuiltinPathType` 的字面量联合，理由与 `TerrainId` / `MarkerId` 完全相同：
+ * 文件里可能出现
+ * - 内置 4 种（`river` …）；
+ * - 本插件的自定义路径类型（`custom:xxx`，由用户在设置里定义）；
+ * - 别的库/别的版本写下的、本机设置里没有的 ID。
+ *
+ * 第三种必须能**原样通读通写**。旧版本这里是一个字面量联合，`parsePath` 遇到不认识的值会把
+ * `type` 置为 `null` 并**跳过整条路径** —— 用户只要打开一次别人的文件再保存，
+ * 那条路径就永久消失了（而且只有一条 warning）。这与地形/标记图标曾经的问题同类，
+ * 只是后果更重：丢的是**整个对象**而不是一个字段。现在一律保留，回退视觉由绘制层负责
+ * （见 `pathTypeCatalog.resolvePathType`，它永不返回空）。
+ */
+export type PathType = string
+
+/**
+ * 路径端点样式（存进文件的画法参数之一）。
+ *
+ * 为什么这组词表定义在**数据层**：它要被写进 `.map.md`（`paths[].cap`），
+ * 而"文件里能存什么"由本模块说了算（与 `GeometryMode` 放在 core 里同一个道理）。
+ */
+export type PathCapStyle = 'butt' | 'round' | 'square'
+export const PATH_CAP_STYLES: readonly PathCapStyle[] = ['butt', 'round', 'square']
+
+/** 路径连接样式 */
+export type PathJoinStyle = 'miter' | 'round' | 'bevel'
+export const PATH_JOIN_STYLES: readonly PathJoinStyle[] = ['miter', 'round', 'bevel']
 
 /** 位标志：1=旋转，2=镜像，4=变体（比独立字段省体积） */
 /**
@@ -121,6 +152,15 @@ export interface MapPath {
   dash?: number[]
   taper?: boolean
   smooth?: boolean
+  /**
+   * 端点样式 / 连接样式。
+   *
+   * 与 `width` / `color` / `dash` 同一口径：**画的时候就把当时的设置存进文件**，
+   * 之后改设置不会改动这条路径。缺字段 = 老数据 = 绘制层用 `round`，
+   * 那正是升级前硬编码的值，所以旧地图的观感逐像素不变。
+   */
+  cap?: PathCapStyle
+  join?: PathJoinStyle
   /**
    * 几何模式：`interior`（默认，穿过格子内部）或 `edge`（沿六边形边）。
    *
@@ -425,12 +465,79 @@ function readGeometryMode(value: unknown): GeometryMode {
   return 'interior'
 }
 
+/**
+ * 见 `isStorableTerrainId`：解析层只判断"能不能存成字符串"，不判断"认不认识"。
+ *
+ * 严格规则（前缀 + `^[a-z][a-z0-9_-]{1,31}$`）只用于用户新建自定义类型，
+ * 见 `pathTypeCatalog.normalizePathTypeId`。
+ */
+function isStorablePathTypeId(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  if (value.length === 0 || value.length > 64) return false
+  // eslint-disable-next-line no-control-regex
+  return !/[\s\u0000-\u001f\u007f]/.test(value)
+}
+
+/**
+ * 读取路径类型。
+ *
+ * **不认识的类型一律保留**（只告警）：旧版本遇到这种情况会把整条路径丢掉
+ * （`type = null` → `return null`），用户打开一次别人的地图再保存就永久丢数据。
+ * 绘制层对未知 ID 有回退视觉（`resolvePathType` 永不返回空），所以保留是安全的，丢弃不是。
+ *
+ * 只对"既不是内置、也不在 `custom:` 命名空间"的 ID 告警：解析层读不到用户设置，
+ * 无权判断某个 `custom:xxx` 是否已定义；"自定义类型被用户删掉了"由绘制层告警。
+ */
+function readPathType(value: unknown, path: string, issues: MapDocumentIssue[]): PathType {
+  if (isStorablePathTypeId(value)) {
+    if (!PATH_TYPES.includes(value as BuiltinPathType) && !value.startsWith('custom:')) {
+      issues.push({
+        level: 'warning',
+        path: `${path}.type`,
+        message: `未知路径类型 ${JSON.stringify(value)}，已保留（按回退样式绘制；内置类型：${PATH_TYPES.join('/')}）`,
+      })
+    }
+    return value
+  }
+  if (value !== undefined) {
+    issues.push({
+      level: 'warning',
+      path: `${path}.type`,
+      message: `路径类型 ${JSON.stringify(value)} 不是合法字符串，已回退为 river`,
+    })
+  }
+  return 'river'
+}
+
+/** 读取端点 / 连接样式：未知取值不写进结果（绘制层回退到 `round`），并给出原因 */
+function readCap(value: unknown, path: string, issues: MapDocumentIssue[]): PathCapStyle | undefined {
+  if (value === undefined || value === null) return undefined
+  if (PATH_CAP_STYLES.includes(value as PathCapStyle)) return value as PathCapStyle
+  issues.push({
+    level: 'warning',
+    path: `${path}.cap`,
+    message: `端点样式 ${JSON.stringify(value)} 不可识别，已回退为 round（可用：${PATH_CAP_STYLES.join('/')}）`,
+  })
+  return undefined
+}
+
+function readJoin(value: unknown, path: string, issues: MapDocumentIssue[]): PathJoinStyle | undefined {
+  if (value === undefined || value === null) return undefined
+  if (PATH_JOIN_STYLES.includes(value as PathJoinStyle)) return value as PathJoinStyle
+  issues.push({
+    level: 'warning',
+    path: `${path}.join`,
+    message: `连接样式 ${JSON.stringify(value)} 不可识别，已回退为 round（可用：${PATH_JOIN_STYLES.join('/')}）`,
+  })
+  return undefined
+}
+
 function parsePath(raw: Record<string, unknown>, path: string, issues: MapDocumentIssue[]): MapPath | null {
   const id = isNonEmptyString(raw.id) ? raw.id : null
-  const type = typeof raw.type === 'string' && PATH_TYPES.includes(raw.type as PathType) ? (raw.type as PathType) : null
+  const type = readPathType(raw.type, path, issues)
   const pts = readPointList(raw.pts)
-  if (id === null || type === null || pts === null) {
-    issues.push({ level: 'warning', path, message: '路径缺少 id / 合法 type / 至少两个有效点，已跳过' })
+  if (id === null || pts === null) {
+    issues.push({ level: 'warning', path, message: '路径缺少 id / 至少两个有效点，已跳过' })
     return null
   }
   const width = isFiniteNumber(raw.width) && raw.width > 0 ? raw.width : 4
@@ -449,6 +556,10 @@ function parsePath(raw: Record<string, unknown>, path: string, issues: MapDocume
   if (Array.isArray(raw.dash) && raw.dash.every(isFiniteNumber)) path2.dash = raw.dash as number[]
   if (raw.taper === true) path2.taper = true
   if (raw.smooth === true) path2.smooth = true
+  const cap = readCap(raw.cap, path, issues)
+  if (cap !== undefined) path2.cap = cap
+  const join = readJoin(raw.join, path, issues)
+  if (join !== undefined) path2.join = join
   path2.mode = readGeometryMode(raw.mode)
   return path2
 }

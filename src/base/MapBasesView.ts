@@ -26,6 +26,7 @@ import {
 } from './mapRows.ts'
 import { buildMapPreviewSvg } from './mapPreview.ts'
 import type { CustomTerrain } from '../render/terrainCatalog.ts'
+import { pathTypeLabelOf, type PathTypeEntry } from '../render/pathTypeCatalog.ts'
 import { parseNoteMapProps } from './noteCoordinates.ts'
 import {
   BASES_VIEW_TYPE,
@@ -50,6 +51,13 @@ export interface BasesViewDeps {
    * 用户第一反应是"地图文件坏了"。传函数而不是值，理由同 `getStylePalette`（现读）。
    */
   getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 路径类型目录（来自插件设置）。
+   *
+   * Base 行里"（未命名河流）"这类文案必须与画布、图例用**同一套**名字 ——
+   * 表里写 `custom:highway` 而画布上叫"官道"，用户会以为是两条不同的东西。
+   */
+  getPathTypes?: () => readonly PathTypeEntry[]
   /** 诊断与测试用：最近一次渲染的统计 */
   onRendered?: (info: { rows: number; notes: number; mapEntries: number; reason?: string }) => void
 }
@@ -184,6 +192,8 @@ export class MapBasesView extends BasesView {
         document: this.document,
         mapPath: this.mapPath,
         notes: this.noteInputs(),
+        // 路径类型的显示名跟着**目录**走（自定义类型显示用户起的名字，未知 ID 显示「未知（…）」）
+        resolvePathTypeLabel: (type) => pathTypeLabelOf(type, this.deps.getPathTypes?.() ?? []),
       })
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error)

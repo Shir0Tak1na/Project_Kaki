@@ -5,10 +5,10 @@
  * 绘制层只负责解释，工具栏与对话框直接复用同一份定义。
  */
 
-import type { PathType } from '../data/mapDocument.ts'
+import type { BuiltinPathType, PathCapStyle, PathJoinStyle } from '../data/mapDocument.ts'
 
 export interface PathStyle {
-  type: PathType
+  type: string
   label: string
   color: string
   /** 世界单位 */
@@ -19,18 +19,39 @@ export interface PathStyle {
   taper?: boolean
   /** 用平滑曲线而不是折线 */
   smooth?: boolean
+  /**
+   * 端点 / 连接样式。缺省 = 绘制层用 `round`（升级前硬编码的值），
+   * 于是"没写这两个字段的旧数据"渲染结果与升级前完全一致。
+   */
+  cap?: PathCapStyle
+  join?: PathJoinStyle
 }
 
-export const PATH_STYLES: Record<PathType, PathStyle> = {
+/**
+ * 内置 4 种的出厂样式。
+ *
+ * 键类型是 `BuiltinPathType`（不是放宽后的 `PathType`）：这样"查一张没有的表"在编译期就过不去，
+ * 而自定义/未知类型走 `pathTypeCatalog.resolvePathType()` —— 也就是唯一那处回退逻辑。
+ */
+export const PATH_STYLES: Record<BuiltinPathType, PathStyle> = {
   river: { type: 'river', label: '河流', color: '#4a9fd8', width: 8, taper: true, smooth: true },
   road: { type: 'road', label: '道路', color: '#b08968', width: 5, dash: [14, 10] },
   'trade-route': { type: 'trade-route', label: '贸易路线', color: '#c9a227', width: 4, dash: [4, 8] },
   border: { type: 'border', label: '边界', color: '#b3452f', width: 4, dash: [20, 8, 4, 8] },
 }
 
-export function getPathStyle(type: PathType): PathStyle {
+export function getPathStyle(type: BuiltinPathType): PathStyle {
   return PATH_STYLES[type]
 }
+
+/**
+ * 端点 / 连接样式的默认值 = **升级前 `drawPath()` 里硬编码的值**。
+ *
+ * 这两条常量是"旧地图渲染逐像素不变"的依据：缺 `cap` / `join` 的旧路径在绘制层取它们，
+ * 于是结果与升级前完全一致。改动它们等于改动所有老地图的观感，不要随手改。
+ */
+export const DEFAULT_PATH_CAP: PathCapStyle = 'round'
+export const DEFAULT_PATH_JOIN: PathJoinStyle = 'round'
 
 export interface RegionPreset {
   label: string
