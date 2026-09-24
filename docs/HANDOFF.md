@@ -205,6 +205,11 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
   不重新构建就会拿旧产物跑测试。
 - **不要把 `main.js` / `.build/` / `.npmrc` / `node_modules/` 提交进仓库**：前两者是构建产物（能重建），
   `.npmrc` 里写着本机绝对路径。`.gitignore` 已经挡住它们，别用 `git add -f` 绕过。
+- **本机推送必须走 HTTP/1.1**：这台机器上 `git push` 用默认 HTTP/2 时会间歇性失败，
+  报 `Failed to connect to github.com:443 after ~21000 ms` 或 `Recv failure: Connection was reset`，
+  而同一时刻 `Test-NetConnection github.com -Port 443` 是**通的**（TCP 能连、TLS/HTTP2 被重置）。
+  仓库已设 `git config http.version HTTP/1.1`，此后再推即成功。遇到推送失败先确认这条配置还在，
+  **不要**误判成"GitHub 挂了"或反复瞎重试。
 - **不要 `git push --force`**：远端 `main` 上有 GitHub 生成的 `LICENSE`（Apache-2.0），强推会删掉它。
   本地第一个提交是与远端 `Initial commit` 合并后的结果（README 以本地为准）。
 - 不要把工具条重新挂到覆盖层上。覆盖层必须保持 `pointer-events: none`，否则会破坏原生 Canvas 命中测试。
