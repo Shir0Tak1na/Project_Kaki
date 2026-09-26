@@ -474,7 +474,7 @@ canvases:
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
 node --test --test-isolation=none                 # 404 个单元测试
-node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，37 个场景 / 977 条断言
+node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，37 个场景 / 982 条断言
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```
 

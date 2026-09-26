@@ -5850,6 +5850,30 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
     real.getItemText('Assets/地形/reef.svg'),
   )
   check('真实弹窗把占位提示交给搜索框', real.placeholder === '选择图片', String(real.placeholder))
+  /**
+   * 同一个真实弹窗，`kind: 'bundle'` 时必须换筛选。
+   *
+   * 这两条是**用户实测逼出来的**：以前 `getItems()` 写死 `listImagePaths(files)`，
+   * 于是"导入定义文件"传进来的 `.json` 全被图片白名单筛掉 —— 选择器恒为空，
+   * 用户看到的现象是"导入定义的 UI 不工作"。当时所有导入断言都走注入的替身，
+   * 真实弹窗只被**图片**这一类验过，所以一条都不红（教训见 §5.30）。
+   * 上面那条"只含图片"的断言同时也是反向对照：修 bundle 不许把图片那一类改坏。
+   */
+  const realBundle = defaultPickerFactory(app, {
+    files: ['project-kaki-definitions-20260101-0000.json', 'Assets/forest.png', 'Notes/readme.md'],
+    kind: 'bundle',
+    onChoose: () => {},
+  })
+  check(
+    '真实弹窗（kind: bundle）列的是 .json —— 不会被图片白名单筛空',
+    JSON.stringify(realBundle.getItems()) === JSON.stringify(['project-kaki-definitions-20260101-0000.json']),
+    JSON.stringify(realBundle.getItems()),
+  )
+  check(
+    '真实弹窗（kind: bundle）的缺省提示是给定义文件用的（不是「选择库内图片…」）',
+    realBundle.placeholder === '选择定义文件…',
+    String(realBundle.placeholder),
+  )
   let chosen = null
   const realForChoose = defaultPickerFactory(app, {
     files: ['Assets/forest.png'],
@@ -7773,6 +7797,45 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   // ---- 选择器：只列定义文件 ----
   app.vault.files.set('Notes/readme.md', '# 笔记')
   const capture = captureImportModals(plugin)
+
+  /**
+   * ---- 真实选择器：定义文件必须**真的出现在清单里** ----
+   *
+   * 这一段**不能用替身**。替身能替掉"用户选了哪一项"，却替不掉"清单被谁筛过" ——
+   * 而缺陷恰恰就在那一层：`AssetSuggestModal.getItems()` 曾写死 `listImagePaths()`，
+   * 于是 `.json` 全被图片白名单筛掉、选择器恒为空（用户实测："导入定义的 UI 不工作"）。
+   * 当时所有导入断言都走替身，真实弹窗只被图片那一类验过，所以一条都不红（§5.30）。
+   *
+   * 默认工厂必须**在注入替身之前**读（同上面"真实弹窗自己的逻辑"那段注释里的坑）。
+   */
+  const defaultPickerBeforeInject = plugin.imagePickerFactory
+  let capturedPicker = null
+  plugin.setImagePickerFactory((pickerApp, pickerOptions) => {
+    capturedPicker = defaultPickerBeforeInject(pickerApp, pickerOptions)
+    return capturedPicker
+  })
+  clearNotices()
+  await runCommand(plugin, 'import-resource-bundle')
+  await wait()
+  const realItems = capturedPicker?.getItems() ?? []
+  check(
+    '真实选择器里能看到导出的定义文件（.json 不被图片白名单筛掉）',
+    realItems.includes(exported[0]),
+    JSON.stringify(realItems),
+  )
+  check(
+    '真实选择器里不混杂无关文件：候选**非空**且全部是 .json（不是"筛空了所以没混进别的"）',
+    realItems.length > 0 && realItems.every((path) => path.endsWith('.json')),
+    JSON.stringify(realItems),
+  )
+  capturedPicker?.onChooseItem(exported[0])
+  await wait()
+  check(
+    '从真实选择器选中之后仍然走到确认对话框（整条链路通，不只是清单对了）',
+    capture.last()?.source === exported[0],
+    String(capture.last()?.source),
+  )
+
   const picker = makePickerDouble(exported[0])
   plugin.setImagePickerFactory(picker.factory)
   clearNotices()

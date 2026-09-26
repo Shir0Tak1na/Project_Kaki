@@ -38,7 +38,7 @@ import { ExportModal, type ExportFormat, type ExportModalFactory } from './ui/Ex
 import type { BBox } from './core/viewport.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
 import { ReportModal, type ReportModalFactory, type ReportModalOptions } from './ui/ReportModal.ts'
-import { AssetSuggestModal, type AssetPickerOptions, type ImagePickerFactory } from './ui/AssetSuggestModal.ts'
+import { AssetSuggestModal, type AssetPickerKind, type AssetPickerOptions, type ImagePickerFactory } from './ui/AssetSuggestModal.ts'
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type PluginAction } from './ui/MapPanel.ts'
 import {
   CartographerSettingTab,
@@ -1308,6 +1308,7 @@ export default class ProjectKakiPlugin extends Plugin {
     this.openAssetPicker({
       ...(options.title !== undefined ? { title: options.title } : {}),
       files: listImagePaths(this.app.vault.getFiles().map((file) => file.path)),
+      kind: 'image',
       emptyHint: emptyImageListHint(),
       onChoose: options.onChoose,
     })
@@ -1319,10 +1320,15 @@ export default class ProjectKakiPlugin extends Plugin {
    * 图片选择器与定义文件导入都走这里，于是三条退化路径（库里没有候选、弹窗构造失败、
    * 用户取消）的文案与行为只写了一遍。候选清单由调用方给（它才知道该列什么），
    * 本方法只负责"没得选时说清原因、打不开时给退路、取消时什么都不做"。
+   *
+   * ⚠️ `kind` 必须由调用方给出并原样传下去：弹窗会按它做二次筛选，
+   * 而图片与定义文件的扩展名白名单不同 —— 传错（或漏传成缺省的 `image`）
+   * 会让清单被筛空，选择器看起来"不工作"（见 `AssetSuggestModal` 里那段教训）。
    */
   private openAssetPicker(options: {
     title?: string
     files: string[]
+    kind: AssetPickerKind
     emptyHint: string
     onChoose: (path: string) => void
   }): void {
@@ -1332,6 +1338,7 @@ export default class ProjectKakiPlugin extends Plugin {
     }
     const pickerOptions: AssetPickerOptions = {
       files: options.files,
+      kind: options.kind,
       ...(options.title !== undefined ? { title: options.title } : {}),
       onChoose: options.onChoose,
     }
@@ -1406,6 +1413,7 @@ export default class ProjectKakiPlugin extends Plugin {
     this.openAssetPicker({
       title: '导入定义文件',
       files: candidates,
+      kind: 'bundle',
       emptyHint: emptyBundleListHint(),
       onChoose: (path) => {
         void this.applyBundleFromPath(path)
