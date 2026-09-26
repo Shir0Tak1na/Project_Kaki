@@ -31,15 +31,15 @@ export interface AssetPickerOptions {
   /** 搜索框里的占位提示 */
   title?: string
   /**
-   * 候选类别，决定弹窗自己的二次筛选。缺省 `'image'`（与既有调用点兼容）。
+   * 候选类别，决定弹窗自己的二次筛选（`listImagePaths` / `listBundlePaths`）。
    *
-   * ⚠️ 这个字段是**被用户实测逼出来的**：以前这里写死 `listImagePaths(files)`，
-   * 于是"导入定义文件"把 `.json` 候选交给它之后**全被图片白名单筛掉** ——
-   * 选择器里一个候选都没有，用户看到的现象是"导入定义的 UI 不工作"。
-   * 当时冒烟里的导入流程全走注入的替身，而真实弹窗的 `getItems()` 只被图片那一类断言过，
-   * 所以一条断言都没红（教训见 `docs/ENGINEERING-NOTES.md` §5.30）。
+   * **必填**：这里刻意**不给缺省值**。缺省值正是这条缺陷的温床 ——
+   * 以前这里根本没有这个字段，筛选写死成图片；"导入定义文件"把 `.json` 候选交给它之后
+   * **全被图片白名单筛掉**，选择器里一个候选都没有，用户看到的现象是"导入定义的 UI 不工作"。
+   * 必填之后，"忘记声明类别"在 TypeScript 调用点上**写不出来**（同 §5.27 的做法）。
+   * 教训见 `docs/ENGINEERING-NOTES.md` §5.30。
    */
-  kind?: AssetPickerKind
+  kind: AssetPickerKind
   /** 用户选中一项（或回车确认）时回调；取消/关闭不会调用 */
   onChoose: (path: string) => void
 }
@@ -58,7 +58,7 @@ export class AssetSuggestModal extends FuzzySuggestModal<string> {
   constructor(app: App, options: AssetPickerOptions) {
     super(app)
     this.options = options
-    this.setPlaceholder(options.title ?? defaultPickerPlaceholder(options.kind ?? 'image'))
+    this.setPlaceholder(options.title ?? defaultPickerPlaceholder(options.kind))
   }
 
   /**

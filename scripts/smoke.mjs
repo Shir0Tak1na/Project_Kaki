@@ -5836,6 +5836,7 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   app.vault.files.set('Assets/地形/reef.svg', '<svg>')
   const real = defaultPickerFactory(app, {
     files: app.vault.getFiles().map((file) => file.path),
+    kind: 'image',
     title: '选择图片',
     onChoose: () => {},
   })
@@ -5877,6 +5878,7 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   let chosen = null
   const realForChoose = defaultPickerFactory(app, {
     files: ['Assets/forest.png'],
+    kind: 'image',
     onChoose: (path) => {
       chosen = path
     },
