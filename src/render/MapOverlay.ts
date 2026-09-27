@@ -49,7 +49,13 @@ import {
   type ResolvedTerrainStyle,
 } from './terrainCatalog.ts'
 import type { ClientProjection } from '../core/projection.ts'
-import { DEFAULT_LAYER_VISIBILITY, isLayerVisible, type LayerVisibility } from './layerVisibility.ts'
+import {
+  DEFAULT_LAYER_VISIBILITY,
+  isLayerVisible,
+  LAYERS_BY_DRAW_ORDER,
+  type LayerKey,
+  type LayerVisibility,
+} from './layerVisibility.ts'
 import type { MapDraft } from '../editor/MapEditor.ts'
 
 /** 超过这个可见格数就不画网格线（缩小到很远时逐格描边会拖垮帧率） */
@@ -73,6 +79,15 @@ export interface OverlayStats {
    * 用户报"看起来没生效"时就能一眼判断是渲染没走通还是观感问题。
    */
   lastImageRegionCount: number
+  /**
+   * 本帧**在画布上按次序真的画了哪些层**（自下而上）。
+   *
+   * 为什么要有这个可读字段：绘制次序以前只存在于 `drawPlan` 里几行调用的先后，
+   * 改一行没人看得出来（"地形盖住路径"这类回归在截图里也可能看漏）。
+   * 现在次序由 `LAYER_TABLE.order` 决定、遍历 `LAYERS_BY_DRAW_ORDER`，这个字段就是
+   * "真实渲染确实按表走"的证据：关掉某层，它就不该出现在这一串里。
+   */
+  lastDrawOrder: LayerKey[]
   /**
    * 最近一帧"可见的世界矩形"（导出范围＝「当前视口」时用它）。
    *
@@ -255,6 +270,7 @@ export class MapOverlay {
     lastRegionCount: 0,
     lastMarkerCount: 0,
     lastImageRegionCount: 0,
+    lastDrawOrder: [],
     lastVisibleWorld: null,
     markerLayerAttached: false,
     lastRaster: null,
@@ -645,6 +661,8 @@ export class MapOverlay {
     const byId = new Map<string, ResolvedTerrainStyle>()
     for (const style of listResolvedTerrainStyles(custom)) byId.set(style.id, style)
     for (const cell of Object.values(document_.terrain)) {
+      // 没有地形的格（只挂着温度 / 深度这类值）不参与地形图集：它本来就不画地形
+      if (typeof cell.t !== 'string') continue
       if (byId.has(cell.t)) continue
       byId.set(cell.t, resolveTerrainStyle(cell.t, custom))
     }
@@ -750,6 +768,8 @@ export class MapOverlay {
    */
   private warnUnknownTerrains(document_: MapDocument, custom: readonly CustomTerrain[]): void {
     for (const cell of Object.values(document_.terrain)) {
+      // 没有地形的格不是"未知地形"：它是"这一格没有地形"，不告警也不回退绘制
+      if (typeof cell.t !== 'string') continue
       if (isBuiltinTerrain(cell.t) || findCustomTerrain(cell.t, custom) !== null) continue
       if (this.warnedTerrainIds.has(cell.t)) continue
       this.warnedTerrainIds.add(cell.t)
@@ -792,6 +812,8 @@ export class MapOverlay {
      */
     const cellsByType = new Map<string, Array<{ q: number; r: number }>>()
     for (const [key, cell] of Object.entries(document_.terrain)) {
+      // 没有地形的格不参与"整片一张图"的连通块（它没有地形图片要铺）
+      if (typeof cell.t !== 'string') continue
       const style = resolveTerrainStyle(cell.t, custom)
       if (style.imageLayout !== 'region' || style.imagePath.length === 0) continue
       const axial = parseCellKey(key)
@@ -883,44 +905,85 @@ export class MapOverlay {
     const targetRadius = document_.grid.size * layer.deviceScale
 
     const atlas = this.atlasFor(document_)
+    const layers = this.layers()
+    // 名称是**区域的 / 路径的**一遍里的一个标志，不是单独一遍（见 `LAYER_TABLE` 里 labels 那一行）
+    const showShapeLabels = isLayerVisible(layers, 'labels')
 
-    // 层次（自下而上）：地形 → 网格线 → 区域 → 路径 → 草稿 → 悬停高亮
-    if (atlas) {
-      for (const cell of plan.cells) {
-        const center = worldToRaster(layer, cell.x, cell.y)
-        const drawn = drawTerrainCell(ctx, atlas, cell.type, center.x, center.y, targetRadius)
-        if (drawn && cell.color) {
-          // 覆盖色：叠一层半透明填充，保留字形可见
-          const corners = hexCorners(
-            { kind: 'hex', orientation: document_.grid.orientation, size: targetRadius, origin: [center.x, center.y] },
-            0,
-            0,
-          )
-          ctx.beginPath()
-          corners.forEach((point, index) => {
-            if (index === 0) ctx.moveTo(point.x, point.y)
-            else ctx.lineTo(point.x, point.y)
-          })
-          ctx.closePath()
-          ctx.globalAlpha = 0.45
-          ctx.fillStyle = cell.color
-          ctx.fill()
-          ctx.globalAlpha = 1
+    /**
+     * 四层内置的画布绘制（自下而上）：地形 → 网格线 → 区域 → 路径。
+     *
+     * 为什么它们不写成 `LAYER_TABLE.draw`：每层的**取数形状**不同（格 / 线 / 多边形），
+     * 而这张表是纯数据模块（不 import 绘制实现），把绘制代码塞进去立刻变成环状依赖。
+     * 表管"叫什么、默认看不看、谁在谁上面"，这里管"这一层怎么画" —— 次序仍由表决定。
+     */
+    const builtinPasses: Partial<Record<LayerKey, () => void>> = {
+      terrain: () => {
+        if (!atlas) return
+        for (const cell of plan.cells) {
+          const center = worldToRaster(layer, cell.x, cell.y)
+          const drawn = drawTerrainCell(ctx, atlas, cell.type, center.x, center.y, targetRadius)
+          if (drawn && cell.color) {
+            // 覆盖色：叠一层半透明填充，保留字形可见
+            const corners = hexCorners(
+              { kind: 'hex', orientation: document_.grid.orientation, size: targetRadius, origin: [center.x, center.y] },
+              0,
+              0,
+            )
+            ctx.beginPath()
+            corners.forEach((point, index) => {
+              if (index === 0) ctx.moveTo(point.x, point.y)
+              else ctx.lineTo(point.x, point.y)
+            })
+            ctx.closePath()
+            ctx.globalAlpha = 0.45
+            ctx.fillStyle = cell.color
+            ctx.fill()
+            ctx.globalAlpha = 1
+          }
         }
-      }
+      },
+      grid: () => {
+        this.stats.lastGridCells = this.drawGrid(ctx, plan, document_, targetRadius)
+      },
+      regions: () => {
+        for (const region of plan.regions) drawRegion(ctx, layer, region, showShapeLabels)
+      },
+      paths: () => {
+        for (const path of plan.paths) drawPath(ctx, layer, path, showShapeLabels)
+      },
     }
 
     // 「整片一张图」的图片画在**逐格地形之上、网格线之下**：
     // 它属于地形这一层（网格线压在它上面才正常，不然整片图会盖住网格）。
+    // ⚠️ 它**不随地形开关消失**（既有行为，本次一字未改）：地形隐藏时 `plan.cells` 是空的，
+    // 但整片图片仍按自己的连通块绘制。要改这条得先想清楚"关掉地形要不要连整片图一起关"，
+    // 那是产品决定，不该在重构绘制次序时顺手改掉。
     this.stats.lastImageRegionCount = this.drawRegionImages(ctx, plan, document_, targetRadius)
 
-    // 网格与名称都从图层设置读（不再有覆盖层内部的副本）
-    this.stats.lastGridCells = isLayerVisible(this.layers(), 'grid') ? this.drawGrid(ctx, plan, document_, targetRadius) : 0
-    const showShapeLabels = isLayerVisible(this.layers(), 'labels')
-    for (const region of plan.regions) drawRegion(ctx, layer, region, showShapeLabels)
-    for (const path of plan.paths) drawPath(ctx, layer, path, showShapeLabels)
+    // 图层开关在这一处生效；次序取自表（不在这里另写一遍调用先后）
+    // 数量统计**照旧无条件按计划里的条数写**：计划已经按图层过滤过（隐藏的层产出空数组），
+    // 所以"关掉区域后 lastRegionCount 是 0"这条既有语义不变，不随重绘次序的重构漂移。
     this.stats.lastRegionCount = plan.regions.length
     this.stats.lastPathCount = plan.paths.length
+    const drawn: LayerKey[] = []
+    for (const spec of LAYERS_BY_DRAW_ORDER) {
+      if (!isLayerVisible(layers, spec.id)) {
+        // 隐藏的层不能留下上一帧的统计（否则诊断报告里"网格 12 格"与"网格已关"自相矛盾）
+        if (spec.id === 'grid') this.stats.lastGridCells = 0
+        continue
+      }
+      drawn.push(spec.id)
+      builtinPasses[spec.id]?.()
+      // 新层（温度 / 深度这类数据层）把自己的绘制挂在这里，就同时拿到了正确的叠加位置
+      spec.draw?.({
+        ctx,
+        toRaster: (x, y) => worldToRaster(layer, x, y),
+        plan,
+        document: document_,
+        layers,
+      })
+    }
+    this.stats.lastDrawOrder = drawn
 
     const draft = this.options.getDraft?.() ?? null
     if (draft) drawDraft(ctx, layer, draft)

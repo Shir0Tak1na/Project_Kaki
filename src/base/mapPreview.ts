@@ -9,6 +9,8 @@ import { hexCorners, parseCellKey } from '../core/hex.ts'
 import type { BBox } from '../core/viewport.ts'
 import type { MapDocument, MapPath, MapRegion } from '../data/mapDocument.ts'
 import { resolveTerrainStyle, type CustomTerrain } from '../render/terrainCatalog.ts'
+import { resolveMarkerStyle, type CustomMarker } from '../render/markerCatalog.ts'
+import { MARKER_ICON_SIZE } from '../render/markerPlacement.ts'
 import { DEFAULT_PATH_CAP, DEFAULT_PATH_JOIN } from '../render/shapeStyle.ts'
 import type { MapRow } from './mapRows.ts'
 
@@ -29,13 +31,43 @@ export interface MapPreviewOptions {
    * 自然裁掉** —— 刻意不写"先裁剪内容"的逻辑，那要复制一套几何判断，而每处判断都是新的出错点。
    */
   bounds?: BBox
+  /**
+   * 当前自定义标记（与 `customTerrains` 同理：导出必须是"当前设置 + 当前地图"的合成结果）。
+   *
+   * 它只用来**解析字形名**（`resolveMarkerStyle` 抹平内置 / 自定义 / 未知三种情况），
+   * 真正的形状由 `iconSvgFor` 注入 —— 纯模块里拿不到 Obsidian 的图标集。
+   */
+  customMarkers?: readonly CustomMarker[]
+  /**
+   * 把一个 **Lucide 图标名** 变成一段 SVG 片段（`<path …/>` 之类），取不到就返回 `null`。
+   *
+   * 为什么注入而不是直接 import：本模块是纯模块（不 import obsidian），而图标形状只能由
+   * Obsidian 的 `getIcon()` 拿到。注入方（`main.ts` / Base 视图）负责"取不到就返回 null"，
+   * 于是回退链（**字形 → 兜底圆点**）留在这里、对两条链路都一样。
+   *
+   * ⚠️ 自定义标记的**图片模式不内联 base64**：导出文件要能脱离库单独打开，
+   * 内联图片会让文件巨大。所以图片模式在这里回退成它的字形（与画布"图片挂了回退字形"同一条链）。
+   */
+  iconSvgFor?: (iconName: string) => string | null
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
 
-function pointToSvgPoint(x: number, y: number, bounds: { minX: number; minY: number; maxX: number; maxY: number }, width: number, height: number, padding: number): string {
+/** 世界 → SVG 的等比投影（缩略图与导出共用同一份，绝不各算一次） */
+interface SvgProjection {
+  scale: number
+  offsetX: number
+  offsetY: number
+}
+
+function svgProjection(
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+  width: number,
+  height: number,
+  padding: number,
+): SvgProjection {
   const innerW = Math.max(1, width - padding * 2)
   const innerH = Math.max(1, height - padding * 2)
   const spanX = bounds.maxX - bounds.minX || 1
@@ -44,10 +76,17 @@ function pointToSvgPoint(x: number, y: number, bounds: { minX: number; minY: num
   const scale = Math.min(innerW / spanX, innerH / spanY)
   const contentW = spanX * scale
   const contentH = spanY * scale
-  const offsetX = padding + (innerW - contentW) / 2
-  const offsetY = padding + (innerH - contentH) / 2
-  const px = offsetX + (x - bounds.minX) * scale
-  const py = offsetY + (y - bounds.minY) * scale
+  return {
+    scale,
+    offsetX: padding + (innerW - contentW) / 2,
+    offsetY: padding + (innerH - contentH) / 2,
+  }
+}
+
+function pointToSvgPoint(x: number, y: number, bounds: { minX: number; minY: number; maxX: number; maxY: number }, width: number, height: number, padding: number): string {
+  const projection = svgProjection(bounds, width, height, padding)
+  const px = projection.offsetX + (x - bounds.minX) * projection.scale
+  const py = projection.offsetY + (y - bounds.minY) * projection.scale
   return `${px.toFixed(2)},${py.toFixed(2)}`
 }
 
@@ -108,6 +147,16 @@ function terrainFill(type: string, customTerrains: readonly CustomTerrain[]): st
 /** 标记 / 笔记点的填充色（与区域、路径的专属图形区分开） */
 const MARKER_FILL = '#f2d38d'
 const NOTE_FILL = '#8bc6ff'
+/**
+ * 标记字形的描边色（`marker.c` 没设时用）。
+ *
+ * 画布上默认是 `var(--fc-marker-color, var(--text-normal))` —— 跟随**主题**文字色；
+ * 而导出文件要能脱离 Obsidian 单独打开，`currentColor` / 主题变量在那里无从解析，
+ * 所以这里取一个固定深色（与旧兜底圆点的描边同色）：浅色地形上可读，且与主题无关。
+ */
+const MARKER_STROKE = '#111827'
+/** Lucide 图标的坐标盒（`getIcon()` 给的就是 24×24，注入方不必换算） */
+const LUCIDE_VIEWBOX = 24
 
 function pathPointsToSvg(path: MapPath, bounds: { minX: number; minY: number; maxX: number; maxY: number }, width: number, height: number, padding: number): string {
   return path.pts.map(([x, y]) => pointToSvgPoint(x, y, bounds, width, height, padding)).join(' ')
@@ -125,13 +174,19 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
   const height = clamp(heightValue, 48, 2000)
   const padding = clamp(paddingValue, 0, 40)
   const customTerrains = options.customTerrains ?? []
+  const customMarkers = options.customMarkers ?? []
+  const iconSvgFor = options.iconSvgFor
   // 显式范围优先：导出"某个区域/当前视口"时，那个范围就是这次输出的全部视野
   const bounds = options.bounds ?? contentBounds(rows, document)
+  // 世界 → SVG 的投影**算一次**：区域的边框宽度与虚线要按它换算（点坐标仍走 pointToSvgPoint）
+  const projection = svgProjection(bounds, width, height, padding)
   const content: string[] = []
   content.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Map preview">`)
 
   if (document) {
     for (const [key, cell] of Object.entries(document.terrain)) {
+      // 没有地形的格（只挂着温度 / 深度这类值）在导出里**不画地形**：它本来就没有地形
+      if (typeof cell.t !== 'string') continue
       const axial = parseCellKey(key)
       if (!axial) continue
       const points = hexCorners(document.grid, axial.q, axial.r)
@@ -143,7 +198,26 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
     for (const region of document.regions) {
       const points = regionPointsToSvg(region, bounds, width, height, padding)
       const fill = region.color ?? '#7ab77b'
-      content.push(`<polygon data-row-id="map:region:${region.id}" points="${points}" fill="${fill}" fill-opacity="0.28" stroke="${fill}" stroke-width="1.2" style="cursor:pointer" />`)
+      // 外观**全部取这一条区域自己存的值** —— 与画布 `drawRegion` 同一条口径，
+      // 不在这里另写一套解析（本项目已经因为"抄一份调色板"出过一次真事故）：
+      // - 不透明度直接就是 `fill-opacity`；0 是合法值（完全透明），缺省才回退；
+      // - 边框宽度 0 / 缺省 = **不画边框**（旧区域本来就没有边框字段，画布也没给它画）；
+      // - 边框色缺省**跟随填充色**；虚线用 `borderDash`（世界单位，乘同一个比例换算成 SVG 单位）。
+      const opacity = Number.isFinite(region.opacity) ? clamp(region.opacity, 0, 1) : 0.28
+      const borderWidth = region.borderWidth ?? 0
+      const dash =
+        borderWidth > 0 && region.borderDash !== undefined && region.borderDash.length > 0
+          ? ` stroke-dasharray="${region.borderDash.map((value) => (value * projection.scale).toFixed(2)).join(' ')}"`
+          : ''
+      // 与画布同源的下限：画布是 `max(1, borderWidth * deviceScale)`（防亚像素线在光栅化后消失），
+      // 这里只是把 `deviceScale` 换成导出的 `scale` —— 同一个式子，同一种观感。
+      const stroke =
+        borderWidth > 0
+          ? ` stroke="${region.borderColor ?? fill}" stroke-width="${Math.max(1, borderWidth * projection.scale).toFixed(2)}"${dash}`
+          : ' stroke="none"'
+      content.push(
+        `<polygon data-row-id="map:region:${region.id}" points="${points}" fill="${fill}" fill-opacity="${opacity}"${stroke} style="cursor:pointer" />`,
+      )
     }
 
     for (const path of document.paths) {
@@ -169,6 +243,21 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
     for (const marker of document.markers) {
       const point = pointToSvgPoint(marker.p[0], marker.p[1], bounds, width, height, padding)
       const [x, y] = point.split(',')
+      // 形状走**与画布同一份解析**（`resolveMarkerStyle` 把内置 / 自定义 / 未知抹平成同一个字形名），
+      // 再由注入的 `iconSvgFor` 换成 SVG 片段；拿不到就退回旧的小圆点 —— 对象**绝不消失**。
+      const glyphName = resolveMarkerStyle(marker.icon, customMarkers).iconName
+      const fragment = iconSvgFor === undefined ? null : iconSvgFor(glyphName)
+      if (fragment !== null && fragment.length > 0) {
+        // 与画布同尺寸（`MARKER_ICON_SIZE`），并把 Lucide 的 24×24 坐标盒缩到那个尺寸
+        const scale = MARKER_ICON_SIZE / LUCIDE_VIEWBOX
+        const half = LUCIDE_VIEWBOX / 2
+        content.push(
+          `<g data-row-id="map:marker:${marker.id}" transform="translate(${x},${y}) scale(${scale.toFixed(4)}) translate(${-half},${-half})"` +
+            ` fill="none" stroke="${marker.c ?? MARKER_STROKE}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"` +
+            ` style="cursor:pointer">${fragment}</g>`,
+        )
+        continue
+      }
       content.push(
         `<circle data-row-id="map:marker:${marker.id}" cx="${x}" cy="${y}" r="3" fill="${MARKER_FILL}" stroke="#111827" stroke-width="1" style="cursor:pointer" />`,
       )
@@ -205,6 +294,25 @@ export function buildMapExportSvg(
   height = 1000,
   customTerrains: readonly CustomTerrain[] = [],
   bounds?: BBox,
+  /**
+   * 另外两样"来自设置 / 来自 Obsidian"的东西，**打包成一个参数**传进来。
+   *
+   * 为什么不再摊平成第 6、第 7 个位置参数：位置参数一多，调用点就开始出现
+   * "把 bounds 传成了 customMarkers"这类只看类型看不出来的错。前面几个保持不变
+   * （既有调用点与断言一行都不用改），新增的东西一律进这个对象。
+   */
+  extras: {
+    customMarkers?: readonly CustomMarker[]
+    iconSvgFor?: (iconName: string) => string | null
+  } = {},
 ): string {
-  return buildMapPreviewSvg(document, [], { width, height, padding: 32, customTerrains, ...(bounds ? { bounds } : {}) })
+  return buildMapPreviewSvg(document, [], {
+    width,
+    height,
+    padding: 32,
+    customTerrains,
+    ...(bounds ? { bounds } : {}),
+    ...(extras.customMarkers ? { customMarkers: extras.customMarkers } : {}),
+    ...(extras.iconSvgFor ? { iconSvgFor: extras.iconSvgFor } : {}),
+  })
 }

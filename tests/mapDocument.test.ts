@@ -158,7 +158,9 @@ test('单条目错误只跳过该条目并告警，其余数据保持可用', ()
     badKey: { t: 'forest' },
     // 未知地形：**保留**（只告警）。丢掉它 = 用户一保存就永久删数据，见下一个测试
     '1_1': { t: 'nonexistent-terrain' },
-    // 完全不可能当 ID 的值（不是字符串、空串、带空白）才跳过
+    // 完全不可能当 ID 的值（不是字符串、空串、带空白）**不再丢整格**：
+    // 保留该格、按"无地形"处理，原值原样留在 `extra.t`（写回时仍旧写成 `"t"`）。
+    // 这与"格可以只有值没有地形"是同一条规则：丢一格 = 连同格上的其它字段一起永久删掉。
     '3_3': { t: 42 },
     '4_4': { t: '' },
     '5_5': { t: 'has space' },
@@ -179,7 +181,11 @@ test('单条目错误只跳过该条目并告警，其余数据保持可用', ()
   assert.equal(result.ok, true)
   const doc = result.document!
 
-  assert.deepEqual(Object.keys(doc.terrain).sort(), ['0_0', '1_1', '2_2'])
+  assert.deepEqual(Object.keys(doc.terrain).sort(), ['0_0', '1_1', '2_2', '3_3', '4_4', '5_5'])
+  assert.equal(doc.terrain['3_3']!.t, undefined, '坏掉的 t 不写进已知槽位（这一格按无地形处理）')
+  assert.deepEqual(doc.terrain['3_3']!.extra, { t: 42 }, '原值必须原样保留')
+  assert.deepEqual(doc.terrain['5_5']!.extra, { t: 'has space' })
+  assert.deepEqual(doc.terrain['4_4']!.extra, { t: '' })
   assert.deepEqual(doc.markers.map((m) => m.id), ['m1', 'm3'])
   assert.equal(doc.markers[1]!.icon, 'spaceship', '未知图标必须原样保留（改写成 town = 下次保存就永久改了数据）')
   assert.deepEqual(doc.regions.map((r) => r.id), ['r2'], '顶点不足 3 个的区域应被跳过')

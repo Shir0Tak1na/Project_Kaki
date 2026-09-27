@@ -1,4 +1,4 @@
-# Project Kaki
+﻿# Project Kaki
 
 **在 Obsidian 里画一张虚构世界的地图。**
 
@@ -502,7 +502,7 @@ canvases:
 ```bash
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
-node --test --test-isolation=none                 # 478 个单元测试
+node --test --test-isolation=none                 # 534 个单元测试
 node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian（场景数 / 断言数见输出末行）
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```

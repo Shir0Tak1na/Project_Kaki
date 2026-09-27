@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 地图编辑器：模式、当前地形、笔刷大小、笔画生命周期与撤销栈。
  *
  * 笔画的关键设计：**边拖边画**（用户要立刻看到），但历史只记一条。
@@ -29,7 +29,7 @@ import type {
   TerrainId,
 } from '../data/mapDocument.ts'
 import { cellsAlongSegment } from './brushPath.ts'
-import { History, applyOp, opsFromPrevious, type MapOp } from './history.ts'
+import { History, applyOp, opsFromPrevious, opsFromPreviousOf, type MapOp } from './history.ts'
 import {
   describeSelection,
   hitTestSelection,
@@ -279,6 +279,8 @@ export class MapEditor {
    * 撤销一次却把选中也换掉，用户会觉得 Ctrl+Z"撤歪了"。
    */
   private selection: MapSelection | null = null
+  /** 选中那一刻撤销栈的深度（算"本次选中改了几处"的基准，见 `editsSinceSelection`） */
+  private selectionUndoBaseline = 0
   /** 进行中的拖动移动（标记 / 文字标注） */
   private moveState: { kind: 'marker' | 'label'; id: string; from: [number, number] } | null = null
   /** 进行中的多点草稿（路径 / 区域） */
@@ -325,10 +327,30 @@ export class MapEditor {
   setSelection(selection: MapSelection | null): boolean {
     if (sameSelection(this.selection, selection)) return false
     this.selection = selection
+    // 记下"选中那一刻撤销栈有多深"：面板用「已改 N 处 / 撤销这些改动」就靠它
+    this.selectionUndoBaseline = this.history.size().undo
     if (this.options.onSelectionChanged) this.options.onSelectionChanged()
     else this.options.onChanged()
     this.options.onStateChanged?.()
     return true
+  }
+
+  /** 本次选中之后一共改了几处（一次提交 = 一条历史，所以直接数撤销栈） */
+  editsSinceSelection(): number {
+    return Math.max(0, this.history.size().undo - this.selectionUndoBaseline)
+  }
+
+  /**
+   * 撤销"本次选中期间的改动"（检查器上那个按钮）。
+   *
+   * **逐条撤销**，而不是"把文档回滚到选中那一刻"：撤销栈里本来就是可逆的 op，
+   * 逐条 undo 的结果与用户自己按 N 次 Ctrl+Z 一模一样 —— 而且这些改动仍可重做，
+   * 不会出现"点一下按钮就把中间状态全丢了"。
+   */
+  undoEditsSinceSelection(): number {
+    const count = this.editsSinceSelection()
+    for (let index = 0; index < count; index += 1) this.undo()
+    return count
   }
 
   clearSelection(): boolean {
@@ -359,7 +381,10 @@ export class MapEditor {
   selectionInfo(): SelectionInfo | null {
     const document_ = this.options.getDocument()
     if (!document_) return null
-    return describeSelection(document_, this.selection, this.labelResolvers())
+    const info = describeSelection(document_, this.selection, this.labelResolvers())
+    if (info === null) return null
+    // "已改几处"由编辑器补上：历史栈只有它有（面板不认识文档，也不该认识）
+    return { ...info, editsSinceSelection: this.editsSinceSelection() }
   }
 
   private labelResolvers(): SelectionLabelResolvers {
@@ -722,6 +747,38 @@ export class MapEditor {
 
   // ------------------------------------------------------------ 笔画
 
+  /**
+   * 这一格画完之后应该是什么样。
+   *
+   * **以该格原有内容为底**，只改地形类型：格上除了 `t` 还可能有位标志、覆盖色，
+   * 以及**这一版不认识的键**（未来的温度 / 深度就挂在这些键上，见 `TerrainCell.extra`）。
+   * 以前这里返回一个新建的 `{ t }`，等于整格替换 —— 未知字段会被顺手抹掉，
+   * 而且"用同一种地形重刷一遍"连撤销点都不产生（完整因果见 `opsFromPreviousOf` 的注释）。
+   *
+   * `f` / `c` 的既有行为（重刷即重置）**刻意保持不变**：本次只修数据丢失，
+   * 不顺手改用户看得见的行为。
+   */
+  private nextCellFor(existing: TerrainCell | null): TerrainCell {
+    const next: TerrainCell = { t: this.terrainType }
+    if (existing === null) return next
+    /**
+     * **只重置地形笔刷"拥有"的三个键**（`t` / `f` / `c` —— 重刷即重置是既有行为），
+     * 其余键一律跟着走：这一版不认识的（`extra`）与后来加上的（温度 / 深度…）都算。
+     *
+     * 为什么用"排除法"而不是"逐个列出要保留的键"：列出法每加一个字段都要回来改一次，
+     * 而漏改的后果是**静默丢数据** —— 用户重刷一遍地形，那一格的温度就没了，还留不下撤销点。
+     */
+    for (const [key, value] of Object.entries(existing)) {
+      if (key === 't' || key === 'f' || key === 'c') continue
+      if (key === 'extra') {
+        next.extra = { ...(value as Record<string, unknown>) }
+        continue
+      }
+      ;(next as Record<string, unknown>)[key] = value
+    }
+    return next
+  }
+
   /** 按下：开始一条笔画 */
   beginStroke(world: Point): void {
     const grid = this.grid()
@@ -756,8 +813,9 @@ export class MapEditor {
       return
     }
 
-    const next: TerrainCell = { t: this.terrainType }
-    const ops: MapOp[] = opsFromPrevious(cells, next, (q, r) => previous.get(cellKey(q, r)) ?? null)
+    // 逐格算新状态（而不是所有格共用一个新建的 `{ t }`）：格上的其它键要跟着走
+    const previousOf = (q: number, r: number): TerrainCell | null => previous.get(cellKey(q, r)) ?? null
+    const ops: MapOp[] = opsFromPreviousOf(cells, (q, r) => this.nextCellFor(previousOf(q, r)), previousOf)
     if (ops.length > 0) {
       this.history.push({ label: `绘制 ${ops.length} 格`, ops })
       this.options.onSaveRequested?.()
@@ -776,15 +834,16 @@ export class MapEditor {
     this.strokeLastPoint = world
 
     let changed = false
-    const next: TerrainCell = { t: this.terrainType }
     for (const cell of cells) {
       const key = cellKey(cell.q, cell.r)
       const previous = this.strokePrevious!
       if (!previous.has(key)) {
         // 第一次碰到这一格：记下笔画开始前的状态
-        previous.set(key, document_.terrain[key] === undefined ? null : { ...document_.terrain[key]! })
+        const before = document_.terrain[key]
+        previous.set(key, before === undefined ? null : { ...before })
         this.strokeCells.push(cell)
-        document_.terrain[key] = { ...next }
+        // 以这一格原有内容为底（保留未知键），不是整格替换
+        document_.terrain[key] = this.nextCellFor(before ?? null)
         changed = true
       }
     }

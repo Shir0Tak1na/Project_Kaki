@@ -15,7 +15,8 @@
 
 | 能力 | 位置 | 为什么它够开放 |
 |---|---|---|
-| 每帧渲染计划与绘制分离 | `src/render/renderPlan.ts` → `src/render/MapOverlay.ts` | 加"一层画什么"只需在 plan 里多一段、在 overlay 里多一次绘制调用，**不需要碰命中测试** |
+| 每帧渲染计划与绘制分离 | `src/render/renderPlan.ts` → `src/render/MapOverlay.ts` | 加"一层画什么"只需在 plan 里多一段取数（数据形状不同，无法表驱动），**不需要碰命中测试** |
+| 图层描述表（显示层与数据层） | `src/render/layerVisibility.ts` → `LAYER_TABLE` | 一行一层（名字 / 提示 / 出厂默认 / 是否数据层 / **绘制次序** / 可选**绘制钩子**）：面板开关、设置页、图例分段、`renderPlan` 的开关判断、`MapOverlay.drawPlan` 的绘制循环**全部遍历它**。加一层实测只改表里 19 行、其余文件 0 行（详 §3.2） |
 | 覆盖层与手势分离 | `MapOverlay` 挂在 `div.canvas` 第一个子节点；手势在 `view.containerEl` 捕获阶段 | 覆盖层永久 `pointer-events: none`，所以新增可视化不会挡住原生 Canvas 交互 |
 | 未知值原样保留 | 地形 `t` / 标记 `icon` / 路径 `type` / 区域 `type` | 不认识的 ID **保留 + 告警「已保留」**，回退视觉归绘制层。别的库/别的版本写下的东西不会被改写 |
 | 自定义定义目录 | `terrainCatalog` / `markerCatalog` / `pathTypeCatalog` / `regionTypeCatalog` | 四类都是"内置 + `custom:` 前缀 + 上限 + 三级回退"的同一模式，新增定义不需要改解析层 |
@@ -57,16 +58,23 @@
 
 ### 3.2 新增一个"显示/数据图层"（温度带、深度分层…）
 
-**现状（阻碍）**：六个图层开关是**硬编码**的 —— `LAYER_KEYS = ['terrain','grid','regions','paths','markers','labels']`
-（`src/render/layerVisibility.ts`），它同时决定了设置、面板开关、图例、渲染计划里的分支。
+**现状（已开放，2026-09-27 起）**：图层由**一张描述表**驱动 —— `LAYER_TABLE`
+（`src/render/layerVisibility.ts`，一行一层：`id / label / hint / describe / defaultVisible /
+isDataLayer / order / draw?`）。`LAYER_KEYS`、`DEFAULT_LAYER_VISIBILITY`、面板开关、设置页、
+图例分段、`renderPlan` 的开关判断、`MapOverlay.drawPlan` 的绘制次序**全部由它派生或遍历**；
+`order` 是画布叠加次序的唯一来源，由单测与冒烟各钉一条（防止"地形盖住路径"这类回归）。
+持久化形状没变（`data.json` 里仍是 `layers: { terrain: true, … }`，旧数据照旧读、迁移仍幂等）。
 
-**落位时要动哪几处**（**建议一次做完**，否则每加一层都要改五处）：
-1. 把 `LAYER_KEYS` 换成一张**层描述表**：`{ id, label, hint, default, isDataLayer, draw?(plan, ctx) }`；
-2. `layerVisibility` 的规范化从"按 key 列表"变成"按表"（迁移照旧：`layerVisibilityFromLegacy` 的写法）；
-3. 面板开关、设置页、图例、`renderPlan` 的分支改为**遍历表**；
-4. 数据层（温度/深度）还要给 cell 加值 —— 见 3.5。
+**落位时要动哪几处**（实测：**加一层 = 表里加 19 行，其余文件 0 行**）：
+1. `LAYER_TABLE` 加一行 —— 元数据 8 行（名字/提示/说明/默认值/是否数据层/次序）；
+2. 要画东西就再给一个 `draw` 钩子（约 11 行）：它被绘制层按 `order` 插进正确位置，
+   **不必改 `MapOverlay`**（钩子拿到 `ctx`、`toRaster`、`plan`、`document`、`layers`）；
+3. 若这一层还要产出**渲染计划**（连续场 / 等值线这类），在 `renderPlan` 里加一段取数 ——
+   每层的数据形状不同（格 / 折线 / 多边形），这一段无法表驱动，也是唯一"非一行"的地方；
+4. 数据层（温度/深度）还要给 cell 加值 —— 见 3.5；
+5. 只有**测试里写死的"六层"**要跟着改（有意留的提醒，不是结构阻碍）。
 
-**判断标准**：加完这一层，第 3 层应该只需要**加一行**。
+**判断标准**：加完这一层，面板开关 / 设置页 / 图例 / 绘制次序**一行都不用改**（演练已验证）。
 
 ### 3.3 新增一类"自定义定义"（例如"温度带定义"）
 
@@ -100,13 +108,21 @@
 
 ### 3.5 一格多值（温度 + 深度 + 地形同时存在）
 
-**现状**：`TerrainCell = { t, f?, c? }` —— **一格一个类型**。
+**现状（2026-09-27 起：数据这一半已落地，渲染与界面还没接）**：
 
-**落位时要动哪几处**：
-1. cell 增加"附加字段"的读写（**未知字段必须原样保留**，见 §4 的待修项 2）；
-2. 渲染：从"一格一张图"变成"多值叠加"时要想清楚**合成规则**（谁在上、怎么混）——
-   这是设计问题，别让绘制层临场决定；
-3. Base 行/导出/图例都要能表达"这一格还有别的值"。
+- `TerrainCell = { t?, f?, c?, temp?, depth?, extra? }` —— **一格多值**已经是数据层的事实：
+  `t` 变成**可选**（"只有温度 / 深度、没有地形"的格合法），`temp` / `depth` 是**正式字段**
+  （含 `TEMP_RANGE` / `DEPTH_RANGE`），未知键仍按 §4 摊平保留；
+- 侧栏检查器已经有**「数据层」**一组（字段表里 `group: 'data'`，与「外观」分开渲染）；
+- **还没做的**：覆盖层渲染（色带 / 等温线 / 等深线 / 透明度 / 图例 / 导出里的叠加），
+  三个纯函数地基（`colorRamp.ts` / `elevationUnits.ts` / `fieldPlan.ts`）还没有界面入口。
+
+**落位时要动哪几处**（数据那一半已完成，下面是渲染那一半）：
+
+1. `LAYER_TABLE` 加一行（数据层：`isDataLayer: true`）+ 一个 `draw` 钩子 —— 见 §3.2；
+2. **想清楚合成规则**（谁在上、怎么混）并写进表/文档，别让绘制层临场决定；
+3. 若用连续场而不是逐格上色，图元 IR 已经就绪（`fieldPlan.ts` 的 `buildFieldPlan`）；
+4. Base 行 / 导出 / 图例都要能表达"这一格还有别的值"（图例分段已在 §3.2 的表里就位）。
 
 ---
 

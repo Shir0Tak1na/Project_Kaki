@@ -14,6 +14,8 @@ import { test } from 'node:test'
 import {
   DEFAULT_LAYER_VISIBILITY,
   LAYER_KEYS,
+  LAYER_TABLE,
+  LAYERS_BY_DRAW_ORDER,
   allLayersHidden,
   hiddenLayerLabels,
   isLayerVisible,
@@ -70,6 +72,49 @@ test('隐藏清单：给状态命令一个可读答案', () => {
   let all = DEFAULT_LAYER_VISIBILITY
   for (const key of LAYER_KEYS) all = withLayerVisibility(all, key, false)
   assert.equal(allLayersHidden(all), true)
+})
+
+/* ------------------------------------------------------------ 图层描述表 */
+
+test('层描述表：id 唯一、键集合与表一致（加一层 = 加一行）', () => {
+  const ids = LAYER_TABLE.map((spec) => spec.id)
+  assert.equal(new Set(ids).size, ids.length, `id 有重复：${ids.join(',')}`)
+  assert.deepEqual([...LAYER_KEYS], ids, 'LAYER_KEYS 必须由表派生（不许另有第二份清单）')
+  assert.equal(LAYER_TABLE.length, 6, '当前六层；加第 7 层时这一条要跟着改（这是有意的提醒）')
+})
+
+test('每一行都写清"叫什么 / 管什么 / 关掉会怎样"：三个给人看的字段都不许空', () => {
+  for (const spec of LAYER_TABLE) {
+    for (const field of ['label', 'hint', 'describe'] as const) {
+      const value = spec[field]
+      assert.equal(typeof value, 'string', `${spec.id}.${field} 必须是字符串`)
+      assert.ok(value.trim().length > 0, `${spec.id}.${field} 不许留空（用户会看到一句空白提示）`)
+    }
+    assert.equal(LAYER_KEYS.includes(spec.id), true)
+  }
+})
+
+test('绘制次序是显式的（自下而上）：钉住整条叠加序列，防"地貌盖住路径"这类回归', () => {
+  assert.deepEqual(
+    LAYERS_BY_DRAW_ORDER.map((spec) => spec.id),
+    ['terrain', 'grid', 'regions', 'labels', 'paths', 'markers'],
+    '改这张表的 order 等于改画面层次，必须是有意识的一步',
+  )
+  const orders = LAYER_TABLE.map((spec) => spec.order)
+  assert.equal(new Set(orders).size, orders.length, '两层不许共用一个次序（排序结果会不稳定）')
+  // 表里"谁在谁上面"不能只靠行序巧合：行序是界面显示顺序，两回事
+  const rowOrder = [...LAYER_TABLE].map((spec) => spec.id).join(',')
+  assert.notEqual(LAYERS_BY_DRAW_ORDER.map((spec) => spec.id).join(','), rowOrder, '本表里显示顺序与绘制顺序刻意不同（名称在路径之前显示、却在路径之下画）')
+})
+
+test('出厂默认与表一一对应，且"是否数据层"的界线写清（表现层不进地图数据）', () => {
+  for (const spec of LAYER_TABLE) {
+    assert.equal(DEFAULT_LAYER_VISIBILITY[spec.id], spec.defaultVisible, spec.id)
+  }
+  const displayLayers = LAYER_TABLE.filter((spec) => !spec.isDataLayer).map((spec) => spec.id)
+  assert.deepEqual(displayLayers, ['grid', 'labels'], '网格与名称是纯表现：地图文件里没有它们的实体')
+  const dataLayers = LAYER_TABLE.filter((spec) => spec.isDataLayer).map((spec) => spec.id)
+  assert.deepEqual(dataLayers, ['terrain', 'regions', 'paths', 'markers'])
 })
 
 /* ---------------------------------------------------------------- 图例 */
@@ -168,7 +213,7 @@ test('图例对空/坏数据安全：不抛异常、不产生空标签条目', (
   assert.deepEqual(buildLegendEntries(null, deps), [])
   const empty = { ...makeDocument(), terrain: {}, paths: [], regions: [] }
   assert.deepEqual(buildLegendEntries(empty, deps), [])
-  // 坏格（缺 t）应被跳过，而不是产生一个 label 为空的条目
+  // 没有地形的格（缺 t）应被跳过，而不是产生一个 label 为空的条目
   const broken = { ...makeDocument(), terrain: { '0_0': {} as { t: string } } }
   assert.deepEqual(buildLegendEntries(broken, deps).filter((entry) => entry.kind === 'terrain'), [])
   // 一条路径都没有的类型不该出现

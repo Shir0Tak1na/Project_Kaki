@@ -19,7 +19,7 @@ import { projectionWorldBBox, type ClientProjection } from '../core/projection.t
 import type { BBox } from '../core/viewport.ts'
 import type { MapDocument, PathCapStyle, PathJoinStyle, PathType } from '../data/mapDocument.ts'
 import { cellIntersectsBBox } from './hexGrid.ts'
-import { isLayerVisible, type LayerVisibility } from './layerVisibility.ts'
+import { isLayerVisible, type LayerKey, type LayerVisibility } from './layerVisibility.ts'
 import { bboxOverlaps, shapeBounds } from './shapeGeometry.ts'
 
 export interface RenderPlanCell {
@@ -169,15 +169,20 @@ export function buildRenderPlan(options: BuildRenderPlanOptions): MapRenderPlan 
 
   // 图层开关：隐藏的层直接不产出条目（而不是产出后再过滤 —— 白算一遍没有意义，
   // 而且"隐藏"必须与"视口外被裁掉"区分开，见 BuildRenderPlanOptions.layers）
+  //
+  // 判断只有这一个口子，层名取自 `LAYER_TABLE`（键写错是编译错误，不是静默永不生效）。
+  // 但"每层产出什么"仍是各自的取数逻辑（格 / 折线 / 多边形形状不同），这块没法表驱动 ——
+  // 于是新增数据层时：`LAYER_TABLE` 加一行（开关与名字），在这里加一段取数（计划里多一个数组）。
   const layers = options.layers
-  const showTerrain = layers === undefined || isLayerVisible(layers, 'terrain')
-  const showPaths = layers === undefined || isLayerVisible(layers, 'paths')
-  const showRegions = layers === undefined || isLayerVisible(layers, 'regions')
+  const visible = (key: LayerKey): boolean => layers === undefined || isLayerVisible(layers, key)
 
   const cells: RenderPlanCell[] = []
   let culledCells = 0
 
-  for (const [key, cell] of showTerrain ? Object.entries(document.terrain) : []) {
+  for (const [key, cell] of visible('terrain') ? Object.entries(document.terrain) : []) {
+    // 没有地形的格（只挂着温度 / 深度这类值）不进**地形**计划：
+    // 地形层没有东西可画。它们将来由各自的叠加层计划负责（见 `docs/EXTENSION-POINTS.md` §3.5）
+    if (typeof cell.t !== 'string') continue
     const axial = parseCellKey(key)
     if (axial === null) continue
     if (!cellIntersectsBBox(document.grid, axial.q, axial.r, visibleWorld)) {
@@ -204,7 +209,7 @@ export function buildRenderPlan(options: BuildRenderPlanOptions): MapRenderPlan 
   // 路径与区域：按包围盒裁剪（矢量图形，不与格索引挂钩）
   const paths: RenderPlanPath[] = []
   let culledPaths = 0
-  for (const path of showPaths ? document.paths : []) {
+  for (const path of visible('paths') ? document.paths : []) {
     const points = path.pts.map(([x, y]) => ({ x, y }))
     const bounds = shapeBounds(points, path.width / 2)
     if (bounds.empty || !bboxOverlaps(bounds, visibleWorld)) {
@@ -216,7 +221,7 @@ export function buildRenderPlan(options: BuildRenderPlanOptions): MapRenderPlan 
 
   const regions: RenderPlanRegion[] = []
   let culledRegions = 0
-  for (const region of showRegions ? document.regions : []) {
+  for (const region of visible('regions') ? document.regions : []) {
     const points = region.pts.map(([x, y]) => ({ x, y }))
     const bounds = shapeBounds(points, region.borderWidth ?? 0)
     if (bounds.empty || !bboxOverlaps(bounds, visibleWorld)) {

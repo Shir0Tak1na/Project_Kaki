@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Project Kaki —— 插件入口。
  *
  * 当前阶段：Phase 0（探针）已完成；Phase 1 进行中，已具备
@@ -26,6 +26,7 @@ import { disposeViewportWatch, getWatchStatus, startViewportWatch, stopViewportW
 import { MapEditor } from './editor/MapEditor.ts'
 import { MapLayerManager } from './render/MapLayerManager.ts'
 import { buildMapExportSvg } from './base/mapPreview.ts'
+import { lucideIconFragment } from './render/lucideFragment.ts'
 import {
   EXPORT_RANGE_OPTIONS,
   exportFileNameFor,
@@ -603,6 +604,14 @@ export default class ProjectKakiPlugin extends Plugin {
         if (!editor) return
         if (editor.setSelectionPosition(x, y)) this.refreshPanel()
       },
+      // 「撤销这些改动」：逐条撤销到"选中那一刻"（撤销多少次由编辑器按撤销栈算）
+      onUndoSelectionEdits: () => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        const count = editor.undoEditsSinceSelection()
+        if (count > 0) new Notice(`已撤销本次选中的 ${count} 处改动（可以 Ctrl+Y 重做）`, NOTICE_MAX_MS)
+        this.refreshPanel()
+      },
       onMoveSelectionToViewportCenter: () => {
         const editor = this.layers?.getInspectorEditor()
         const center = this.selectionViewportCenter()
@@ -901,8 +910,12 @@ export default class ProjectKakiPlugin extends Plugin {
     const basePath = exportFileNameFor(exportBasePathFor(mapPath), range, document)
     const extension = format === 'png' ? '.png' : '.svg'
     const exportPath = uniqueExportPath(basePath, extension, (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
-    // 现读一次设置：导出必须是"当前地图 + 当前自定义地形"的合成结果
-    const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains(), resolved.bounds)
+    // 现读一次设置：导出必须是"当前地图 + 当前自定义地形/标记"的合成结果。
+    // 图标形状只能由 Obsidian 的 `getIcon` 拿到，所以**注入**给纯模块（见 `lucideFragment.ts`）。
+    const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains(), resolved.bounds, {
+      customMarkers: this.getCustomMarkers(),
+      iconSvgFor: lucideIconFragment,
+    })
 
     if (format === 'svg') {
       try {

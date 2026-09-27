@@ -23,14 +23,22 @@ export interface CollapsibleGroupOptions {
    * 不必依赖标题文字（文案会改，角色名不该改）。
    */
   role?: string
+  /**
+   * 初始是否展开（缺省收起）。
+   *
+   * 为什么要这个参数：面板**每次改完一个字段就整块重建**，重建出来的 `<details>` 一律收起 ——
+   * 用户改一个值就要重新点开一次（真实库里的反馈）。所以重建前要把"哪些组是展开的"读回来，
+   * 再从这里传进去（见 `MapPanel` 的 `captureOpenGroups`）。
+   */
+  open?: boolean
 }
 
-/** 建一个**默认收起**的组，返回那个 `<details>`（往它里面继续建内容即可） */
-export function createCollapsibleGroup(parent: HTMLElement, options: CollapsibleGroupOptions): HTMLElement {
+/** 建一个折叠组（默认收起），返回那个 `<details>`（往它里面继续建内容即可） */
+export function createCollapsibleGroup(parent: HTMLElement, options: CollapsibleGroupOptions): HTMLDetailsElement {
   const details = parent.createEl('details', { cls: options.cls ?? 'fc-selection-group' })
   if (options.role !== undefined) details.dataset.fcGroup = options.role
-  // 显式设成收起：假 DOM 里没有 `open` 属性时，断言"默认收起"才有意义
-  details.open = false
+  // 显式赋值：假 DOM 里没有 `open` 属性时，断言"默认收起"才有意义
+  details.open = options.open ?? false
   details.createEl('summary', { cls: options.titleCls ?? 'fc-selection-group-title', text: options.title })
   return details
 }

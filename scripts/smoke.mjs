@@ -1350,8 +1350,11 @@ const fakeObsidian = {
     }
   },
   Platform: { isDesktop: true, isMobile: false, isDesktopApp: true },
-  // 图标：桩里只做"图标名存在/不存在"的判定，不真的画 SVG
-  getIcon: (name) => ({ iconName: name }),
+  // 图标：桩要复刻真实 `getIcon` 的**形状** —— 真实的它返回一个含子元素的 `<svg>` 元素，
+  // 而导出侧会把子元素序列化成片段内联进 SVG（见 `lucideFragment.ts`）。
+  // 桩里缺 `children` / `outerHTML` 的后果是那条链路**静默退回兜底圆点**：
+  // 断言全绿、但"标记按字形画"根本没被验过。
+  getIcon: (name) => ({ iconName: name, children: [{ outerHTML: `<path data-fc-icon="${name}"/>` }] }),
   setIcon: (el, name) => {
     el.textContent = ''
     el.dataset.icon = name
@@ -3630,9 +3633,17 @@ console.log('\n场景 18：名称字号的实测标定与用户可调（"字太�
       sliderSetting?.slider.limits?.max === 3,
     JSON.stringify({ value: sliderSetting?.slider.value, limits: sliderSetting?.slider.limits }),
   )
+  check(
+    '开发者模式关闭时，「当前实际字号」那一组不出现（本轮起它属于开发者选项）',
+    FakeSetting.created.find((setting) => setting.info.name === '当前实际字号') === undefined,
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name).filter((name) => name === '当前实际字号')),
+  )
+  // 打开开发者模式后它才出现（用户 2026-09-27 的要求：把它移进开发者选项里）
+  await plugin.setDeveloperMode(true)
+  plugin.settingTabs[0].display()
   const liveInfo = FakeSetting.created.find((setting) => setting.info.name === '当前实际字号')
   check(
-    '设置界面显示当前实际字号（便于直接读数）',
+    '开发者模式下显示当前实际字号（便于直接读数）',
     typeof liveInfo?.info.desc === 'string' && /路径 \d+ px · 区域 \d+ px/.test(liveInfo.info.desc),
     String(liveInfo?.info.desc),
   )
@@ -3872,6 +3883,12 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
   )
   check('导出包含路径与区域', (svg ?? '').includes('<polyline') && (svg ?? '').includes('<polygon'))
   check('导出包含标记与文字', (svg ?? '').includes('map:marker:m1') && (svg ?? '').includes('map:label:l1'))
+  // 工单 A 的端到端证据：导出里的标记是**字形**（形状来自 `getIcon`，不再是统一的小圆点）
+  check(
+    '导出里的标记按字形画（与缩略图共用同一份实现）',
+    (svg ?? '').includes('data-fc-icon='),
+    String(svg).slice(0, 240),
+  )
   check('导出后打开了文件', openedLinks.some((entry) => entry.link === 'Maps/World.svg'), JSON.stringify(openedLinks))
   check('命令报告了导出路径', noticeLog.some((line) => line.includes('Maps/World.svg')), noticeLog.join(' | '))
 
@@ -3907,6 +3924,13 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
     embeddedIds.join(', '),
   )
   check('缩略图包含笔记点', embeddedIds.includes('note:Locations/灰港.md'), embeddedIds.join(', '))
+  // 工单 A：标记不再一律是固定小圆点 —— 形状由 `resolveMarkerStyle` + 注入的 `iconSvgFor` 决定，
+  // 缩略图与导出**共用同一份实现**（这条断言就是"两边真的都注入了"的端到端证据）
+  check(
+    '缩略图里的标记按字形画（不再是统一的小圆点）',
+    previewHtml.includes('data-fc-icon='),
+    previewHtml.slice(0, 240),
+  )
 
   plugin.onunload()
 }
@@ -5233,6 +5257,18 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   check('设置页关掉网格 → 图层设置里网格是关的', plugin.getSettings().layers.grid === false, JSON.stringify(plugin.getSettings().layers))
   calls = frame()
   check('关掉网格后那一帧不描网格线', stats().lastGridCells === 0, String(stats().lastGridCells))
+  // 次序是显式的（`LAYER_TABLE.order` → `LAYERS_BY_DRAW_ORDER`）：这一串就是"谁在谁上面"的实测证据，
+  // 关掉的层不许出现在里面 —— 否则"开关是亮的/灭的"与"真的画没画"就对不上了。
+  check(
+    '关掉网格后它也不在绘制序列里',
+    stats().lastDrawOrder.includes('grid') === false,
+    stats().lastDrawOrder.join(','),
+  )
+  check(
+    '绘制序列自下而上：地形 → 区域 → 路径 → 标记（名称在上一步被工具条关掉了，所以不在里面）',
+    stats().lastDrawOrder.join(',') === 'terrain,regions,paths,markers',
+    stats().lastDrawOrder.join(','),
+  )
 
   // ---- 状态命令：让"地图怎么少了东西"有一个可查的答案 ----
   await plugin.setLayerVisible('paths', false)
@@ -5545,6 +5581,14 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
     String(toggleFor('markers')?.title),
   )
 
+  // ---- 绘制次序是表里写明的，不是绘制函数调用的先后 ----
+  frame()
+  check(
+    '真实渲染按图层登记表的次序画（自下而上：地形 → 网格 → 区域 → 名称 → 路径 → 标记）',
+    stats().lastDrawOrder.join(',') === 'terrain,grid,regions,labels,paths,markers',
+    stats().lastDrawOrder.join(','),
+  )
+
   // ---- 从别处改图层时，面板要跟着变（否则会出现"设置改了、开关还亮着旧的"）----
   await plugin.setLayerVisible('paths', false)
   await new Promise((resolve) => setTimeout(resolve, 20))
@@ -5577,6 +5621,11 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
     String(Object.keys(doc().terrain).length),
   )
   check('关掉地形不影响路径（只动点的那一层）', hiddenFrame.groups.some((group) => group.strokeStyle === RIVER_COLOR))
+  check(
+    '关掉地形后它也不在绘制序列里（其余五层顺序不变）',
+    stats().lastDrawOrder.join(',') === 'grid,regions,labels,paths,markers',
+    stats().lastDrawOrder.join(','),
+  )
 
   fireEvent(toggleFor('terrain'), 'click')
   await new Promise((resolve) => setTimeout(resolve, 20))
@@ -5904,6 +5953,12 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
     'styles.css 里也有挂在 .fc-defmodal 上的折行规则（弹窗里同样有控件很多的那几行）',
     /\.fc-defmodal\s+\.setting-item-control\s*\{[^}]*flex-wrap:\s*wrap/.test(stylesCssText),
     '未找到 .fc-defmodal .setting-item-control { … flex-wrap: wrap … }',
+  )
+  check(
+    'styles.css 里把"空控件容器"藏起来了（内置行不该看起来像有两个空按钮）',
+    // 选择器是一串（弹窗 + 设置页两处共用），所以 `:empty` 后面允许接逗号再接第二个选择器
+    /\.fc-defmodal\s+\.setting-item-control:empty[^{]*\{[^}]*display:\s*none/.test(stylesCssText),
+    '未找到 .fc-defmodal .setting-item-control:empty { … display: none … }',
   )
 
   openSettings()
@@ -6566,6 +6621,12 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
    * 所以"远处的东西被裁掉了"这件事只能从**像素坐标超出画布**看出来。
    */
   const markerPixel = (svg, id) => {
+    // 标记可能是**字形**（`<g transform="translate(x,y) …">`）或**兜底圆点**（`<circle cx cy>`）——
+    // 走哪个分支由"`iconSvgFor` 拿不拿得到图标片段"决定，这里两种都要能读出来
+    const glyph = new RegExp(`data-row-id="map:marker:${id}" transform="translate\\(([-\\d.]+),([-\\d.]+)\\)`).exec(
+      svg ?? '',
+    )
+    if (glyph) return { x: Number(glyph[1]), y: Number(glyph[2]) }
     const match = new RegExp(`data-row-id="map:marker:${id}" cx="([-\\d.]+)" cy="([-\\d.]+)"`).exec(svg ?? '')
     return match ? { x: Number(match[1]), y: Number(match[2]) } : null
   }
@@ -9351,6 +9412,88 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   changeField('type', 'mountain')
   check('改地形种类写进了文档', doc().terrain[cellKey(6, 0)]?.t === 'mountain', String(doc().terrain[cellKey(6, 0)]?.t))
 
+  // ---- 数据层：地块上的温度 / 深度（「一格多值」的前两个正式字段）----
+  // 它们**不该**混进「外观」组：那句提示说的是"只影响这一个对象"，而温度是给覆盖层上色用的
+  check(
+    '地块多出一组「数据层」，且没有污染「外观」组',
+    groupEl('data') !== undefined &&
+      collectByClass(panel.contentEl, 'fc-selection-group').map((el) => el.dataset?.fcGroup).join(',') ===
+        'type,position,appearance,data',
+    JSON.stringify(collectByClass(panel.contentEl, 'fc-selection-group').map((el) => el.dataset?.fcGroup)),
+  )
+  const undoBeforeTemp = editor.getStatus().undo
+  groupEl('data').open = true // 模拟用户点开「数据层」这一组
+  commitInput('field-temp', '-12.5')
+  check(
+    '改完一个字段后，展开着的组仍然是展开的（不用每次重新点开）',
+    groupEl('data')?.open === true,
+    String(groupEl('data')?.open),
+  )
+  check(
+    '没被展开过的组依旧收起（不是"一律展开"）',
+    groupEl('appearance')?.open === false,
+    String(groupEl('appearance')?.open),
+  )
+  check(
+    '在检查器里改温度写进了文档',
+    doc().terrain[cellKey(6, 0)]?.temp === -12.5,
+    JSON.stringify(doc().terrain[cellKey(6, 0)]),
+  )
+  check(
+    '改温度记了一条可撤销的历史',
+    editor.getStatus().undo === undoBeforeTemp + 1,
+    `${undoBeforeTemp} → ${editor.getStatus().undo}`,
+  )
+  editor.undo()
+  flushFrames()
+  check(
+    '撤销后温度那个键被删掉（不是写成 0 —— "没有数据"与 0 ℃ 是两回事）',
+    'temp' in (doc().terrain[cellKey(6, 0)] ?? {}) === false,
+    JSON.stringify(doc().terrain[cellKey(6, 0)]),
+  )
+  const undoBeforeOutOfRange = editor.getStatus().undo
+  commitInput('field-depth', '99999')
+  check(
+    '越界的深度被直接拒绝（不写盘、不记历史 —— 不是悄悄夹到边界）',
+    doc().terrain[cellKey(6, 0)]?.depth === undefined && editor.getStatus().undo === undoBeforeOutOfRange,
+    JSON.stringify(doc().terrain[cellKey(6, 0)]),
+  )
+  commitInput('field-depth', '3400')
+  check(
+    '范围内的深度写得进去（0 = 海平面，正 = 向下）',
+    doc().terrain[cellKey(6, 0)]?.depth === 3400,
+    JSON.stringify(doc().terrain[cellKey(6, 0)]),
+  )
+
+  // ---- 「撤销这些改动」：用户要的"确认改动"按钮（走 A：逐条撤销回到选中那一刻）----
+  commitInput('field-temp', '-8')
+  const editsRow = collectByClass(panel.contentEl, 'fc-selection-edits')[0]
+  check(
+    // 3 处 = 本次选中之后依次改了：地形种类（mountain）、深度 3400、温度 -8
+    '改过之后出现「本次选中已改 N 处」',
+    editsRow !== undefined && String(editsRow.textContent).includes('已改 3 处'),
+    String(editsRow?.textContent),
+  )
+  const undoEditsButton = fieldEl('undo-selection-edits')
+  check(
+    '撤销按钮在（面板上那个后悔按钮）',
+    undoEditsButton?.textContent === '撤销这些改动',
+    String(undoEditsButton?.textContent),
+  )
+  undoEditsButton.dispatchEvent({ type: 'click' })
+  flushFrames()
+  check(
+    '点它 = 逐条撤销到选中那一刻（温度与深度两个键都没了）',
+    'temp' in (doc().terrain[cellKey(6, 0)] ?? {}) === false &&
+      'depth' in (doc().terrain[cellKey(6, 0)] ?? {}) === false,
+    JSON.stringify(doc().terrain[cellKey(6, 0)]),
+  )
+  check(
+    '撤销完那一行自己消失（回到 0 处，不再占位置）',
+    collectByClass(panel.contentEl, 'fc-selection-edits').length === 0,
+    String(collectByClass(panel.contentEl, 'fc-selection-edits').length),
+  )
+
   plugin.onunload()
 }
 
@@ -9536,6 +9679,168 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     (reefRow.buttons ?? []).some((button) => button.text === '改 ID…') &&
       (reefRow.buttons ?? []).some((button) => button.text === '删除'),
     JSON.stringify((reefRow.buttons ?? []).map((button) => button.text)),
+  )
+
+  // ---------------------------------------------------------- 7. 内置行不建按钮 + 新增流程真的能跑
+  // 这两条是真实库里的现象逼出来的：内置类型的行上挂着**两个空按钮**（`addButton` 先建元素
+  // 再回调，回调里提前 return 只做到了"不设文字"，按钮本身还在），而"新增"这条操作链
+  // 在 A3 搬迁后**一条断言都没有**。
+  const builtinRows = ['河流', '王国'].map((label) =>
+    FakeSetting.created.find((setting) => setting.info.name === label),
+  )
+  check(
+    '内置类型的行上没有任何按钮（不许留下空按钮）',
+    builtinRows.every((row) => row !== undefined && (row.buttons ?? []).length === 0),
+    JSON.stringify(builtinRows.map((row) => (row?.buttons ?? []).map((button) => button.text))),
+  )
+
+  const addPathRow = FakeSetting.created.find((setting) => setting.info.name === '新增自定义路径类型')
+  check(
+    '新增自定义路径类型那一行有 ID 与显示名两个输入框',
+    addPathRow !== undefined && (addPathRow.texts ?? []).length >= 2,
+    String((addPathRow?.texts ?? []).length),
+  )
+  await addPathRow.texts[0].type('highway')
+  await addPathRow.texts[1].type('商路')
+  await addPathRow.buttons[0].click()
+  await tick(30)
+  check(
+    '点「新增」真的新增了一条自定义路径类型（ID 自动补 custom: 前缀）',
+    plugin.getSettings().pathTypes.some((entry) => entry.id === 'custom:highway' && entry.label === '商路'),
+    JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)),
+  )
+  const newPathRow = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('商路（自定义）'))
+  check(
+    '新增出来的那一行带「改 ID…」与「删除」两个按钮',
+    (newPathRow?.buttons ?? []).map((button) => button.text).join(',') === '改 ID…,删除',
+    JSON.stringify((newPathRow?.buttons ?? []).map((button) => button.text)),
+  )
+
+  // 「渲染失败不许只留空白」：让设置页中途抛一次异常，断言页面上出现了原因。
+  // 这条是被真实库里的现象逼出来的 —— 中途抛异常时 Obsidian 只在控制台报一下，
+  // 界面上就是"某个分组是空的"，用户只能猜"坏了"。
+  const originalGetSettings = plugin.getSettings.bind(plugin)
+  plugin.getSettings = () => {
+    throw new Error('人造故障：渲染中途失败')
+  }
+  plugin.settingTabs[0].display()
+  const errorBoxes = collectByClass(plugin.settingTabs[0].containerEl, 'fc-render-error')
+  check(
+    '渲染中途抛异常时，设置页把原因写在页面上（不是留一片空白）',
+    errorBoxes.length === 1 && String(errorBoxes[0].textContent).includes('人造故障'),
+    JSON.stringify(errorBoxes.map((el) => el.textContent)),
+  )
+  plugin.getSettings = originalGetSettings
+  plugin.settingTabs[0].display()
+  check(
+    '恢复后设置页回到正常渲染（错误提示消失）',
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-render-error').length === 0,
+  )
+
+  plugin.onunload()
+}
+
+console.log('\n场景 41：重刷地形不得抹掉格上其它键（F1 —— 未来「一格多值」的地基）')
+{
+  // 这是一条**数据保全**回归，不是新功能：
+  // 格上除了 `t` 还可能有别的键（未来的温度 / 深度就挂在这里）。以前编辑器给所有格
+  // 共用一个新建的 `{ t }`，而"有没有变化"只看 t/f/c —— 于是"用同一种地形重刷一遍"
+  // 会把那些键抹掉，且**连撤销点都不产生**。这里从真实指针事件走一遍整条路径。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const file = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+  runCommand(plugin, 'toggle-edit-mode')
+  await tick(20)
+
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const editor = layers.getEditor(canvasPath)
+  const document_ = layers.getDocument(canvasPath)
+  const at = canvas._clientFor({ x: 0, y: 0 })
+  const stroke = () => {
+    firePointer(host, 'pointerdown', { clientX: at.x, clientY: at.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: at.x, clientY: at.y, target: wrapper })
+  }
+
+  editor.setBrushRadius(0)
+  editor.setTerrainType('forest')
+  stroke()
+  await tick(20)
+  check('先画一格森林作为地基', document_.terrain['0_0']?.t === 'forest', JSON.stringify(document_.terrain['0_0']))
+
+  // 手工挂两样东西：一个"这一版不认识的键"（等价于别的版本写下的），一个**正式的**数值字段
+  document_.terrain['0_0'].extra = { humidity: 20 }
+  document_.terrain['0_0'].temp = -5
+  const undoBefore = editor.getStatus().undo
+
+  // ① 同一种地形重刷：内容没变 → 不该记历史，更不该抹掉那个键
+  stroke()
+  await tick(20)
+  check(
+    '重刷同一种地形后未知键仍在',
+    document_.terrain['0_0']?.extra?.humidity === 20,
+    JSON.stringify(document_.terrain['0_0']),
+  )
+  check(
+    '重刷同一种地形后正式字段（温度）仍在',
+    document_.terrain['0_0']?.temp === -5,
+    JSON.stringify(document_.terrain['0_0']),
+  )
+  check(
+    '重刷同一种地形不产生新历史（内容确实没变）',
+    editor.getStatus().undo === undoBefore,
+    `${undoBefore} → ${editor.getStatus().undo}`,
+  )
+
+  // ② 换成别的地形：应当记一条历史，未知键照样保留
+  editor.setTerrainType('water')
+  stroke()
+  await tick(20)
+  check('换成水域后地形确实变了', document_.terrain['0_0']?.t === 'water', JSON.stringify(document_.terrain['0_0']))
+  check(
+    '换地形重刷同样保住未知键',
+    document_.terrain['0_0']?.extra?.humidity === 20,
+    JSON.stringify(document_.terrain['0_0']),
+  )
+  check(
+    '换地形重刷同样保住正式字段（温度）',
+    document_.terrain['0_0']?.temp === -5,
+    JSON.stringify(document_.terrain['0_0']),
+  )
+  check(
+    '换地形确实记了一条历史',
+    editor.getStatus().undo === undoBefore + 1,
+    `${undoBefore} → ${editor.getStatus().undo}`,
+  )
+
+  // ③ 落盘：未知键必须**摊平**写回去（不是塞进 extra 嵌套层）
+  await store.flush()
+  const saved = app.vault.files.get(file.path) ?? ''
+  check('落盘后文件里看得见那个键（摊平）', saved.includes('"humidity":20'), saved.slice(0, 120))
+  check('落盘后温度也写进了文件（正式字段）', saved.includes('"temp":-5'), saved.slice(0, 120))
+  check('落盘后文件里没有 extra 嵌套层', saved.includes('"extra"') === false, saved.slice(0, 120))
+
+  // ④ 撤销回森林：这些值都不该被撤销带走
+  editor.undo()
+  await tick(20)
+  check(
+    '撤销回森林后未知键仍在',
+    document_.terrain['0_0']?.t === 'forest' && document_.terrain['0_0']?.extra?.humidity === 20,
+    JSON.stringify(document_.terrain['0_0']),
+  )
+  check(
+    '撤销回森林后温度仍在',
+    document_.terrain['0_0']?.temp === -5,
+    JSON.stringify(document_.terrain['0_0']),
   )
 
   plugin.onunload()

@@ -13,7 +13,7 @@
 
 import type { MapDocument } from '../data/mapDocument.ts'
 import { PATH_TYPES, TERRAIN_TYPES } from '../data/mapDocument.ts'
-import { isLayerVisible, type LayerVisibility } from './layerVisibility.ts'
+import { isLayerVisible, type LayerKey, type LayerVisibility } from './layerVisibility.ts'
 
 export interface LegendEntry {
   kind: 'terrain' | 'path' | 'region'
@@ -56,7 +56,7 @@ export function buildLegendEntries(
   const entries: LegendEntry[] = []
 
   // ---- 地形：按格数 ----
-  if (visibility === undefined || isLayerVisible(visibility, 'terrain')) {
+  const terrainSection = (): void => {
     const counts = new Map<string, number>()
     for (const cell of Object.values(document.terrain)) {
       const type = typeof cell?.t === 'string' ? cell.t : ''
@@ -70,7 +70,7 @@ export function buildLegendEntries(
   }
 
   // ---- 路径：内置 4 种按 PATH_TYPES 的出厂顺序，其余（自定义 / 未知）按字母序排在后面 ----
-  if (visibility === undefined || isLayerVisible(visibility, 'paths')) {
+  const pathSection = (): void => {
     const counts = new Map<string, number>()
     for (const path of document.paths) {
       const type = typeof path?.type === 'string' ? path.type : ''
@@ -93,7 +93,7 @@ export function buildLegendEntries(
   // 而升级前正是这么归并的 —— 于是同一张老地图的图例**一字不变**。
   // 归并键带上颜色（而不是只用类型）：两个类型被设成同一个颜色时，
   // 只用类型做键会把两条不同颜色的事实压成一行，图例会开始说谎。
-  if (visibility === undefined || isLayerVisible(visibility, 'regions')) {
+  const regionSection = (): void => {
     const counts = new Map<string, { color: string; type: string; count: number }>()
     for (const region of document.regions) {
       const color = typeof region.color === 'string' && region.color.length > 0 ? region.color : '#7ab77b'
@@ -112,6 +112,22 @@ export function buildLegendEntries(
         count: item.count,
       })
     }
+  }
+
+  /**
+   * 每一段归属哪一层。
+   *
+   * 图例是"给人看的清单"，**关掉那一层就不该再列它** —— 否则用户拿着图例找不着画上的东西。
+   * 段与层的对应写在这张表里（而不是每段各抄一遍三层 if）：加一层、改一层的名字都不用来这里。
+   */
+  const sections: Array<{ layer: LayerKey; build: () => void }> = [
+    { layer: 'terrain', build: terrainSection },
+    { layer: 'paths', build: pathSection },
+    { layer: 'regions', build: regionSection },
+  ]
+  for (const section of sections) {
+    if (visibility !== undefined && !isLayerVisible(visibility, section.layer)) continue
+    section.build()
   }
 
   return entries

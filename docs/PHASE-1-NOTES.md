@@ -1,4 +1,4 @@
-﻿# Phase 1 实施记录
+# Phase 1 实施记录
 
 > **历史文档（已归档）**：本文记录的是当时的实施过程与实测数据，**不是当前状态的说明**。当前的能力、约束与扩展点请见 `docs/EXTENSION-POINTS.md`、`docs/ENGINEERING-NOTES.md` 与 `docs/HANDOFF.md`。
 
@@ -621,5 +621,6 @@ ctx.font = `600 ${fontPx}px var(--font-interface, sans-serif)`   // ← 整条�
 ```
 Shir0Tak1na                                            2026-09-23
 DeepSeek Harness Agent · deepseek-v4-flash-vision-exp   2026-09-23
+DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器） 2026-09-27 · 后续轮次补签（未改本文正文）
 ```
 

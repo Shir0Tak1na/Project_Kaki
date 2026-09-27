@@ -26,6 +26,8 @@ import {
 } from './mapRows.ts'
 import { buildMapPreviewSvg } from './mapPreview.ts'
 import type { CustomTerrain } from '../render/terrainCatalog.ts'
+import type { CustomMarker } from '../render/markerCatalog.ts'
+import { lucideIconFragment } from '../render/lucideFragment.ts'
 import { pathTypeLabelOf, type PathTypeEntry } from '../render/pathTypeCatalog.ts'
 import { regionTypeLabelOf, type RegionTypeEntry } from '../render/regionTypeCatalog.ts'
 import { parseNoteMapProps } from './noteCoordinates.ts'
@@ -52,6 +54,11 @@ export interface BasesViewDeps {
    * 用户第一反应是"地图文件坏了"。传函数而不是值，理由同 `getStylePalette`（现读）。
    */
   getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 当前自定义标记（来自插件设置）：缩略图里也要把标记画成**它自己的字形**，
+   * 而自定义标记的字形名只有目录知道（与画布走同一份 `resolveMarkerStyle`）。
+   */
+  getCustomMarkers?: () => readonly CustomMarker[]
   /**
    * 路径类型目录（来自插件设置）。
    *
@@ -243,6 +250,9 @@ export class MapBasesView extends BasesView {
         height,
         padding: 12,
         customTerrains: this.deps.getCustomTerrains?.() ?? [],
+        // 缩略图与导出**共用同一份实现**：标记按字形画、区域带自己的不透明度与边框
+        customMarkers: this.deps.getCustomMarkers?.() ?? [],
+        iconSvgFor: lucideIconFragment,
       })
     }
     redraw()

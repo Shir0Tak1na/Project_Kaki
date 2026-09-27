@@ -119,6 +119,18 @@ export class DefinitionManagerModal extends Modal {
     const { contentEl } = this
     contentEl.empty()
     contentEl.addClass('fc-defmodal')
+    try {
+      this.renderBody(contentEl)
+    } catch (error) {
+      // 弹窗是"一次渲染四节"：中途抛异常会让**后面几节一起消失**，而 Obsidian 只在控制台报一下 ——
+      // 用户看到的就是"很多功能是坏的 / 展开了是空的"。把原因写在弹窗里，别让人对着空白猜。
+      const message = error instanceof Error ? error.message : String(error)
+      console.error('[project-kaki] 「地图定义」弹窗渲染失败', error)
+      contentEl.createEl('div', { cls: 'fc-render-error', text: `「地图定义」弹窗渲染失败：${message}` })
+    }
+  }
+
+  private renderBody(contentEl: HTMLElement): void {
     contentEl.createEl('h2', { text: '地图定义' })
     contentEl.createEl('div', {
       cls: 'fc-settings-note',
@@ -622,17 +634,21 @@ export class DefinitionManagerModal extends Modal {
       const resolved = resolvePathType(entry.id, settings.pathTypes)
       const isCustom = !resolved.builtin
 
-      new Setting(containerEl)
+      const row = new Setting(containerEl)
         .setName(`${entry.label}${isCustom ? '（自定义）' : ''}`)
         .setDesc(`ID ${entry.id} · ${describePathTypeParams(entry.params)}`)
+      // ⚠️ 内置项**不能"先把按钮建出来、再在回调里 return"**：
+      // Obsidian 的 `addButton(cb)` 是**先创建按钮元素、再调用回调**，于是内置行右边会挂上
+      // 两个没有任何文字、点了也没反应的**空按钮**（真实库里的实测现象，用户的原话是
+      // "为什么地图定义里会有两个空按钮"）。内置行本来就没有可做的操作，所以直接不建。
+      if (!isCustom) continue
+      row
         .addButton((button) => {
-          if (!isCustom) return
           button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
             this.plugin.openRenameDefinitionModal('path', entry.id, entry.label)
           })
         })
         .addButton((button) => {
-          if (!isCustom) return
           button.setButtonText('删除').setWarning().setTooltip(`删除自定义类型 ${entry.id}`).onClick(() => {
             this.plugin.requestRemoveCustomDefinition('path', entry.id)
           })
@@ -749,17 +765,18 @@ export class DefinitionManagerModal extends Modal {
       const resolved = resolveRegionType(entry.id, regionTypes)
       const isCustom = !resolved.builtin
 
-      new Setting(containerEl)
+      const row = new Setting(containerEl)
         .setName(`${entry.label}${isCustom ? '（自定义）' : ''}`)
         .setDesc(`ID ${entry.id} · ${describeRegionTypeParams(entry.params)}`)
+      // 同路径类型那一段：内置行不建按钮（`addButton` 先建元素再回调，提前 return 会留下空按钮）
+      if (!isCustom) continue
+      row
         .addButton((button) => {
-          if (!isCustom) return
           button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
             this.plugin.openRenameDefinitionModal('region', entry.id, entry.label)
           })
         })
         .addButton((button) => {
-          if (!isCustom) return
           button.setButtonText('删除').setWarning().setTooltip(`删除自定义区域类型 ${entry.id}`).onClick(() => {
             this.plugin.requestRemoveCustomDefinition('region', entry.id)
           })

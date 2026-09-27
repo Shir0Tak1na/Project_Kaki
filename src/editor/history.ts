@@ -9,6 +9,7 @@
  */
 
 import { cellKey } from '../core/hex.ts'
+import { cellsEqual } from '../data/mapDocument.ts'
 import type { MapDocument, MapLabel, MapMarker, MapPath, MapRegion, TerrainCell } from '../data/mapDocument.ts'
 
 /** 改一格地形：next 为 null 表示删除（画回空白） */
@@ -469,6 +470,27 @@ export function opsFromPrevious(
   next: TerrainCell | null,
   previousOf: (q: number, r: number) => TerrainCell | null,
 ): MapOp[] {
+  return opsFromPreviousOf(cells, () => next, previousOf)
+}
+
+/** 逐格算出"这一格该变成什么"（`null` = 这一格要被删掉） */
+export type CellNextOf = (q: number, r: number) => TerrainCell | null
+
+/**
+ * `opsFromPrevious` 的**逐格版本**：新状态按格现算，而不是所有格共用一个。
+ *
+ * 为什么必须有这一版：**格上除了地形还有别的东西**（覆盖色、位标志、以及这一版
+ * 不认识的键 —— 未来的温度 / 深度就挂在这里）。共用一个新建的 `{ t }` 等于"整格替换"，
+ * 会把同一格上的其它键一起抹掉，而"有没有变化"的判断只看 `t/f/c` 时更糟：
+ * **用同一种地形重刷一遍 → 判定成没变化 → 连 op 都不产生 → Ctrl+Z 也救不回来**。
+ *
+ * `nextOf` 的调用方要自己以"该格原有内容为底"来构造新值（见 `MapEditor.nextCellFor`）。
+ */
+export function opsFromPreviousOf(
+  cells: Array<{ q: number; r: number }>,
+  nextOf: CellNextOf,
+  previousOf: (q: number, r: number) => TerrainCell | null,
+): MapOp[] {
   const seen = new Set<string>()
   const ops: MapOp[] = []
   for (const cell of cells) {
@@ -477,14 +499,10 @@ export function opsFromPrevious(
     seen.add(key)
 
     const previous = previousOf(cell.q, cell.r)
-    const same =
-      (previous === null && next === null) ||
-      (previous !== null &&
-        next !== null &&
-        previous.t === next.t &&
-        (previous.f ?? 0) === (next.f ?? 0) &&
-        previous.c === next.c)
-    if (same) continue
+    const next = nextOf(cell.q, cell.r)
+    // 「有没有变化」与「写盘是什么形状」是同一个函数（`canonicalCellJson` / `cellsEqual`）。
+    // 手写 `t/f/c` 三个字段的比较会漏掉"这一版不认识的键"，那正是丢数据的地方。
+    if (cellsEqual(previous, next)) continue
 
     // ⚠️ 必须显式判空：`{ ...null }` 得到的是 `{}` 而不是 `null`，
     // 直接展开会让"原本没有地形"的格在撤销时被写成空对象。

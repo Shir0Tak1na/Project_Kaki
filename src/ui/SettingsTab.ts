@@ -36,7 +36,7 @@ import {
   isDefaultRegionTypeStyles,
   resolveRegionType,
 } from '../render/regionTypeCatalog.ts'
-import { LAYER_KEYS, LAYER_LABELS, isLayerVisible, type LayerKey } from '../render/layerVisibility.ts'
+import { LAYER_TABLE, isLayerVisible } from '../render/layerVisibility.ts'
 import { createCollapsibleGroup } from './collapsible.ts'
 import { QUICK_START_SETTINGS } from './quickStart.ts'
 
@@ -113,15 +113,29 @@ export class CartographerSettingTab extends PluginSettingTab {
   }
 
   override display(): void {
-    const { containerEl } = this
-    containerEl.empty()
+    this.containerEl.empty()
     /**
      * 设置页的作用域类：`styles.css` 里那一组"控件多的一行不许溢出"的规则挂在它上面。
      *
      * ⚠️ 类名在 CSS 与这里各写一次，必须一致 —— 冒烟里有一条断言盯着这件事
      * （CSS 布局本身无法在假 DOM 里断言，见 `ENGINEERING-NOTES.md` §5.31）。
      */
-    containerEl.addClass('fc-settings')
+    this.containerEl.addClass('fc-settings')
+    try {
+      this.renderAll()
+    } catch (error) {
+      // 设置页是"整页重建"：中途抛异常会让**它后面所有内容一起消失**，
+      // 而 Obsidian 只在控制台报一下 —— 界面上看起来就是"某个分组是空的/设置页变短了"。
+      // 把原因直接写在页面上，别让用户对着空白猜（这条是被真实库里的现象逼出来的）。
+      const message = error instanceof Error ? error.message : String(error)
+      console.error('[project-kaki] 设置页渲染失败', error)
+      this.containerEl.createEl('div', { cls: 'fc-render-error', text: `设置页渲染失败：${message}` })
+    }
+  }
+
+  /** 真正的渲染。`display()` 只负责"清空 + 兜住异常" */
+  private renderAll(): void {
+    const { containerEl } = this
 
     const settings = this.plugin.getSettings()
     const stats = this.plugin.getLayerManager()?.listStatus() ?? []
@@ -164,22 +178,25 @@ export class CartographerSettingTab extends PluginSettingTab {
         }),
       )
 
-    // 「当前实际字号」是**只读诊断信息**，不是设置项 —— 放进一个默认收起的高级组，
-    // 免得它和真正能调的旋钮混在一起（物资是"看"，不是"改"）。
-    const advanced = createCollapsibleGroup(containerEl, {
-      title: '高级：当前实际字号',
-      role: 'advanced',
-      cls: 'fc-settings-group',
-      titleCls: 'fc-settings-group-title',
-    })
-    new Setting(advanced)
-      .setName('当前实际字号')
-      .setDesc(
-        attached?.stats?.labelCssPx
-          ? `路径 ${attached.stats.labelCssPx.path} px · 区域 ${attached.stats.labelCssPx.region} px` +
-            `（屏幕 CSS 像素；当前画布 1 CSS px = ${attached.stats.rasterPxPerCssPx.toFixed(2)} 位图像素）`
-          : '先打开一张绑定了地图的 Canvas 并启用地图层，这里会显示当前的实际字号。',
-      )
+    // 「当前实际字号」是**只读诊断信息**，不是设置项：只在**开发者模式**下出现
+    // （用户 2026-09-27 的要求：把它移进开发者选项里 —— 普通用户看不到它，
+    // 也就不会在"这一栏怎么没数字"上困惑）。
+    if (settings.developerMode) {
+      const advanced = createCollapsibleGroup(containerEl, {
+        title: '开发者选项：当前实际字号',
+        role: 'advanced',
+        cls: 'fc-settings-group',
+        titleCls: 'fc-settings-group-title',
+      })
+      new Setting(advanced)
+        .setName('当前实际字号')
+        .setDesc(
+          attached?.stats?.labelCssPx
+            ? `路径 ${attached.stats.labelCssPx.path} px · 区域 ${attached.stats.labelCssPx.region} px` +
+              `（屏幕 CSS 像素；当前画布 1 CSS px = ${attached.stats.rasterPxPerCssPx.toFixed(2)} 位图像素）`
+            : '先打开一张绑定了地图的 Canvas 并启用地图层，这里会显示当前的实际字号。',
+        )
+    }
 
     // ---- 2. 图层（地形 / 网格 / 区域 / 路径 / 标记 / 名称）：默认收起 ----
     const layerGroup = createCollapsibleGroup(containerEl, {
@@ -195,13 +212,13 @@ export class CartographerSettingTab extends PluginSettingTab {
         '网格也在这一组里（画布工具条上的几个按钮切的是同一份设置）。',
     })
 
-    for (const key of LAYER_KEYS) {
+    for (const spec of LAYER_TABLE) {
       new Setting(layerGroup)
-        .setName(`显示${LAYER_LABELS[key]}`)
-        .setDesc(this.describeLayer(key))
+        .setName(`显示${spec.label}`)
+        .setDesc(spec.describe)
         .addToggle((toggle) =>
-          toggle.setValue(isLayerVisible(settings.layers, key)).onChange((value) => {
-            void this.plugin.setLayerVisible(key, value)
+          toggle.setValue(isLayerVisible(settings.layers, spec.id)).onChange((value) => {
+            void this.plugin.setLayerVisible(spec.id, value)
             this.rerenderKeepingScroll()
           }),
         )
@@ -331,24 +348,6 @@ export class CartographerSettingTab extends PluginSettingTab {
     show.addEventListener('click', () => {
       void this.plugin.setQuickStartHidden('settings', false).then(() => this.rerenderKeepingScroll())
     })
-  }
-
-  /** 每个图层的说明：写清"关掉之后你会看到什么"，而不是复述开关名字 */
-  private describeLayer(key: LayerKey): string {
-    switch (key) {
-      case 'terrain':
-        return '六边形地形底色与图形。关掉后只剩矢量元素（路径/区域/标记），文档里的格子不受影响。'
-      case 'grid':
-        return '六边形网格线。工具条上也有同一个开关（设置页原来那个「显示六边形网格」已并入这里）。'
-      case 'regions':
-        return '半透明区域填充与边框（国境、领地）。'
-      case 'paths':
-        return '河流、道路、贸易路线、边界。'
-      case 'markers':
-        return '标记与文字标注（画布上可点击、可拖动的那些实体）。'
-      case 'labels':
-        return '路径与区域的名称标注。工具条上的「名称」按钮切换的是同一个值。'
-    }
   }
 
   /**

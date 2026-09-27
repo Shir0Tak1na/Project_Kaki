@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 地图文档数据模型 —— 纯函数模块，不依赖 obsidian，可被单元测试直接覆盖。
  *
  * 设计要点（见设计文档 §6 与 §2 ADR-2）：
@@ -147,9 +147,31 @@ export const PATH_JOIN_STYLES: readonly PathJoinStyle[] = ['miter', 'round', 'be
 export type TerrainId = string
 
 export interface TerrainCell {
-  t: TerrainId
+  /**
+   * 地形 ID；**可以没有**。
+   *
+   * 没有 `t` = 这一格**没有地形**，但格子本身是合法的 —— 因为格上可以只挂别的值
+   * （温度、深度…，"一格多值"）。解析层**不许**因为缺 `t` 就把整格丢掉：
+   * 那会把同一格上的其它字段一起删掉，属于静默数据丢失（见 §5.11 的口径）。
+   */
+  t?: TerrainId
   f?: number
   c?: string
+  /**
+   * 温度（℃）——「一格多值」的第一个**正式**字段（温度带覆盖层用）。
+   *
+   * 与 `t` 的关系：一格可以只有温度、没有地形（见 `t` 的说明）。
+   * 缺省 = **这一格没有温度数据**，不是 0 ℃ —— 0 是一个合法的温度值。
+   */
+  temp?: number
+  /**
+   * 深度 / 海拔 —— 与温度同源的第二个字段：**0 = 海平面，正 = 向下（深度），负 = 向上（海拔）**。
+   *
+   * 为什么只用一个字段：深度就是海拔的表示形式（用户 2026-09-27 定的），
+   * 分成两个字段会出现"两个值互相矛盾"而这种矛盾没有天然答案。
+   * 单位固定存米；米 / 千米 / 相对值只是**读法**（见 `render/elevationUnits.ts` 与设计草案 §2.2）。
+   */
+  depth?: number
   /**
    * 格上**不认识的字段**（原样保留，序列化时摊平写回，不是嵌套的 `extra`）。
    *
@@ -363,7 +385,11 @@ function isStorableTerrainId(value: unknown): value is string {
 }
 
 /** 格上"我们认识"的键：其余一律进 `extra` 原样保留（见 `TerrainCell.extra`） */
-const KNOWN_CELL_KEYS = new Set(['t', 'f', 'c', 'extra'])
+const KNOWN_CELL_KEYS = new Set(['t', 'f', 'c', 'temp', 'depth', 'extra'])
+
+/** 温度 / 深度的**物理合理范围**（越界多半是打字错误）；注意它与"色带上下限"无关 */
+export const TEMP_RANGE = { min: -100, max: 100 } as const
+export const DEPTH_RANGE = { min: -12000, max: 12000 } as const
 
 function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string, TerrainCell> {
   const out: Record<string, TerrainCell> = {}
@@ -374,6 +400,8 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
   }
   /** 一份文档里出现过的"不认识的格字段"，用于**只告警一次**（每格一条会刷屏） */
   const unknownCellKeys = new Set<string>()
+  /** 温度 / 深度里"不是有限数"的那些字段（同样只告警一次） */
+  const invalidNumericFields = new Set<string>()
   for (const [key, raw] of Object.entries(value)) {
     if (parseCellKey(key) === null) {
       issues.push({ level: 'warning', path: `terrain.${key}`, message: '键不是 "q_r" 形式的整数格，已跳过' })
@@ -384,13 +412,18 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
       continue
     }
     const type = raw.t
-    if (!isStorableTerrainId(type)) {
+    // `t` **可以没有**（这一格只有温度 / 深度这类值），也**可能是坏值**（别的版本、手工编辑）。
+    // 两种都不许把整格丢掉：丢一格 = 连同格的其它字段一起永久删掉，而且没有任何补救入口。
+    // 坏值本身**原样保留**（放进 `extra.t`，写回时仍旧写回键名 `t`），与"认不出的标识一律保留"同一口径。
+    const hasTerrain = isStorableTerrainId(type)
+    let invalidTerrain: unknown = undefined
+    if (!hasTerrain && type !== undefined) invalidTerrain = type
+    if (invalidTerrain !== undefined) {
       issues.push({
         level: 'warning',
         path: `terrain.${key}.t`,
-        message: `地形标识 ${JSON.stringify(type)} 不是合法字符串，已跳过该格`,
+        message: `地形标识 ${JSON.stringify(invalidTerrain)} 不是合法字符串，已保留该格（按无地形处理，原值原样保留）`,
       })
-      continue
     }
     // 不认识的 ID **保留**（只告警）：丢掉它 = 用户一保存就永久删数据。
     // 绘制层对未知 ID 有回退视觉，所以保留是安全的，而丢弃是不可逆的。
@@ -398,22 +431,35 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
     // 只对"既不是内置、也不是 custom: 命名空间"的 ID 告警：解析层读不到用户设置，
     // 因此它**无权**判断某个 `custom:xxx` 是否已定义（那是设置的事），
     // 而"自定义地形被用户删掉了"这种情况由绘制层一次性告警（见 MapOverlay）。
-    if (!TERRAIN_TYPES.includes(type as TerrainType) && !type.startsWith('custom:')) {
+    if (hasTerrain && !TERRAIN_TYPES.includes(type as TerrainType) && !type.startsWith('custom:')) {
       issues.push({
         level: 'warning',
         path: `terrain.${key}.t`,
         message: `未知地形 ${JSON.stringify(type)}，已保留该格（按回退样式绘制；内置类型：${TERRAIN_TYPES.join('/')}）`,
       })
     }
-    const cell: TerrainCell = { t: type }
+    const cell: TerrainCell = {}
+    if (hasTerrain) cell.t = type
     if (isFiniteNumber(raw.f) && raw.f !== 0) cell.f = Math.trunc(raw.f)
     if (isNonEmptyString(raw.c)) cell.c = raw.c
+    // 温度 / 深度：合法（有限数）就进正式字段；0 是合法值（0 ℃ / 海平面），所以**不**像 `f` 那样把 0 当缺省
+    if (isFiniteNumber(raw.temp)) cell.temp = raw.temp
+    if (isFiniteNumber(raw.depth)) cell.depth = raw.depth
     // 不认识的键**原样留下**（只记名字，最后统一告警一次）
     const extra: Record<string, unknown> = {}
     for (const [unknownKey, unknownValue] of Object.entries(raw)) {
       if (KNOWN_CELL_KEYS.has(unknownKey)) continue
       extra[unknownKey] = unknownValue
       unknownCellKeys.add(unknownKey)
+    }
+    // 坏掉的 `t` 原样留着：键名不变，写回时仍写成 `"t"`（见 `canonicalCellJson`）
+    if (invalidTerrain !== undefined) extra.t = invalidTerrain
+    // 温度 / 深度给的不是有限数（字符串、NaN…）也一样**不丢**：原值留在同名键里，键名不变
+    for (const field of ['temp', 'depth'] as const) {
+      const value = raw[field]
+      if (value === undefined || isFiniteNumber(value)) continue
+      extra[field] = value
+      invalidNumericFields.add(field)
     }
     if (Object.keys(extra).length > 0) cell.extra = extra
     out[key] = cell
@@ -424,6 +470,16 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
       level: 'warning',
       path: 'terrain',
       message: `格上出现不认识的字段 ${names.map((name) => JSON.stringify(name)).join('、')}，已原样保留（可能是更新版本或其它插件写的）`,
+    })
+  }
+  if (invalidNumericFields.size > 0) {
+    const names = [...invalidNumericFields].sort()
+    issues.push({
+      level: 'warning',
+      path: 'terrain',
+      message: `格上的 ${names
+        .map((name) => JSON.stringify(name))
+        .join('、')} 不是有限数，已原样保留（这一版按"没有数据"处理：不参与颜色与统计，值本身一个字符都不改）`,
     })
   }
   return out
@@ -799,7 +855,7 @@ function serializeTerrain(terrain: Record<string, TerrainCell>, indent: number):
   if (entries.length === 0) return '{}'
   const inner = ' '.repeat(indent + 2)
   const lines = entries.map(
-    ([key, cell], index) => `${inner}${JSON.stringify(key)}: ${cellToJson(cell)}${index === entries.length - 1 ? '' : ','}`,
+    ([key, cell], index) => `${inner}${JSON.stringify(key)}: ${canonicalCellJson(cell)}${index === entries.length - 1 ? '' : ','}`,
   )
   return ['{', ...lines, `${' '.repeat(indent)}}`].join('\n')
 }
@@ -810,11 +866,26 @@ function serializeTerrain(terrain: Record<string, TerrainCell>, indent: number):
  *
  * 必须摊平而不是写成 `"extra": {...}`：文件里的形状是"格上直接挂着那些键"，
  * 嵌套一层会让别的版本（以及任何手工看文件的人）认不出来，等于把数据搬到了一个它不认的位置。
+ *
+ * ⚠️ 这个函数同时是**另一件事的唯一真相**：编辑器判断"这一格到底有没有变化"
+ * （见 `history.ts` 的 `opsFromPreviousOf`）。判断依据与写盘形状**必须是同一个函数** ——
+ * 一旦分成两份，就会出现"判断说没变、实际写下去少了一个字段"这类只有用户才会发现的损失。
  */
-function cellToJson(cell: TerrainCell): string {
-  const out: Record<string, unknown> = { t: cell.t }
+export function canonicalCellJson(cell: TerrainCell): string {
+  const out: Record<string, unknown> = {}
+  // 只有真的是字符串才写 `t`：没有地形（或值不合法）的格不该被写成一个 `"t": ""` 之类的东西
+  if (typeof cell.t === 'string') out.t = cell.t
+  // 坏掉的原始 `t` 值原样写回（解析时被收进 `extra.t`，见 `parseTerrain`）：
+  // 键名依旧是 `t`，位置也在最前 —— "认不出的标识一律保留"在格这一层同样成立
+  else if (cell.extra !== undefined && 't' in cell.extra) out.t = cell.extra.t
   if (cell.f !== undefined) out.f = cell.f
   if (cell.c !== undefined) out.c = cell.c
+  // 温度 / 深度同理：正式字段优先；如果它是"坏值被原样保留"进 `extra` 的，就按**原键名**写回去
+  // （键名与位置都固定 —— 写盘顺序稳定，Git diff 才不会因为多打了个字就整行变红）
+  for (const field of ['temp', 'depth'] as const) {
+    const value = cell[field] !== undefined ? cell[field] : cell.extra?.[field]
+    if (value !== undefined) out[field] = value
+  }
   if (cell.extra !== undefined) {
     for (const key of Object.keys(cell.extra).sort()) {
       if (KNOWN_CELL_KEYS.has(key)) continue
@@ -822,6 +893,17 @@ function cellToJson(cell: TerrainCell): string {
     }
   }
   return JSON.stringify(out)
+}
+
+/**
+ * 两格内容是否完全相同（含"这一版不认识的键"）。
+ *
+ * 用途是"这次编辑算不算一次变化"，因此口径必须与写盘一致：**不认识的键也算内容**，
+ * 否则"只改了未知键"的编辑会被当成没变化而丢掉撤销点。
+ */
+export function cellsEqual(a: TerrainCell | null, b: TerrainCell | null): boolean {
+  if (a === null || b === null) return a === b
+  return canonicalCellJson(a) === canonicalCellJson(b)
 }
 
 /**
@@ -889,6 +971,9 @@ export function summarizeMapDocument(document: MapDocument): {
 } {
   const breakdown = new Map<TerrainId, number>()
   for (const cell of Object.values(document.terrain)) {
+    // 没有地形（或地形标识不合法）的格不进分布表：它们是"有值但没有地形"的格，
+    // 混进地形统计会让"每种地形各多少格"这个数字对不上（见 `TerrainCell.t`）
+    if (typeof cell.t !== 'string') continue
     breakdown.set(cell.t, (breakdown.get(cell.t) ?? 0) + 1)
   }
   const terrainBreakdown = [...breakdown.entries()]

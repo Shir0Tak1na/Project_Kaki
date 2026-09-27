@@ -42,6 +42,7 @@
  */
 
 import { cellKey, parseCellKey, worldToAxial, type GridSpec, type Point } from '../core/hex.ts'
+import { DEPTH_RANGE, TEMP_RANGE } from '../data/mapDocument.ts'
 import type { MapDocument } from '../data/mapDocument.ts'
 
 export type SelectionKind = 'marker' | 'label' | 'path' | 'region' | 'cell'
@@ -74,6 +75,13 @@ export interface SelectionFieldSpec {
   /** 数字控件的范围（世界单位或 0–1），仅 `control: 'number'` 有意义 */
   min?: number
   max?: number
+  /**
+   * 归到检查器的哪一组。缺省 `'appearance'`。
+   *
+   * 为什么要有这一列：地块上的温度 / 深度**不是外观** —— 它们不影响这个对象自己长什么样，
+   * 而是被覆盖层拿去上色。混进「外观」组会让那句提示（"只影响这一个对象"）变成假话。
+   */
+  group?: 'appearance' | 'data'
 }
 
 /** 字段当前值（`null` = 文件里没有这个键） */
@@ -286,7 +294,9 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
   cell: {
     label: '地块',
     hitPriority: 50,
-    // **只有该格真的有地形才算命中**：否则地图上处处都是"某个格"，选中永远清不掉
+    // **只要该格存在就算命中**（地块不能搬动，命中就是格键本身）：否则地图上处处都是"某个格"，
+    // 选中永远清不掉。注意"格存在"不等于"有地形" —— 只挂着温度 / 深度这类值的格（`t` 缺省）
+    // 同样可以被点中，用户要靠它来改那些值。
     hit: ({ document, grid, world }) => {
       const axial = worldToAxial(grid, world)
       const key = cellKey(axial.q, axial.r)
@@ -295,11 +305,13 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
     data: (document, id, labels) => {
       const cell = document.terrain[id]
       if (cell === undefined) return null
+      // 地形可以没有（"一格多值"的格）：那时给一个说得清的标签，而不是让绘制层的回退名冒充
+      const terrainName = typeof cell.t === 'string' ? labels.terrain(cell.t) : '无地形'
       return {
         // 地块没有名字：检查器那一栏显示地形种类，且不可编辑
-        name: labels.terrain(cell.t),
+        name: terrainName,
         link: '',
-        detail: `格 ${id} · 地形 ${labels.terrain(cell.t)}`,
+        detail: `格 ${id} · 地形 ${terrainName}`,
       }
     },
     // 地块没有名字也没有链接：动作表里就只有删除
@@ -308,7 +320,22 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
     typeSource: 'terrain',
     position: 'cell',
     storage: 'grid',
-    fields: [{ field: 'c', label: '覆盖色', control: 'color' }],
+    fields: [
+      { field: 'c', label: '覆盖色', control: 'color' },
+      // 温度 / 深度：「一格多值」的两个数值字段（覆盖层要用）。
+      // 范围是**物理合理范围**，越界由 `MapEditor.setSelectionField` **直接拒绝**（不悄悄夹到边界，
+      // 夹了以后"输入框里看到的"与"文件里的"会不一致，§5.33 的教训）。
+      // 留空 = 删掉该键 = 这一格没有数据 —— 与写一个 0 是两件事（0 ℃ / 海平面都是合法值）。
+      { field: 'temp', label: '温度（℃）', control: 'number', min: TEMP_RANGE.min, max: TEMP_RANGE.max, group: 'data' },
+      {
+        field: 'depth',
+        label: '深度/海拔（m，0 = 海平面、正 = 向下）',
+        control: 'number',
+        min: DEPTH_RANGE.min,
+        max: DEPTH_RANGE.max,
+        group: 'data',
+      },
+    ],
   },
 }
 
@@ -348,6 +375,13 @@ export interface SelectionInfo {
   /** 人话的种类名（标记 / 名称 / 路径 / 区域 / 地块） */
   kindLabel: string
   id: string
+  /**
+   * **本次选中之后一共改了几处**（由编辑器按撤销栈算，见 `MapEditor.editsSinceSelection`）。
+   *
+   * 面板据此显示"已改 N 处 + 撤销这些改动"：用户的原话是想要一个能确认改动的按钮，
+   * 而"逐条撤销"已经能精确回到选中那一刻 —— 不必引入"暂存后统一提交"那套（那会丢掉逐步撤销）。
+   */
+  editsSinceSelection: number
   /** 可编辑的名称（地块没有名字 → 空串） */
   name: string
   /** 当前链接的笔记路径（空串 = 没链接） */
@@ -473,6 +507,8 @@ export function describeSelection(
     kind: selection.kind,
     kindLabel: spec.label,
     id: selection.id,
+    // 这一层看不到历史栈，先给 0；真正的数字由 `MapEditor.selectionInfo()` 覆盖
+    editsSinceSelection: 0,
     name: data.name,
     link: data.link,
     detail: data.detail,

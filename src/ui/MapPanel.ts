@@ -26,9 +26,8 @@ import {
   type SelectionInfo,
 } from '../editor/selection.ts'
 import {
-  LAYER_HINTS,
   LAYER_KEYS,
-  LAYER_LABELS,
+  LAYER_TABLE,
   isLayerVisible,
   type LayerKey,
   type LayerVisibility,
@@ -90,6 +89,12 @@ export interface MapPanelDeps {
    * 空串 = 清除该字段（`null`，例如"清除覆盖色"）。
    */
   onSetSelectionField: (field: string, rawValue: string) => void
+  /**
+   * 撤销"本次选中期间的所有改动"（检查器上那个后悔按钮）。
+   *
+   * 面板只负责画按钮：撤销多少次由编辑器按撤销栈算（面板不认识文档，也不该认识）。
+   */
+  onUndoSelectionEdits?: () => void
   /** 给点对象（标记 / 名称）设坐标；面板已经把两个输入框解析成数字 */
   onSetSelectionPosition: (x: number, y: number) => void
   /** 把当前选中项整体移到视口中心（形状按包围盒中心平移） */
@@ -230,6 +235,17 @@ export class MapPanelView extends ItemView {
   private readonly deps: MapPanelDeps
   /** 上次渲染时的状态签名：相同就跳过重绘（这是"卡"的主要对策） */
   private lastSignature: string | null = null
+  /** 上一次渲染出来的折叠组（role → 元素）：重建前用它把"哪些是展开的"读回来 */
+  private readonly groupEls = new Map<string, HTMLDetailsElement>()
+  /**
+   * 用户当前展开着的组（role 集合）。
+   *
+   * 为什么要有它：改一个字段就会整块重建面板，而重建出来的 `<details>` 一律收起 ——
+   * 真实库里的反馈是"每次调整完格的信息就自动收在一起了，每一次都要点一下"。
+   * 状态**从 DOM 读**（`<details>.open` 是浏览器改的，我没法从事件里可靠得知），
+   * 重建前记下来、重建时再传回去（`collapsible.ts` 的 `open` 选项）。
+   */
+  private readonly openGroups = new Set<string>()
   /**
    * 是否已经画过至少一次。
    *
@@ -335,6 +351,10 @@ export class MapPanelView extends ItemView {
     this.lastSignature = signature
 
     const root = this.contentEl
+    // 重建前先把"哪些组是展开的"读回来 —— 否则每次改完字段所有组都收起，
+    // 用户改一个值就要重新点开一次（真实库里的反馈）
+    this.captureOpenGroups()
+    this.groupEls.clear()
     root.empty()
     root.addClass('fc-panel-root')
 
@@ -463,66 +483,96 @@ export class MapPanelView extends ItemView {
       }
     }
 
-    if (info.fields.length > 0) {
-      const group = this.openGroup(block, '外观', 'appearance')
-      const values = info.fieldValues
-      for (const field of info.fields) {
-        const row = group.createEl('div', { cls: 'fc-selection-row' })
-        row.createEl('span', { cls: 'fc-selection-field-label', text: field.label })
-        const current = values[field.field] ?? null
-        if (field.control === 'color') {
-          const picker = row.createEl('input', { cls: 'fc-selection-color' })
-          picker.type = 'color'
-          picker.value = typeof current === 'string' && current.length > 0 ? current : '#888888'
-          picker.dataset.fcField = `field-${field.field}`
-          picker.addEventListener('change', () => {
-            this.lastSignature = null
-            this.deps.onSetSelectionField(field.field, picker.value)
-            this.requestRender()
-          })
-          const clear = row.createEl('button', { cls: 'fc-selection-mini' })
-          clear.dataset.fcField = `clear-${field.field}`
-          clear.setText('清除')
-          clear.disabled = current === null
-          clear.addEventListener('click', () => {
-            this.lastSignature = null
-            this.deps.onSetSelectionField(field.field, '')
-            this.requestRender()
-          })
-          continue
-        }
-        const input = row.createEl('input', { cls: 'fc-selection-input' })
-        input.type = field.control === 'number' ? 'number' : 'text'
-        if (field.min !== undefined) input.min = String(field.min)
-        if (field.max !== undefined) input.max = String(field.max)
-        input.value = formatSelectionFieldValue(field, current)
-        input.placeholder = field.control === 'dash' ? '例如 12,4；留空 = 清除这一项' : ''
-        input.dataset.fcField = `field-${field.field}`
-        const commit = (): void => {
-          if (input.value === formatSelectionFieldValue(field, current)) return
+    // 字段按表里的 `group` 分两组：**外观**（这个对象自己长什么样）与
+  // **数据层**（格上的数值，覆盖层拿去上色 —— 混进外观组会让提示变成假话）
+  const fieldGroups = [
+    {
+      title: '外观',
+      role: 'appearance',
+      hint: '外观：存在地图文件里，只影响这一个对象（改设置里的默认值不会动它）',
+      fields: info.fields.filter((field) => (field.group ?? 'appearance') === 'appearance'),
+    },
+    {
+      title: '数据层',
+      role: 'data',
+      hint: '数据层：覆盖层按这些数值上色。留空 = 这一格没有数据（与写 0 是两回事：0 ℃ / 海平面都是合法值）',
+      fields: info.fields.filter((field) => field.group === 'data'),
+    },
+  ]
+  for (const spec of fieldGroups) {
+    if (spec.fields.length === 0) continue
+    const group = this.openGroup(block, spec.title, spec.role)
+    const values = info.fieldValues
+    for (const field of spec.fields) {
+      const row = group.createEl('div', { cls: 'fc-selection-row' })
+      row.createEl('span', { cls: 'fc-selection-field-label', text: field.label })
+      const current = values[field.field] ?? null
+      if (field.control === 'color') {
+        const picker = row.createEl('input', { cls: 'fc-selection-color' })
+        picker.type = 'color'
+        picker.value = typeof current === 'string' && current.length > 0 ? current : '#888888'
+        picker.dataset.fcField = `field-${field.field}`
+        picker.addEventListener('change', () => {
           this.lastSignature = null
-          this.deps.onSetSelectionField(field.field, input.value)
+          this.deps.onSetSelectionField(field.field, picker.value)
           this.requestRender()
-        }
-        input.addEventListener('keydown', (event) => {
-          if (event.key !== 'Enter') return
-          event.preventDefault()
-          commit()
         })
-        input.addEventListener('blur', commit)
+        const clear = row.createEl('button', { cls: 'fc-selection-mini' })
+        clear.dataset.fcField = `clear-${field.field}`
+        clear.setText('清除')
+        clear.disabled = current === null
+        clear.addEventListener('click', () => {
+          this.lastSignature = null
+          this.deps.onSetSelectionField(field.field, '')
+          this.requestRender()
+        })
+        continue
       }
-      group.createEl('div', {
-        cls: 'fc-selection-hintline',
-        text: '外观：存在地图文件里，只影响这一个对象（改设置里的默认值不会动它）',
+      const input = row.createEl('input', { cls: 'fc-selection-input' })
+      input.type = field.control === 'number' ? 'number' : 'text'
+      if (field.min !== undefined) input.min = String(field.min)
+      if (field.max !== undefined) input.max = String(field.max)
+      input.value = formatSelectionFieldValue(field, current)
+      input.placeholder = field.control === 'dash' ? '例如 12,4；留空 = 清除这一项' : ''
+      input.dataset.fcField = `field-${field.field}`
+      const commit = (): void => {
+        if (input.value === formatSelectionFieldValue(field, current)) return
+        this.lastSignature = null
+        this.deps.onSetSelectionField(field.field, input.value)
+        this.requestRender()
+      }
+      input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        commit()
       })
+      input.addEventListener('blur', commit)
     }
+    group.createEl('div', { cls: 'fc-selection-hintline', text: spec.hint })
+  }
   }
 
   /** 建一个默认收起的组（`<details>`）：首屏只留"是什么 + 能干什么" */
-  private openGroup(parent: HTMLElement, title: string, role: string): HTMLElement {
+  private openGroup(parent: HTMLElement, title: string, role: string): HTMLDetailsElement {
     // 折叠组的实现在 `collapsible.ts`（设置页与「地图定义」弹窗也用它）——
     // 三处共用一份，避免"某处忘了显式 open = false"导致"默认收起"的断言静默失效
-    return createCollapsibleGroup(parent, { title, role })
+    // 展开状态要说回来：改一个字段就整块重建，重建时若一律收起，用户就要重新点开一次
+    const group = createCollapsibleGroup(parent, { title, role, open: this.openGroups.has(role) })
+    this.groupEls.set(role, group)
+    return group
+  }
+
+  /**
+   * 把"当前哪些组是展开的"从**已经渲染出来的那些元素**上读回来。
+   *
+   * 读 DOM 而不是自己监听 `toggle` 事件：开合是浏览器改的 `open` 属性，
+   * 直接读它最可靠，而且假 DOM 里也能测（只要测试改 `el.open` 即可）。
+   */
+  private captureOpenGroups(): void {
+    for (const [role, element] of this.groupEls) {
+      if (element.open === true) this.openGroups.add(role)
+      else this.openGroups.delete(role)
+    }
   }
 
   /**
@@ -589,12 +639,32 @@ export class MapPanelView extends ItemView {
       SELECTION_ACTION_RENDERERS[action]({ block, info: selection, deps: this.deps })
     }
 
+    // 「已改 N 处 / 撤销这些改动」：用户要一个"确认改动"的按钮（2026-09-27）。
+    // 刻意**不做暂存-保存**那套：现在的每一次提交都是一条可撤销的 op，逐条撤销就能精确
+    // 回到"选中那一刻"，而暂存会把撤销粒度变粗、还会让改动在确认前不落盘。
+    // 只在**真的改过**时才出现 —— 常态下不占位置（这一栏平时只有"是什么 + 能干什么"）。
+    if (selection.editsSinceSelection > 0) {
+      const row = block.createEl('div', { cls: 'fc-selection-edits' })
+      row.createEl('span', {
+        cls: 'fc-selection-edits-count',
+        text: `本次选中已改 ${selection.editsSinceSelection} 处`,
+      })
+      const undo = row.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
+      undo.dataset.fcField = 'undo-selection-edits'
+      undo.setText('撤销这些改动')
+      undo.addEventListener('click', () => {
+        this.lastSignature = null
+        this.deps.onUndoSelectionEdits?.()
+        this.requestRender()
+      })
+    }
+
     // 三组就地编辑放在动作之后、且**默认收起**：首屏仍然是"是什么 + 能干什么"
     this.renderSelectionGroups(block, selection)
   }
 
   /**
-   * 图层开关（六个）。
+   * 图层开关（数量与名字都来自图层登记表）。
    *
    * 放在**最上面**、状态行下面：用户是"边看画布边切层"，而侧边栏很窄、
    * 动作列表可能比一屏还长 —— 放在中间或末尾就意味着每次切层都要先滚动。
@@ -605,19 +675,19 @@ export class MapPanelView extends ItemView {
   private renderLayers(root: HTMLElement, visibility: LayerVisibility): void {
     const list = root.createEl('div', { cls: 'fc-panel-group fc-panel-layers' })
     list.createEl('div', { cls: 'fc-panel-group-title', text: '图层' })
-    for (const key of LAYER_KEYS) {
-      const visible = isLayerVisible(visibility, key)
+    for (const spec of LAYER_TABLE) {
+      const visible = isLayerVisible(visibility, spec.id)
       const button = list.createEl('button', { cls: 'fc-layer-toggle' })
-      button.dataset.layer = key
+      button.dataset.layer = spec.id
       if (visible) button.addClass('is-active')
-      button.title = `${LAYER_LABELS[key]}：${LAYER_HINTS[key]}（点一下${visible ? '隐藏' : '显示'}）`
+      button.title = `${spec.label}：${spec.hint}（点一下${visible ? '隐藏' : '显示'}）`
       // 用 ●/○ 而不是图标：状态一眼可辨，也不依赖图标库是否有这个名字
       button.createEl('span', { cls: 'fc-layer-toggle-mark', text: visible ? '●' : '○' })
-      button.createEl('span', { cls: 'fc-layer-toggle-label', text: LAYER_LABELS[key] })
+      button.createEl('span', { cls: 'fc-layer-toggle-label', text: spec.label })
       button.addEventListener('click', () => {
         // 先清签名：状态马上会变，直接告诉面板"下次一定要重绘"
         this.lastSignature = null
-        this.deps.onToggleLayer(key, !visible)
+        this.deps.onToggleLayer(spec.id, !visible)
         this.requestRender()
       })
     }

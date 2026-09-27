@@ -5,7 +5,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { History, applyOp, buildSetOps, invertOp, type MapOp, type SetTerrainOp } from '../src/editor/history.ts'
+import { History, applyOp, buildSetOps, invertOp, opsFromPreviousOf, type MapOp, type SetTerrainOp } from '../src/editor/history.ts'
 import { SAMPLE_SPACING_RATIO, cellsAlongSegment, cellsAtPoint } from '../src/editor/brushPath.ts'
 import { createEmptyMapDocument, type MapDocument, type TerrainCell } from '../src/data/mapDocument.ts'
 import { axialToWorld, cellKey, parseCellKey, type GridSpec } from '../src/core/hex.ts'
@@ -68,6 +68,33 @@ test('无变化的格不产生 op', () => {
   assert.equal(buildSetOps(document, [{ q: 5, r: 5 }], null).length, 0, '在空白处擦除不应产生历史')
   // 但颜色不同就是变化
   assert.equal(buildSetOps(document, [{ q: 0, r: 0 }], { t: 'forest', c: '#fff' }).length, 1)
+})
+
+test('逐格 nextOf（F1）：重刷同一种地形不产生 op，丢了未知字段则必须产生 op', () => {
+  // F1 的因果：编辑器以前给所有格共用一个新建的 `{ t }`（整格替换），
+  // 而"有没有变化"只看 t/f/c → 用同一种地形重刷一遍，格上的未知字段被抹掉且**不留撤销点**。
+  const document = createEmptyMapDocument({})
+  document.terrain['0_0'] = { t: 'forest', extra: { temp: 20 } }
+  const previousOf = (q: number, r: number): TerrainCell | null => document.terrain[cellKey(q, r)] ?? null
+
+  // 编辑器实际的做法：以该格原有内容为底，只改 t（见 MapEditor.nextCellFor）
+  const keeping = opsFromPreviousOf(
+    [{ q: 0, r: 0 }],
+    (q, r) => ({ t: 'forest', extra: { ...(previousOf(q, r)?.extra ?? {}) } }),
+    previousOf,
+  )
+  assert.equal(keeping.length, 0, '内容确实没变 → 不该产生 op')
+
+  // 旧写法（丢掉未知键）：必须被判定成"有变化"，这样至少还能 Ctrl+Z 救回来
+  const dropping = opsFromPreviousOf([{ q: 0, r: 0 }], () => ({ t: 'forest' }), previousOf)
+  assert.equal(dropping.length, 1, '丢了未知字段也是变化，必须留下可撤销的 op')
+  assert.deepEqual(asTerrainOp(dropping[0]!), {
+    kind: 'setTerrain',
+    q: 0,
+    r: 0,
+    next: { t: 'forest' },
+    previous: { t: 'forest', extra: { temp: 20 } },
+  })
 })
 
 test('同一笔画内重复经过同一格只记一条 op，且 previous 取最初状态', () => {

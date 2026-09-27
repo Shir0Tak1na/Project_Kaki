@@ -702,6 +702,25 @@
 }
 
 /*
+ * 渲染失败时把原因**写在界面上**。
+ *
+ * 为什么必须有：设置页与弹窗都是"一次渲染一大段"，中途抛异常会让它后面所有内容一起消失，
+ * 而 Obsidian 只在控制台报一下 —— 界面上看起来就是"某一块是空的 / 很多功能是坏的"。
+ * 真实库里出现过这个现象（见 `docs/ENGINEERING-NOTES.md` 的未验证项），所以留这条兜底。
+ */
+.fc-render-error {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--text-error, var(--text-warning));
+  border-radius: 6px;
+  color: var(--text-error, var(--text-warning));
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/*
  * 弹窗里那几行控件同样可能很多（「新增自定义路径类型」一行 6 个控件）——
  * 与设置页 `.fc-settings` 那一组同源：**空间够时什么都不变，不够时折行而不是溢出**。
  * 这里只加"允许收缩 / 允许折行"，不改任何固定宽度、字号或间距。
@@ -722,6 +741,21 @@
   gap: 6px;
   min-width: 0;
   max-width: 100%;
+}
+
+/*
+ * 没有控件的行，不该在右边留一个"空盒子"。
+ *
+ * Obsidian 的 `Setting` **每行都会建一个 `.setting-item-control` 容器 —— 即使这一行什么都没加**
+ * （内置的路径类型 / 区域类型就是这样：它们的 ID 与名字固定，不能删也不能改 ID）。
+ * 某些主题会给这个容器画上边框或底色，于是看起来就是"两个空白按钮、点了没反应"——
+ * 这是真实库里的实测反馈（用户的原话是"地图定义栏里面的冗余按钮还在"）。
+ *
+ * `:empty` 只命中**真的空**的容器：有按钮 / 下拉 / 输入框的行完全不受影响。
+ */
+.fc-defmodal .setting-item-control:empty,
+.fc-settings .setting-item-control:empty {
+  display: none;
 }
 
 .fc-defmodal .setting-item-control input[type='text'],

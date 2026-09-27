@@ -1,4 +1,4 @@
-﻿# Project Kaki：Phase 3 实施记录（Base 自定义视图）
+# Project Kaki：Phase 3 实施记录（Base 自定义视图）
 
 > **历史文档（已归档）**：本文记录的是当时的实施过程与实测数据，**不是当前状态的说明**。当前的能力、约束与扩展点请见 `docs/EXTENSION-POINTS.md`、`docs/ENGINEERING-NOTES.md` 与 `docs/HANDOFF.md`。
 
@@ -172,5 +172,6 @@ Base 视图这一阶段同样是 **Shir0Tak1na** 与 **DeepSeek Harness Agent
 ```
 Shir0Tak1na                                            2026-09-23
 DeepSeek Harness Agent · deepseek-v4-flash-vision-exp   2026-09-23
+DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器） 2026-09-27 · 后续轮次补签（未改本文正文）
 ```
 
