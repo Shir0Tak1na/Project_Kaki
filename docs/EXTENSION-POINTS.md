@@ -102,17 +102,21 @@
 
 ---
 
-## 4. 数据保全是底线（待修 / 已修）
+## 4. 数据保全是底线（已实现）
 
-> 这两条是"加新图层之前必须先修"的：它们不改变任何现有行为，但**没有它们，未来加的结构会在老版本里被抹掉**。
+> 这一节是"加新图层之前必须先确认"的：它们不改变任何现有行为，但**没有它们，未来加的结构会在老版本里被抹掉**。
 
-| # | 问题 | 现状 | 依据 |
+| # | 能力 | 状态 | 依据 / 断言 |
 |---|---|---|---|
-| 1 | **文档顶层未知字段被丢弃** | **待修**：`parseMapDocument` 只返回 `{version, grid, terrain, paths, regions, markers, labels}`，`serializeMapDocument` 也只写这些 —— 用老版本打开新版本写的地图再保存，多出来的顶层段（例如 `temperature`）**永久消失** | `src/data/mapDocument.ts:724-729` |
-| 2 | **cell 未知字段被丢弃** | **待修**：`TerrainCell` 只保留 `t / f / c` | `src/data/mapDocument.ts` 的 `parseTerrain` |
+| 1 | **文档顶层未知段落原样保留** | ✅ **本来就已实现**（2026-09-27 更正：本文档初稿误标为"待修"，原因是我当时只 grep 到 `document: {...}` 字面量，没看紧邻的 `extra` 处理） | `parseMapDocument` 收集未知键 → `document.extra`；`serializeMapDocument` 先写未知键再写已知键（`KNOWN_TOP_LEVEL_KEYS` 防覆盖）；回归断言在 `tests/mapDocument.test.ts` 与 `tests/unknownFields.test.ts` |
+| 2 | **格（cell）上未知字段原样保留** | ✅ **已修**（2026-09-27）：`TerrainCell.extra` + `KNOWN_CELL_KEYS` + `cellToJson()` | `tests/unknownFields.test.ts`：保留值/嵌套结构、**写回是摊平的**（文件里不许出现 `"extra"` 键）、已知键 `t/f/c` 规则不变、告警只发一次 |
 
-**修法（两条同一口径）**：解析时把不认识的键**原样收进 `extra`**，序列化时**摊平写回**（保持文件里是平铺的键，
-不是嵌套的 `extra`），并给**一条聚合告警**（列出未知键名，不要每格一条刷屏）。
+**两条同一口径**：解析时把不认识的键**原样收进 `extra`**，序列化时**摊平写回**（文件里的形状仍是平铺的键，
+不是嵌套的 `extra` —— 嵌套等于把数据搬到别的版本不认的位置），并给**一条聚合告警**（列出未知键名，不按格刷屏）。
+
+**为什么这两条是加新图层的前提**：以后往格上或文档里加 `temp` / `depth` / `bands` 时，
+老版本插件打开再保存**不能**把它们删掉。这是"用户数据只增不改"在**结构层**的体现
+（此前四次事故都发生在字段层，见 `ENGINEERING-NOTES.md` §5.11 / §5.26 / §5.33）。
 
 ---
 

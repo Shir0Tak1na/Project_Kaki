@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 地图文档数据模型 —— 纯函数模块，不依赖 obsidian，可被单元测试直接覆盖。
  *
  * 设计要点（见设计文档 §6 与 §2 ADR-2）：
@@ -150,6 +150,17 @@ export interface TerrainCell {
   t: TerrainId
   f?: number
   c?: string
+  /**
+   * 格上**不认识的字段**（原样保留，序列化时摊平写回，不是嵌套的 `extra`）。
+   *
+   * 为什么要留这一手：以后会往格上加值（温度带、深度分层…）。如果解析层只认 `t/f/c`，
+   * 那么"新版本写的格 + 老版本打开一次再保存"就等于**永久删掉那些值** ——
+   * 与我们修过多次的"白名单改坏用户数据"是同一类问题，只是这次发生在格这一层。
+   *
+   * 保证：**认识什么不影响保留什么**。解析认不出的键进这里，写回时按原键名摊平输出，
+   * 于是文件里的形状不变（依旧是平铺的键），别的版本看到的就是它自己写下的东西。
+   */
+  extra?: Record<string, unknown>
 }
 
 export interface MapMarker {
@@ -351,6 +362,9 @@ function isStorableTerrainId(value: unknown): value is string {
   return !/[\s\u0000-\u001f\u007f]/.test(value)
 }
 
+/** 格上"我们认识"的键：其余一律进 `extra` 原样保留（见 `TerrainCell.extra`） */
+const KNOWN_CELL_KEYS = new Set(['t', 'f', 'c', 'extra'])
+
 function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string, TerrainCell> {
   const out: Record<string, TerrainCell> = {}
   if (value === undefined) return out
@@ -358,6 +372,8 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
     issues.push({ level: 'warning', path: 'terrain', message: 'terrain 不是对象，已忽略' })
     return out
   }
+  /** 一份文档里出现过的"不认识的格字段"，用于**只告警一次**（每格一条会刷屏） */
+  const unknownCellKeys = new Set<string>()
   for (const [key, raw] of Object.entries(value)) {
     if (parseCellKey(key) === null) {
       issues.push({ level: 'warning', path: `terrain.${key}`, message: '键不是 "q_r" 形式的整数格，已跳过' })
@@ -392,7 +408,23 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
     const cell: TerrainCell = { t: type }
     if (isFiniteNumber(raw.f) && raw.f !== 0) cell.f = Math.trunc(raw.f)
     if (isNonEmptyString(raw.c)) cell.c = raw.c
+    // 不认识的键**原样留下**（只记名字，最后统一告警一次）
+    const extra: Record<string, unknown> = {}
+    for (const [unknownKey, unknownValue] of Object.entries(raw)) {
+      if (KNOWN_CELL_KEYS.has(unknownKey)) continue
+      extra[unknownKey] = unknownValue
+      unknownCellKeys.add(unknownKey)
+    }
+    if (Object.keys(extra).length > 0) cell.extra = extra
     out[key] = cell
+  }
+  if (unknownCellKeys.size > 0) {
+    const names = [...unknownCellKeys].sort()
+    issues.push({
+      level: 'warning',
+      path: 'terrain',
+      message: `格上出现不认识的字段 ${names.map((name) => JSON.stringify(name)).join('、')}，已原样保留（可能是更新版本或其它插件写的）`,
+    })
   }
   return out
 }
@@ -767,9 +799,29 @@ function serializeTerrain(terrain: Record<string, TerrainCell>, indent: number):
   if (entries.length === 0) return '{}'
   const inner = ' '.repeat(indent + 2)
   const lines = entries.map(
-    ([key, cell], index) => `${inner}${JSON.stringify(key)}: ${JSON.stringify(cell)}${index === entries.length - 1 ? '' : ','}`,
+    ([key, cell], index) => `${inner}${JSON.stringify(key)}: ${cellToJson(cell)}${index === entries.length - 1 ? '' : ','}`,
   )
   return ['{', ...lines, `${' '.repeat(indent)}}`].join('\n')
+}
+
+/**
+ * 把一个格序列化成 JSON：已知键在前（`t` / `f` / `c`，顺序固定以便 diff 稳定），
+ * **不认识的键按原键名摊平接在后面**。
+ *
+ * 必须摊平而不是写成 `"extra": {...}`：文件里的形状是"格上直接挂着那些键"，
+ * 嵌套一层会让别的版本（以及任何手工看文件的人）认不出来，等于把数据搬到了一个它不认的位置。
+ */
+function cellToJson(cell: TerrainCell): string {
+  const out: Record<string, unknown> = { t: cell.t }
+  if (cell.f !== undefined) out.f = cell.f
+  if (cell.c !== undefined) out.c = cell.c
+  if (cell.extra !== undefined) {
+    for (const key of Object.keys(cell.extra).sort()) {
+      if (KNOWN_CELL_KEYS.has(key)) continue
+      out[key] = cell.extra[key]
+    }
+  }
+  return JSON.stringify(out)
 }
 
 /**
