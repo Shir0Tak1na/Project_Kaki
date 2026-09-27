@@ -19,7 +19,7 @@
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
 - 单元测试：404 个通过
-- 冒烟测试：37 个场景、982 条断言全部通过
+- 冒烟测试：37 个场景、984 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - **文档轮（⑤ 路径/区域类型 + ③ 定义文件）已于 2026-09-25 补完**，详见文末「暂停点交接」§6；
   该轮只改 Markdown，改完四道闸复核仍是 0 错 / 404 / 977
@@ -220,7 +220,7 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 - 插件 ID 是 `project-kaki`；**不要**再改它（改了要同步 `manifest.json` + `scripts/deploy.mjs` + `scripts/smoke.mjs` 里的字面量，
   并给用户做目录与启用项迁移）。同理不要改那三个写在用户文件里的持久化标识，见本文开头的警告。
 - 每次修改 UI 后都要跑 `npm run build`、`npm test`、`node scripts/smoke.mjs`，并部署到测试库后给用户可判伪的手动验证清单。
-- 文档中的测试数量必须和实际输出同步。当前基线是 `404 / 982`（单元测试 / 冒烟断言，37 个冒烟场景），
+- 文档中的测试数量必须和实际输出同步。当前基线是 `404 / 984`（单元测试 / 冒烟断言，37 个冒烟场景），
   两者都能自己数出来：`node --test --test-isolation=none` 的**汇总行**（`ℹ tests 404`）、
   `node scripts/smoke.mjs` 的末行。
   ⚠️ **去读汇总行，不要目测**：这条基线曾被写错成 278，原因是用 dot reporter 的点数"数行数"。
@@ -349,4 +349,29 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 **待真实库复核（这一条尚未被用户确认）**：设置页 →「打开面板」→「文件与导出」→「导入定义文件…」，
 选择器里应当列出**库里所有 `.json`**（含刚导出的定义文件）；选中后弹出确认对话框并显示新增/跳过条数。
 `Ctrl+R` 重载后生效（本轮已重新部署）。
+
+### 8. 第二轮修缺陷：设置页布局溢出（2026-09-25 · 用户实测报的）
+
+**用户报的现象**："设置面板里面，UI 超出了它原本的范围，比如按钮在区域外面"。
+
+**根因**：Obsidian 的 `.setting-item-control` 默认 `flex-shrink: 0` **且不折行**，
+而设置页里「新增自定义路径类型」一行有 **6 个**控件、「新增自定义区域类型」有 **7 个**（文本框 + 颜色 + 文本框 + 按钮）
+→ 控件被挤出容器右边缘，排在最后的按钮首当其冲。详见 `ENGINEERING-NOTES.md` §5.31。
+
+**本轮改动**：
+
+- `src/ui/SettingsTab.ts`：`display()` 给容器加作用域类 `fc-settings`；
+- `styles.css`：新增一组 `.fc-settings` 作用域规则（`.setting-item` / `.setting-item-info` /
+  `.setting-item-control` 允许折行与收缩；文本框 `min-width: 0`；按钮 / 下拉 / 颜色选择器不被压变形）。
+  原则是"**空间够时什么都不变，空间不够时折行而不是溢出**"，所以**没有**改任何固定宽度、字号或间距；
+- `scripts/smoke.mjs`：**+2 条断言（982 → 984）** —— 设置页带 `fc-settings` 类、
+  `styles.css` 里存在对应的折行规则。**这是"挂载点契约"，不是布局断言**（假 DOM 没有布局引擎）；
+- 四道闸（最终状态实测）：构建 **59 模块 / 861.3 KiB** · `tsc` **0 错** · 单测 **404** · 冒烟 **984 条 0 失败**；
+- 鉴别力实测：把 CSS 的 `flex-wrap` 改成 `nowrap` → 第 2 条变红；去掉 `containerEl.addClass('fc-settings')` →
+  第 1 条变红（如实报出 `setting-tab`）。
+
+**待真实库复核**：设置 → Project Kaki，把 Obsidian 窗口调窄，看
+「新增自定义路径类型」「新增自定义区域类型」以及每种类型的参数行里，
+**所有输入框与「新增 / 删除」按钮是否都在面板范围内**（应当折行，而不是被切掉或跑到面板外）。
+另请顺带看一眼常规行（滑块 / 开关 / 单个文本框）的间距有没有变化 —— 设计目标是**不变**。
 

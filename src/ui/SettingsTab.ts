@@ -126,6 +126,13 @@ export class CartographerSettingTab extends PluginSettingTab {
   override display(): void {
     const { containerEl } = this
     containerEl.empty()
+    /**
+     * 设置页的作用域类：`styles.css` 里那一组"控件多的一行不许溢出"的规则挂在它上面。
+     *
+     * ⚠️ 类名在 CSS 与这里各写一次，必须一致 —— 冒烟里有一条断言盯着这件事
+     * （CSS 布局本身无法在假 DOM 里断言，见 `ENGINEERING-NOTES.md` §5.31）。
+     */
+    containerEl.addClass('fc-settings')
     containerEl.createEl('h2', { text: 'Project Kaki' })
     // 译名只在设置页出现这一次：别在每个标题里都写两个名字
     containerEl.createEl('div', { cls: 'fc-settings-subtitle', text: 'Project 垣 · 六边形地图创作' })

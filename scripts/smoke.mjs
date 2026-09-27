@@ -5694,6 +5694,29 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   const imagePathInSettings = () => plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:marsh')?.imagePath
 
   openSettings()
+  /**
+   * ---- 设置页的布局契约（CSS 那一侧）----
+   *
+   * CSS 布局在假 DOM 里**无法断言**（假 DOM 没有布局引擎）。所以这里只钉**挂载点**：
+   * `styles.css` 里那一组"控件多的一行不许溢出"的规则挂在 `.fc-settings` 上，
+   * 设置页必须真的带上这个类 —— 否则规则静默失效，用户下次又会看到"按钮跑到区域外面"
+   * （这个现象是用户实测报的，当时「新增自定义路径类型」一行有 6 个控件，见 §5.31）。
+   *
+   * ⚠️ 顺序有讲究：类是在 `display()` 里加的，所以必须先 `openSettings()` 再断言
+   *（第一版写反了，读到的是加类之前的 `setting-tab`）。
+   */
+  const settingsRoot = plugin.settingTabs[0].containerEl
+  check(
+    '设置页容器带 fc-settings 类（防溢出规则的挂载点）',
+    String(settingsRoot.className ?? '').split(/\s+/).includes('fc-settings'),
+    String(settingsRoot.className),
+  )
+  const stylesCssText = fs.readFileSync(path.join(root, 'styles.css'), 'utf8')
+  check(
+    'styles.css 里确实有挂在 .fc-settings 上的折行规则（类名不许只改一边）',
+    /\.fc-settings\s+\.setting-item-control\s*\{[^}]*flex-wrap:\s*wrap/.test(stylesCssText),
+    '未找到 .fc-settings .setting-item-control { … flex-wrap: wrap … }',
+  )
   check('默认是「调色」模式（新建时的默认值：不依赖任何外部资源）', plugin.getSettings().customTerrains[0]?.mode === 'color', String(plugin.getSettings().customTerrains[0]?.mode))
   check(
     '调色模式下**也有**图片那一栏（用户实测反馈"没有看到图片导入按钮" —— 找不到入口就等于没有这个功能）',

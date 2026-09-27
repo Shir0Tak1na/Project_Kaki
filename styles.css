@@ -642,6 +642,64 @@
   color: var(--text-on-accent);
 }
 
+/* ---- 设置页：控件多的一行不许溢出 ---- */
+/*
+ * 为什么需要这一组：Obsidian 的 `.setting-item` 是一行 flex，而 `.setting-item-control`
+ * 默认 `flex-shrink: 0` **且不折行**。我们的设置页里有几行控件特别多 ——
+ * 「新增自定义路径类型」一行放了 **6 个**控件（2 个文本框 + 颜色 + 2 个文本框 + 按钮），
+ * 「新增自定义区域类型」是 **7 个** —— 于是控件被挤出容器右边缘，
+ * 用户看到的现象就是"按钮跑到区域外面"（这是用户实测报的）。
+ *
+ * 处理原则：**空间够时什么都不变，空间不够时折行而不是溢出**。
+ * 所以这里只加"允许收缩 / 允许折行"，不改任何固定宽度、字号或间距。
+ *
+ * ⚠️ 这一组规则挂在 `.fc-settings` 上，那个类由 `SettingsTab.display()` 加上去；
+ * 类名两边必须一致（冒烟里有一条断言盯着）。**CSS 布局本身没有自动断言**（见 §5.31）。
+ */
+.fc-settings .setting-item {
+  /* 一行放不下时，让 `.setting-item-control` 整体落到下一行 */
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.fc-settings .setting-item-info {
+  /* 名称/说明那一列可以收缩：很长的 desc 不该把控件挤出去 */
+  min-width: 0;
+}
+
+.fc-settings .setting-item-control {
+  /* Obsidian 默认是 `flex-shrink: 0` + 不折行 —— 这两条正是溢出的直接原因 */
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fc-settings .setting-item-control input[type='text'],
+.fc-settings .setting-item-control input[type='number'],
+.fc-settings .setting-item-control input[type='search'] {
+  /* 文本框的 `min-width: auto`（内容宽度）不允许收缩，会直接撑破容器 */
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+}
+
+.fc-settings .setting-item-control select,
+.fc-settings .setting-item-control input[type='color'],
+.fc-settings .setting-item-control button,
+.fc-settings .setting-item-control .clickable-icon {
+  /* 这些按原尺寸排，放不下就折行 —— 不允许被压变形（按钮压成两个字更难认） */
+  flex-shrink: 0;
+  max-width: 100%;
+}
+
+/* 「调色 / 图片」模式分段控件那一行：很窄时整组落到标题下面 */
+.fc-settings .fc-terrain-mode {
+  flex-wrap: wrap;
+}
+
 /* 侧边栏很窄：整个面板用紧凑的单行按钮，描述走悬停提示 */
 .fc-panel-root {
   padding: 8px 10px 14px;
