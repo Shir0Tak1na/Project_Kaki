@@ -19,6 +19,7 @@
  */
 
 import { ItemView, setIcon, type WorkspaceLeaf } from 'obsidian'
+import { SELECTION_EMPTY_HINT, type SelectionActionId, type SelectionInfo } from '../editor/selection.ts'
 import {
   LAYER_HINTS,
   LAYER_KEYS,
@@ -52,6 +53,21 @@ export interface MapPanelDeps {
   /** 顶部状态行：当前地图与地图层 */
   getSummary: () => string
   /**
+   * 当前选中的对象（检查器要显示的信息）；`null` = 没选中。
+   *
+   * 与 `getActions` / `getLayerVisibility` 同一思路：面板不认识编辑器，
+   * 它只拿"要显示什么"，改状态全部回到外面执行。
+   */
+  getSelection: () => SelectionInfo | null
+  /** 改名（文字标注改的是它的文字）；空串 = 清空名字 */
+  onRenameSelection: (name: string) => void
+  /** 改链接（空串 = 清除链接） */
+  onSetSelectionLink: (link: string) => void
+  /** 打开"从库里选笔记"的选择器 */
+  onPickSelectionNote: () => void
+  /** 删除当前选中项（走既有删除实现，可撤销） */
+  onDeleteSelection: () => void
+  /**
    * 六个图层当前的可见性。
    *
    * 为什么由外部注入、而不是面板自己去读插件设置（以及为什么这两个依赖是**必填**的）：
@@ -77,6 +93,92 @@ const GROUP_ORDER: ReadonlyArray<{ group: PanelActionGroup; title: string }> = [
   { group: 'file', title: '文件与导出' },
   { group: 'dev', title: '开发工具（仅开发者模式）' },
 ]
+
+/** 渲染一个动作时拿得到的东西（面板只画界面，写入全部回 `deps`） */
+interface SelectionActionContext {
+  block: HTMLElement
+  info: SelectionInfo
+  deps: MapPanelDeps
+}
+
+/**
+ * 检查器的**动作渲染表**：一个动作一个渲染函数。
+ *
+ * 这里只负责"画出控件 + 把用户的输入交回 `deps`"；**实现仍然复用既有代码**
+ * （`main.ts` → `MapEditor.setSelectionLink / setSelectionName / removeSelection`，
+ * 都走既有的撤销栈与落盘路径）。为表格另写一份实现，就等于把"可撤销"这件事
+ * 复制成两份、迟早分叉。
+ *
+ * ### 加一个新 kind 时这里**不用改**（面板读的是 `SELECTION_KINDS[kind].actions`）
+ * 只有当你需要一种**全新的动作**（例如"改温度带"）时，才在这里加一行，
+ * 并在 `main.ts` / `MapEditor` 里给那个动作一个复用既有路径的实现。
+ */
+const SELECTION_ACTION_RENDERERS: Record<SelectionActionId, (context: SelectionActionContext) => void> = {
+  rename: ({ block, info, deps }) => {
+    const row = block.createEl('div', { cls: 'fc-selection-row' })
+    const input = row.createEl('input', { cls: 'fc-selection-input' })
+    input.type = 'text'
+    input.value = info.name
+    input.placeholder = '名称（留空 = 不显示名字）'
+    input.dataset.fcRole = 'name'
+    const commit = (): void => {
+      if (input.value === info.name) return
+      deps.onRenameSelection(input.value)
+    }
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      commit()
+    })
+    input.addEventListener('blur', commit)
+    block.createEl('div', { cls: 'fc-selection-hintline', text: '名称：显示在地图上的文字' })
+  },
+
+  link: ({ block, info, deps }) => {
+    const row = block.createEl('div', { cls: 'fc-selection-row' })
+    const input = row.createEl('input', { cls: 'fc-selection-input' })
+    input.type = 'text'
+    input.value = info.link
+    input.placeholder = '链接的笔记（留空 = 不链接）'
+    input.dataset.fcRole = 'link'
+    const commit = (): void => {
+      if (input.value === info.link) return
+      deps.onSetSelectionLink(input.value)
+    }
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      commit()
+    })
+    input.addEventListener('blur', commit)
+
+    const buttons = block.createEl('div', { cls: 'fc-selection-buttons' })
+    const pickButton = buttons.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
+    pickButton.dataset.fcRole = 'pick-note'
+    pickButton.createEl('span', { cls: 'fc-panel-button-label', text: '选择笔记…' })
+    pickButton.addEventListener('click', () => deps.onPickSelectionNote())
+
+    const clearButton = buttons.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
+    clearButton.dataset.fcRole = 'clear-link'
+    clearButton.createEl('span', { cls: 'fc-panel-button-label', text: '清除链接' })
+    // 本来就没链接时按不动：点了也不会有任何变化（灰掉比"点了没反应"清楚）
+    clearButton.disabled = info.link.length === 0
+    clearButton.addEventListener('click', () => deps.onSetSelectionLink(''))
+
+    block.createEl('div', {
+      cls: 'fc-selection-hintline',
+      text: '链接：在画布上点这个对象时会跳回那篇笔记',
+    })
+  },
+
+  delete: ({ block, deps }) => {
+    const row = block.createEl('div', { cls: 'fc-selection-buttons' })
+    const button = row.createEl('button', { cls: 'fc-panel-button fc-selection-button mod-warning' })
+    button.dataset.fcRole = 'delete'
+    button.createEl('span', { cls: 'fc-panel-button-label', text: '删除' })
+    button.addEventListener('click', () => deps.onDeleteSelection())
+  },
+}
 
 export class MapPanelView extends ItemView {
   private readonly deps: MapPanelDeps
@@ -157,6 +259,7 @@ export class MapPanelView extends ItemView {
     const actions = this.deps.getActions()
     const summary = this.deps.getSummary()
     const visibility = this.deps.getLayerVisibility()
+    const selection = this.deps.getSelection()
     const rows = actions.map((action) => ({
       action,
       available: action.available ? action.available() : true,
@@ -166,9 +269,16 @@ export class MapPanelView extends ItemView {
     // 图层开关必须进签名（它决定六个按钮的亮/暗）；但**不要**把每帧都在变的值放进来 ——
     // 上一版把"本帧画了多少格地形"写进签名，结果平移画布时面板每帧重建 DOM（§5.9）。
     const layerSignature = LAYER_KEYS.map((key) => `${key}:${isLayerVisible(visibility, key) ? 1 : 0}`).join(',')
+    // 选中项也进签名：否则"选中了另一个对象"时面板不重绘，检查器会一直显示上一个对象的信息。
+    // 只放**稳定**字段（名称/链接是用户改的，不是每帧变化的），不要放坐标这类每帧都变的值。
+    const selectionSignature =
+      selection === null
+        ? 'none'
+        : `${selection.kind}:${selection.id}:${selection.name}:${selection.link}:${selection.detail}`
     const signature = [
       summary,
       layerSignature,
+      selectionSignature,
       ...rows.map((row) => `${row.action.id}:${row.available ? 1 : 0}:${row.description}`),
     ].join('|')
     if (!force && this.rendered && signature === this.lastSignature) return
@@ -181,6 +291,8 @@ export class MapPanelView extends ItemView {
     const summaryEl = root.createEl('div', { cls: 'fc-panel-summary' })
     summaryEl.createEl('div', { cls: 'fc-panel-summary-body', text: summary })
 
+    this.renderSelection(root, selection)
+
     this.renderLayers(root, visibility)
 
     for (const { group, title } of GROUP_ORDER) {
@@ -191,6 +303,42 @@ export class MapPanelView extends ItemView {
       for (const row of items) this.renderAction(list, row.action, row.available, row.description)
     }
     this.rendered = true
+  }
+
+  /**
+   * 「选中的对象」检查器。
+   *
+   * 用户的原话是：「每次先选中一个对象，然后再决定对他的操作……在侧边栏中显示对象的信息……
+   * 我希望不用每次都去设置界面，而是尽可能利用侧边栏的功能」。
+   *
+   * 四条设计约束：
+   * - **没选中时也要说一句怎么办**（用户还抱怨过"功能引导不清晰"）—— 这一行就是那个最小修复；
+   * - **每个可编辑字段配一句人话**（链接是干什么的），但**不写教程**：用户嫌 UI 太多；
+   * - 改完**必须落到文档并进撤销栈**：所以这里只调 `deps` 里的回调，
+   *   真正的写入在编辑器/历史那一层（面板不认识文档，也不该认识）；
+   * - **动作按表渲染**：这一节渲染哪些动作，读的是 `SelectionInfo.actions`
+   *   （它来自 `selection.ts` 的 `SELECTION_KINDS`）。**加新对象种类时这里一行都不用改** ——
+   *   这是那个"长期开放"要求里最容易退化成 if/else 的地方。
+   */
+  private renderSelection(root: HTMLElement, selection: SelectionInfo | null): void {
+    const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-selection' })
+    block.createEl('div', { cls: 'fc-panel-group-title', text: '选中的对象' })
+
+    if (selection === null) {
+      block.createEl('div', { cls: 'fc-selection-hint', text: SELECTION_EMPTY_HINT })
+      return
+    }
+
+    const head = block.createEl('div', { cls: 'fc-selection-head' })
+    head.createEl('span', { cls: 'fc-selection-kind', text: selection.kindLabel })
+    head.createEl('span', { cls: 'fc-selection-detail', text: selection.detail })
+
+    // ID 是"信息"不是"动作"：它是写在地图文件里的标识，改名要用设置页的「改 ID…」
+    block.createEl('div', { cls: 'fc-selection-id', text: `ID：${selection.id}` })
+
+    for (const action of selection.actions) {
+      SELECTION_ACTION_RENDERERS[action]({ block, info: selection, deps: this.deps })
+    }
   }
 
   /**

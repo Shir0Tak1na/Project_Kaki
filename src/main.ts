@@ -78,7 +78,14 @@ import {
   type LayerKey,
 } from './render/layerVisibility.ts'
 import { legendLines } from './render/legend.ts'
-import { emptyBundleListHint, emptyImageListHint, listBundlePaths, listImagePaths } from './base/assetFiles.ts'
+import {
+  emptyBundleListHint,
+  emptyImageListHint,
+  emptyNoteListHint,
+  listBundlePaths,
+  listImagePaths,
+  listNotePaths,
+} from './base/assetFiles.ts'
 import {
   MAX_CUSTOM_TERRAINS,
   isBuiltinTerrain,
@@ -242,6 +249,8 @@ export default class ProjectKakiPlugin extends Plugin {
       getRegionTypes: () => this.getRegionTypes(),
       getCustomTerrains: () => this.getCustomTerrains(),
       getCustomMarkers: () => this.getCustomMarkers(),
+      // 选中项变了：侧栏检查器要立刻跟着变（面板在另一棵树里，只能由插件层转发）
+      onSelectionChanged: () => this.refreshPanel(),
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
       // 工具条上的按钮通过下面两个 setter 写回设置。
       getLayers: () => this.pluginSettings.layers,
@@ -516,6 +525,25 @@ export default class ProjectKakiPlugin extends Plugin {
     this.registerView(MAP_PANEL_VIEW_TYPE, (leaf) => new MapPanelView(leaf, {
       getActions: () => this.getPanelActions(),
       getSummary: () => this.describePanelSummary(),
+      // ---- 选中的对象（检查器）----
+      // 面板只显示信息；改文档、撤销、落盘都在编辑器/历史那一层
+      getSelection: () => this.layers?.getInspectorEditor()?.selectionInfo() ?? null,
+      onRenameSelection: (name) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        if (editor.setSelectionName(name)) this.refreshPanel()
+      },
+      onSetSelectionLink: (link) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        if (editor.setSelectionLink(link)) this.refreshPanel()
+      },
+      onPickSelectionNote: () => this.pickNoteForSelection(),
+      onDeleteSelection: () => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        if (editor.removeSelection()) this.refreshPanel()
+      },
       // 图层开关：状态与写入口都从插件这边注入（面板不认识插件实例）
       getLayerVisibility: () => this.pluginSettings.layers,
       onToggleLayer: (key, value) => {
@@ -1381,6 +1409,45 @@ export default class ProjectKakiPlugin extends Plugin {
     // 多行文本走报告面板（与地图状态报告同一套路），不塞进 Notice
     this.openReport({ title: '改 ID 完成', text: report })
     return { ok: true, report }
+  }
+
+  // -------------------------------------------------- 选中对象：链接笔记
+
+  /**
+   * 给当前选中项挑一篇笔记（侧栏检查器里的「选择笔记…」）。
+   *
+   * 复用图片/定义文件那一套 `openAssetPicker`：**同一份**"没得选时说清原因 /
+   * 打不开时给退路 / 取消时什么都不做"的实现，只是把候选换成 `.md`。
+   * 这正是用户报的那个缺陷（"无法重新给对象链接笔记"）缺少的最后一块 ——
+   * 以前标记只在创建时能填链接，之后再也没有入口。
+   */
+  pickNoteForSelection(): void {
+    const editor = this.layers?.getInspectorEditor()
+    if (!editor) {
+      new Notice('先启用地图层并选中一个对象。', NOTICE_MAX_MS)
+      return
+    }
+    const info = editor.selectionInfo()
+    if (info === null) {
+      new Notice('先在画布上点一下要链接的对象。', NOTICE_MAX_MS)
+      return
+    }
+    if (!info.canLink) {
+      new Notice(`${info.kindLabel}不能链接笔记。`, NOTICE_MAX_MS)
+      return
+    }
+    this.openAssetPicker({
+      title: `链接到笔记 · ${info.kindLabel}`,
+      files: listNotePaths(this.app.vault.getFiles().map((file) => file.path)),
+      kind: 'note',
+      emptyHint: emptyNoteListHint(),
+      onChoose: (path) => {
+        const current = this.layers?.getInspectorEditor()
+        if (!current) return
+        // 落进文档 + 撤销栈：撤销一次即可回到原来的链接（或"没有链接"）
+        if (current.setSelectionLink(path)) this.refreshPanel()
+      },
+    })
   }
 
   /** 把设置里那一条定义的 ID 换掉（并维护区域预设色的镜像字段） */

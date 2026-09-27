@@ -18,8 +18,8 @@
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
-- 单元测试：422 个通过
-- 冒烟测试：37 个场景、1006 条断言全部通过
+- 单元测试：441 个通过
+- 冒烟测试：37 个场景、1041 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - **本轮（2026-09-25 → 09-27）四个轮次的收口状态**（每一轮都跑完四道闸并推送，CI 全绿）：
   - §6 **文档轮**：补 ⑤（路径/区域类型）与 ③（定义文件）到 README / 手册 / CHANGELOG（当时基线 977）；
@@ -239,8 +239,8 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 - 插件 ID 是 `project-kaki`；**不要**再改它（改了要同步 `manifest.json` + `scripts/deploy.mjs` + `scripts/smoke.mjs` 里的字面量，
   并给用户做目录与启用项迁移）。同理不要改那三个写在用户文件里的持久化标识，见本文开头的警告。
 - 每次修改 UI 后都要跑 `npm run build`、`npm test`、`node scripts/smoke.mjs`，并部署到测试库后给用户可判伪的手动验证清单。
-- 文档中的测试数量必须和实际输出同步。当前基线是 `422 / 1006`（单元测试 / 冒烟断言，37 个冒烟场景），
-  两者都能自己数出来：`node --test --test-isolation=none` 的**汇总行**（`ℹ tests 422`）、
+- 文档中的测试数量必须和实际输出同步。当前基线是 `441 / 1041`（单元测试 / 冒烟断言，37 个冒烟场景），
+  两者都能自己数出来：`node --test --test-isolation=none` 的**汇总行**（`ℹ tests 441`）、
   `node scripts/smoke.mjs` 的末行。
   ⚠️ **去读汇总行，不要目测**：这条基线曾被写错成 278，原因是用 dot reporter 的点数"数行数"。
   ✅ **现在由脚本自己对账**：冒烟末尾有一条自检会读本文件与 `ENGINEERING-NOTES.md` 里的基线数字，
@@ -276,7 +276,7 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 
 - `node scripts/build.mjs` → **59 个模块 / 859.9 KiB**
 - `node node_modules/typescript/bin/tsc --noEmit` → **0 错**
-- `node --test --test-isolation=none` → **`ℹ tests 422` / `fail 0`**
+- `node --test --test-isolation=none` → **`ℹ tests 441` / `fail 0`**
 - `node scripts/smoke.mjs` → **977 条断言 0 失败**（场景编号到 **37**；块数比它多，见下）
 
 另外我写了三份**独立复核脚本**（在 `.build/`，已被 gitignore，可重跑）：

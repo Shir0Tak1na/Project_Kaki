@@ -96,6 +96,40 @@ export interface RenameRegionOp {
   to: string
 }
 
+/**
+ * 可以被"改名 / 改链接"的四类对象。
+ *
+ * 为什么把它们收进**一个** op 而不是各写一套（标记改名、文字改名、区域改名…）：
+ * 侧栏检查器对四类对象的操作是同一件事（改名称、改链接），
+ * 一套 op = 一条撤销路径 = 一处要维护的地方。已有的 `renamePath` / `setPathLink` /
+ * `renameRegion` 保持不变（老调用点与单测继续用），新的通用 op 覆盖全部四类。
+ */
+export type ObjectKind = 'marker' | 'label' | 'path' | 'region'
+
+/** 改「对象 → 笔记」的链接；逆操作就是交换 from/to */
+export interface SetLinkOp {
+  kind: 'setLink'
+  target: ObjectKind
+  id: string
+  from: string
+  to: string
+}
+
+/**
+ * 改名称（标记/路径/区域用 `label`，文字标注用 `text` —— 文字标注的"名字"就是它显示的文字）。
+ *
+ * 语义与既有 `renamePath` 一致：**清空 = 删掉该字段**（路径/标记的 label 是可选的）；
+ * 而 `MapMarker.label` / `MapRegion.label` / `MapLabel.text` 是必填字段，清空写空串。
+ * 这个差别写在 `applyOp` 里一处，避免四类对象各自解释"空名字"。
+ */
+export interface RenameObjectOp {
+  kind: 'renameObject'
+  target: ObjectKind
+  id: string
+  from: string
+  to: string
+}
+
 export type MapOp =
   | SetTerrainOp
   | AddMarkerOp
@@ -111,6 +145,27 @@ export type MapOp =
   | RenamePathOp
   | SetPathLinkOp
   | RenameRegionOp
+  | SetLinkOp
+  | RenameObjectOp
+
+/**
+ * 按 `target` 取出对象本体（**返回原对象引用**，调用方只改它自己的字段）。
+ *
+ * 刻意不重建对象：改一个字段却重建整个对象，很容易顺手丢掉"这一版不认识的字段"
+ * （`ENGINEERING-NOTES.md` §5.11：未知值属于用户的数据，不属于我们的显示偏好）。
+ */
+function objectOf(document: MapDocument, target: ObjectKind, id: string): Record<string, unknown> | null {
+  switch (target) {
+    case 'marker':
+      return (document.markers.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+    case 'label':
+      return (document.labels.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+    case 'path':
+      return (document.paths.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+    case 'region':
+      return (document.regions.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+  }
+}
 
 export function applyOp(document: MapDocument, op: MapOp): void {
   switch (op.kind) {
@@ -182,6 +237,30 @@ export function applyOp(document: MapDocument, op: MapOp): void {
       region.label = op.to
       return
     }
+    case 'setLink': {
+      const object = objectOf(document, op.target, op.id)
+      if (object === null) return
+      if (op.to.length > 0) object.link = op.to
+      else delete object.link
+      return
+    }
+    case 'renameObject': {
+      const object = objectOf(document, op.target, op.id)
+      if (object === null) return
+      if (op.target === 'label') {
+        object.text = op.to
+        return
+      }
+      if (op.target === 'path') {
+        // 路径的 label 是可选的：清空 = 删掉字段（与既有 `renamePath` 同一语义）
+        if (op.to.length > 0) object.label = op.to
+        else delete object.label
+        return
+      }
+      // 标记与区域的 label 是必填字段：清空写空串，不删字段（删了会让解析层以为缺字段）
+      object.label = op.to
+      return
+    }
   }
 }
 
@@ -214,6 +293,10 @@ export function invertOp(op: MapOp): MapOp {
     case 'setPathLink':
       return { ...op, from: op.to, to: op.from }
     case 'renameRegion':
+      return { ...op, from: op.to, to: op.from }
+    case 'setLink':
+      return { ...op, from: op.to, to: op.from }
+    case 'renameObject':
       return { ...op, from: op.to, to: op.from }
   }
 }

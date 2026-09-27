@@ -7,7 +7,7 @@
  */
 
 import type { Axial, GridSpec, Point } from '../core/hex.ts'
-import { cellKey, worldToAxial } from '../core/hex.ts'
+import { cellKey, parseCellKey, worldToAxial } from '../core/hex.ts'
 import { snapToHexVertex, stepAlongEdges, toEdgePath, walkTailToCursor, type GeometryMode } from '../core/hexEdges.ts'
 
 /** 两点之差（用于"上一步方向"） */
@@ -30,6 +30,13 @@ import type {
 } from '../data/mapDocument.ts'
 import { cellsAlongSegment } from './brushPath.ts'
 import { History, applyOp, opsFromPrevious, type MapOp } from './history.ts'
+import {
+  describeSelection,
+  hitTestSelection,
+  type MapSelection,
+  type SelectionInfo,
+  type SelectionLabelResolvers,
+} from './selection.ts'
 import { nextLabelId, nextMarkerId, snapToCellCenter } from '../render/markerPlacement.ts'
 import { hitTestPolygon, hitTestPolyline, visiblePolyline } from '../render/shapeGeometry.ts'
 import {
@@ -38,9 +45,12 @@ import {
   type PathStyle,
 } from '../render/shapeStyle.ts'
 import { defaultRegionColors, normalizeColor, type StylePalette } from '../render/stylePalette.ts'
+import { resolveMarkerStyle, type CustomMarker } from '../render/markerCatalog.ts'
+import { resolveTerrainStyle, type CustomTerrain } from '../render/terrainCatalog.ts'
 import {
   defaultPathTypeEntries,
   pathColorsFromEntries,
+  pathTypeLabelOf,
   resolvedPathStyle,
   type PathTypeEntry,
 } from '../render/pathTypeCatalog.ts'
@@ -48,14 +58,52 @@ import {
   defaultRegionTypeEntries,
   defaultRegionTypeId,
   isBuiltinRegionType,
+  regionTypeLabelOf,
   resolvedRegionStyle,
   type RegionTypeEntry,
   type ResolvedRegionStyle,
 } from '../render/regionTypeCatalog.ts'
 
+/** 选中项比较：同 kind 同 id 才算没变（`null` 与 `null` 相等） */
+function sameSelection(a: MapSelection | null, b: MapSelection | null): boolean {
+  if (a === null || b === null) return a === b
+  return a.kind === b.kind && a.id === b.id
+}
+
+/** 当前链接（`null` = 找不到该对象） */
+function currentLinkOf(document_: MapDocument, selection: MapSelection): string | null {
+  switch (selection.kind) {
+    case 'marker':
+      return document_.markers.find((item) => item.id === selection.id)?.link ?? null
+    case 'label':
+      return document_.labels.find((item) => item.id === selection.id)?.link ?? null
+    case 'path':
+      return document_.paths.find((item) => item.id === selection.id)?.link ?? null
+    case 'region':
+      return document_.regions.find((item) => item.id === selection.id)?.link ?? null
+    case 'cell':
+      return null
+  }
+}
+
+/** 当前名称（地块没有名字 → `null`） */
+function currentNameOf(document_: MapDocument, selection: MapSelection): string | null {
+  switch (selection.kind) {
+    case 'marker':
+      return document_.markers.find((item) => item.id === selection.id)?.label ?? null
+    case 'label':
+      return document_.labels.find((item) => item.id === selection.id)?.text ?? null
+    case 'path':
+      return document_.paths.find((item) => item.id === selection.id)?.label ?? ''
+    case 'region':
+      return document_.regions.find((item) => item.id === selection.id)?.label ?? null
+    case 'cell':
+      return null
+  }
+}
+
 /** 路径/区域 id：与标记共用"避开已用 id"的策略 */
-function nextShapeId(document_: MapDocument, prefix: string): string {
-  const used = new Set<string>([
+function nextShapeId(document_: MapDocument, prefix: string): string {  const used = new Set<string>([
     ...document_.markers.map((item) => item.id),
     ...document_.labels.map((item) => item.id),
     ...document_.paths.map((item) => item.id),
@@ -141,6 +189,15 @@ export interface MapEditorOptions {
    * 都从目录取。缺省 = 出厂目录。
    */
   getRegionTypes?: () => readonly RegionTypeEntry[]
+  /**
+   * 自定义地形 / 自定义标记目录（只为检查器显示人话名称用）。
+   *
+   * 与上面几个同理：现读。缺省 = 空（检查器会退回显示裸 ID，但不会崩）。
+   */
+  getCustomTerrains?: () => readonly CustomTerrain[]
+  getCustomMarkers?: () => readonly CustomMarker[]
+  /** 选中项变化（侧栏检查器据此重绘；覆盖层据此重画高亮） */
+  onSelectionChanged?: () => void
   historyLimit?: number
 }
 
@@ -171,6 +228,8 @@ export interface EditorStatus {
   draftPoints: number
   /** 路径/区域的几何模式（工具栏据此高亮） */
   geometryMode: GeometryMode
+  /** 当前选中的对象（`null` = 没选中）—— 侧栏检查器与高亮都读它 */
+  selection: MapSelection | null
 }
 
 export class MapEditor {
@@ -206,6 +265,13 @@ export class MapEditor {
   private strokePrevious: Map<string, TerrainCell | null> | null = null
   private strokeCells: Axial[] = []
   private strokeLastPoint: Point | null = null
+  /**
+   * 当前选中的对象（用户要的"先选中，再决定操作"）。
+   *
+   * 刻意**不**进历史栈：选中是"看哪里"，不是对文档的修改 ——
+   * 撤销一次却把选中也换掉，用户会觉得 Ctrl+Z"撤歪了"。
+   */
+  private selection: MapSelection | null = null
   /** 进行中的拖动移动（标记 / 文字标注） */
   private moveState: { kind: 'marker' | 'label'; id: string; from: [number, number] } | null = null
   /** 进行中的多点草稿（路径 / 区域） */
@@ -233,7 +299,136 @@ export class MapEditor {
       strokeCells: this.strokeCells.length,
       draftPoints: this.draft?.clickCount ?? 0,
       geometryMode: this.geometryMode,
+      selection: this.selection,
     }
+  }
+
+  // ---------------------------------------------------------------- 选中
+
+  getSelection(): MapSelection | null {
+    return this.selection
+  }
+
+  /**
+   * 选中某个对象；传入 `null` = 清空。
+   *
+   * 返回是否真的变了：调用方（交互层）据此决定要不要重绘 —— 每次点击都重绘会让
+   * 平移画布时白白多画一帧。
+   */
+  setSelection(selection: MapSelection | null): boolean {
+    if (sameSelection(this.selection, selection)) return false
+    this.selection = selection
+    if (this.options.onSelectionChanged) this.options.onSelectionChanged()
+    else this.options.onChanged()
+    this.options.onStateChanged?.()
+    return true
+  }
+
+  clearSelection(): boolean {
+    return this.setSelection(null)
+  }
+
+  /**
+   * 按命中顺序选中"这一点下面的对象"：标记 → 名称 → 路径/区域 → 有地形的地块。
+   *
+   * 形状的几何命中复用 `hitTestShape`（与右键删除、双击改名**同一套**判定），
+   * 绝不在这里再写一份 —— 两套命中会立刻分叉成"右键能删、左键选不中"。
+   */
+  selectAt(world: Point, toleranceWorld: number): boolean {
+    const document_ = this.options.getDocument()
+    const grid = this.grid()
+    if (!document_ || !grid) return false
+    const hit = hitTestSelection({
+      document: document_,
+      grid,
+      world,
+      toleranceWorld,
+      hitShape: (point, tolerance) => this.hitTestShape(point, tolerance),
+    })
+    return this.setSelection(hit)
+  }
+
+  /** 检查器要显示的那一条（找不到对象时返回 null，见 `describeSelection`） */
+  selectionInfo(): SelectionInfo | null {
+    const document_ = this.options.getDocument()
+    if (!document_) return null
+    return describeSelection(document_, this.selection, this.labelResolvers())
+  }
+
+  private labelResolvers(): SelectionLabelResolvers {
+    const terrains = this.options.getCustomTerrains?.() ?? []
+    const markers = this.options.getCustomMarkers?.() ?? []
+    return {
+      terrain: (id) => resolveTerrainStyle(id, terrains).label,
+      marker: (id) => resolveMarkerStyle(id, markers).label,
+      path: (id) => pathTypeLabelOf(id, this.getPathTypes()),
+      region: (id) => regionTypeLabelOf(id, this.getRegionTypes()),
+    }
+  }
+
+  /**
+   * 给**当前选中项**改链接（检查器里那一栏）。`link` 为空串 = 清除链接。
+   *
+   * 走既有的历史栈（`setLink` op）：于是这次修改可撤销，且与快捷键路径共用同一套撤销机制。
+   * 地块没有链接（`canLink: false`），这里直接拒绝而不是悄悄改到别处。
+   */
+  setSelectionLink(link: string): boolean {
+    const selection = this.selection
+    if (selection === null || selection.kind === 'cell') return false
+    const document_ = this.options.getDocument()
+    if (!document_) return false
+    const current = currentLinkOf(document_, selection)
+    if (current === null || current === link) return false
+    this.commit([{ kind: 'setLink', target: selection.kind, id: selection.id, from: current, to: link }], '设置链接')
+    return true
+  }
+
+  /** 给当前选中项改名（文字标注改的是它的文字）；地块没有名字，返回 false */
+  setSelectionName(name: string): boolean {
+    const selection = this.selection
+    if (selection === null || selection.kind === 'cell') return false
+    const document_ = this.options.getDocument()
+    if (!document_) return false
+    const current = currentNameOf(document_, selection)
+    if (current === null || current === name) return false
+    this.commit([{ kind: 'renameObject', target: selection.kind, id: selection.id, from: current, to: name }], '重命名')
+    return true
+  }
+
+  /**
+   * 删除当前选中项。**复用既有的删除实现**（标记/名称/路径/区域各有自己的 remove*），
+   * 不另写一套 —— 否则撤销、通知、选择清理会出现两套行为。
+   */
+  removeSelection(): boolean {
+    const selection = this.selection
+    if (selection === null) return false
+    const removed = ((): boolean => {
+      switch (selection.kind) {
+        case 'marker':
+          return this.removeMarker(selection.id)
+        case 'label':
+          return this.removeLabel(selection.id)
+        case 'path':
+          return this.removePath(selection.id)
+        case 'region':
+          return this.removeRegion(selection.id)
+        case 'cell': {
+          const document_ = this.options.getDocument()
+          const axial = parseCellKey(selection.id)
+          if (!document_ || axial === null) return false
+          const previous = document_.terrain[selection.id] ?? null
+          if (previous === null) return false
+          const ops = opsFromPrevious([axial], null, () => previous)
+          if (ops.length === 0) return false
+          this.commit(ops, '删除地块')
+          return true
+        }
+      }
+    })()
+    // 删掉之后选中项指向一个不存在的对象：检查器会显示成"没有选中"，
+    // 但**状态本身**也该清掉 —— 否则下一次撤销把它变回来时，选中会莫名其妙地复活
+    if (removed) this.clearSelection()
+    return removed
   }
 
   getPathLink(id: string): string {
@@ -345,6 +540,11 @@ export class MapEditor {
     if (mode === 'select') {
       this.cancelStroke()
       this.cancelDraft()
+    } else {
+      // 进入绘制模式时清掉选中：高亮框留在画布上会与"即将画的东西"抢注意力，
+      // 而且绘制模式下点画布不再有"选中"的含义（点击被绘制手势占用）
+      this.selection = null
+      if (this.options.onSelectionChanged) this.options.onSelectionChanged()
     }
     this.mode = mode
     this.options.onStateChanged?.()

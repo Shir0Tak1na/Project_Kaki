@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 运行时冒烟测试：用桩替身模拟 Obsidian，把编译产物 main.js 真正加载并执行一遍。
  *
  * 桩环境**复刻 Phase 0 在 Obsidian 1.13.7 上实测到的真实结构**（见 docs/PHASE-0-RESULTS.md）：
@@ -29,7 +29,7 @@ import process from 'node:process'
 // 桩环境用它来模拟 Obsidian 的 metadataCache 行为。
 import { extractFrontmatterBlock, isMapFileContent, parseFrontmatter } from '../src/data/mapFile.ts'
 import { summarizeMapDocument } from '../src/data/mapDocument.ts'
-import { worldToAxial } from '../src/core/hex.ts'
+import { axialToWorld, cellKey, worldToAxial } from '../src/core/hex.ts'
 import { snapToCellCenter } from '../src/render/markerPlacement.ts'
 import { assertBundleIsFresh } from './lib/bundleFreshness.mjs'
 import { scanSources } from './lib/sourceSanity.mjs'
@@ -2040,6 +2040,9 @@ function fireEvent(element, type, init = {}) {
       stopped = true
     },
   }
+  // 真实键盘事件带 `key`；桩里必须补上，否则"按 Enter 提交"这类断言根本发不出来
+  // （缺了它，handler 里的 `event.key === 'Enter'` 永远是 false —— 断言会变成空转）
+  if (init.key !== undefined) event.key = init.key
   if (element === undefined || element === null) return { prevented, stopped }
   element.dispatchEvent(event)
   return { prevented, stopped }
@@ -8708,7 +8711,228 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
 
   plugin.setReportModalFactory((app2, options) => new ReportModal(app2, options))
 
-  // ---------------------------------------------- 文档基线自检（防止基线漂移）
+  console.log('\n场景 38：选中对象 + 侧栏检查器（点选 → 信息 → 改链接 → 撤销 → 高亮）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const file = await store.createMap({ name: 'Select', folder: 'Maps', canvasPath })
+
+  /**
+   * 种一张"每种对象都有一个"的地图：标记 / 名称 / 路径 / 区域 / 有地形的地块。
+   * 这些点位互不重叠，于是"点哪里选中谁"可以被逐条钉住。
+   */
+  const seeded = await store.load(file)
+  seeded.document.terrain[cellKey(6, 0)] = { t: 'forest' }
+  seeded.document.markers.push({ id: 'mk-1', label: '港口', p: [0, 0], icon: 'town', link: 'Places/Port.md' })
+  seeded.document.labels.push({ id: 'lb-1', text: '北境', p: [900, 0] })
+  seeded.document.paths.push({ id: 'pa-1', type: 'river', pts: [[-800, 600], [-400, 600], [0, 600]], width: 8, color: '#2288ff' })
+  seeded.document.regions.push({ id: 'rg-1', label: '王国', pts: [[-900, -800], [-300, -800], [-300, -400]], color: '#44cf6e', opacity: 0.2, type: 'realm' })
+  await store.writeNow(file, seeded.document, 'Select', [canvasPath])
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const stats = () => layers.listStatus()[0].stats
+  const clickWorld = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+    flushFrames()
+  }
+  const selectionOf = () => editor.getSelection()
+
+  // ---- 打开侧栏面板（检查器就在里面）----
+  plugin.ribbonIcons[0].callback()
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const panel = app.workspace.getLeavesOfType('fictional-cartographer-panel')[0]?.view
+  check('地图面板已打开（检查器挂在它顶部）', panel !== undefined, String(panel))
+  const selectionEl = (cls) => collectByClass(panel.contentEl, cls)[0]
+  const roleEl = (role) => collectByClass(panel.contentEl, 'fc-selection-input').find((el) => el.dataset?.fcRole === role)
+  const buttonByRole = (role) =>
+    collectByClass(panel.contentEl, 'fc-selection-button').find((el) => el.dataset?.fcRole === role)
+
+  // ---- 没选中：必须有一句"怎么办"（用户抱怨过引导不清晰）----
+  check(
+    '没选中时检查器给出引导（"点一下地图上的对象"）',
+    (selectionEl('fc-selection-hint')?.textContent ?? '').includes('点一下地图上的对象'),
+    String(selectionEl('fc-selection-hint')?.textContent),
+  )
+
+  // ---- 点标记：选中 + 侧栏显示信息 + 画布画高亮 ----
+  clickWorld({ x: 0, y: 0 })
+  check('点标记选中了它', JSON.stringify(selectionOf()) === JSON.stringify({ kind: 'marker', id: 'mk-1' }), JSON.stringify(selectionOf()))
+  check('画布上真的画了选中高亮（统计字段可读，不靠肉眼看截图）', stats()?.lastHighlight?.kind === 'marker' && stats()?.lastHighlight?.id === 'mk-1', JSON.stringify(stats()?.lastHighlight))
+  check('检查器显示种类（人话）', (selectionEl('fc-selection-kind')?.textContent ?? '') === '标记', String(selectionEl('fc-selection-kind')?.textContent))
+  check('检查器显示名称', roleEl('name')?.value === '港口', String(roleEl('name')?.value))
+  check('检查器显示当前链接的笔记', roleEl('link')?.value === 'Places/Port.md', String(roleEl('link')?.value))
+  check('检查器显示只读 ID（文件里的标识）', (selectionEl('fc-selection-id')?.textContent ?? '').includes('custom') === false, String(selectionEl('fc-selection-id')?.textContent))
+  check(
+    '标记的检查器渲染了它的全部动作（名称 / 链接 / 删除）—— 动作集合来自描述表',
+    collectByClass(panel.contentEl, 'fc-selection-button')
+      .map((el) => el.dataset?.fcRole)
+      .filter((role) => typeof role === 'string' && role.length > 0)
+      .join(',') === 'pick-note,clear-link,delete',
+    JSON.stringify(
+      collectByClass(panel.contentEl, 'fc-selection-button').map((el) => el.dataset?.fcRole),
+    ),
+  )
+
+  // ---- 按下标记**元素**（拖动走的那条路）也必须先选中 ----
+  // 用户要的是"先选中、再操作"：若只有点画布能选中、按住图标拖动却不能，
+  // 手感会变成"拖完才发现没选中它"。
+  editor.clearSelection()
+  flushFrames()
+  const markerClient = canvas._clientFor({ x: 0, y: 0 })
+  const markerEl = collectByClass(wrapper, 'fc-marker').find((el) => el.dataset?.fcId === 'mk-1')
+  check('画布上有那个标记的 DOM 元素（拖动交互挂在它身上）', markerEl !== undefined)
+  firePointer(markerEl, 'pointerdown', { clientX: markerClient.x, clientY: markerClient.y })
+  check(
+    '按住标记元素就先选中了它（不必先点一次再拖）',
+    JSON.stringify(selectionOf()) === JSON.stringify({ kind: 'marker', id: 'mk-1' }),
+    JSON.stringify(selectionOf()),
+  )
+  // 收尾：抬手结束这次按下（否则拖动状态一直挂着），并刷一帧让检查器跟上
+  firePointer(markerEl, 'pointerup', { clientX: markerClient.x, clientY: markerClient.y })
+  flushFrames()
+
+  // ---- 核心回归：改链接 → 写进文档 → 落盘 → Ctrl+Z 能撤销 ----
+  const undoBefore = editor.getStatus().undo
+  roleEl('link').value = 'Places/Harbor.md'
+  fireEvent(roleEl('link'), 'keydown', { key: 'Enter' })
+  flushFrames()
+  // 文档内存里的值立刻就能读（这是用户当下看到的状态）；**落盘是防抖的**（400ms），
+  // 所以"文件里有没有"要另走一步显式 flush —— 直接 await store.load() 会读到旧内容，
+  // 那会变成一条永远红（或永远绿）的假断言。
+  const docAfterLink = layers.getDocument(canvasPath)
+  check(
+    '文档里的 link 变成了新笔记',
+    docAfterLink.markers.find((marker) => marker.id === 'mk-1')?.link === 'Places/Harbor.md',
+    JSON.stringify(docAfterLink.markers.find((marker) => marker.id === 'mk-1')),
+  )
+  check(
+    '这次修改进了撤销栈（可撤销，而不是"改了就没法回头"）',
+    editor.getStatus().undo === undoBefore + 1,
+    `${undoBefore} → ${editor.getStatus().undo}`,
+  )
+  await store.flush()
+  check(
+    '已经落盘到地图文件（显式 flush 之后，文件里就是新链接）',
+    String(app.vault.files.get(file.path)).includes('Places/Harbor.md'),
+    String(app.vault.files.get(file.path)).slice(0, 120),
+  )
+
+  editor.undo()
+  const docAfterUndo = layers.getDocument(canvasPath)
+  check(
+    'Ctrl+Z 撤销后链接回到原值',
+    docAfterUndo.markers.find((marker) => marker.id === 'mk-1')?.link === 'Places/Port.md',
+    JSON.stringify(docAfterUndo.markers.find((marker) => marker.id === 'mk-1')),
+  )
+  editor.redo()
+  const docAfterRedo = layers.getDocument(canvasPath)
+  check(
+    '重做之后又是新链接（撤销/重做对称）',
+    docAfterRedo.markers.find((marker) => marker.id === 'mk-1')?.link === 'Places/Harbor.md',
+    JSON.stringify(docAfterRedo.markers.find((marker) => marker.id === 'mk-1')),
+  )
+
+  // ---- 「选择笔记…」也走同一条路（复用同一份写入）----
+  let picked = null
+  plugin.setImagePickerFactory((_app, options) => {
+    picked = options
+    return { open() {} }
+  })
+  buttonByRole('pick-note').dispatchEvent({ type: 'click' })
+  flushFrames()
+  check('「选择笔记…」打开的是笔记选择器（kind = note）', picked?.kind === 'note', JSON.stringify(picked?.kind))
+  check(
+    '笔记选择器只列 .md（候选里没有图片/画布）',
+    Array.isArray(picked?.files) && picked.files.every((path) => path.endsWith('.md')),
+    JSON.stringify(picked?.files?.slice(0, 5)),
+  )
+
+  // ---- 删掉链接 ----
+  buttonByRole('clear-link').dispatchEvent({ type: 'click' })
+  flushFrames()
+  const docAfterClear = layers.getDocument(canvasPath)
+  check(
+    '「清除链接」把 link 删掉了（而不是留下空串）',
+    docAfterClear.markers.find((marker) => marker.id === 'mk-1')?.link === undefined,
+    JSON.stringify(docAfterClear.markers.find((marker) => marker.id === 'mk-1')),
+  )
+
+  // ---- 点其它种类的对象 ----
+  clickWorld({ x: 900, y: 0 })
+  check('点名称选中它', JSON.stringify(selectionOf()) === JSON.stringify({ kind: 'label', id: 'lb-1' }), JSON.stringify(selectionOf()))
+  clickWorld({ x: -400, y: 600 })
+  check('点路径选中它', JSON.stringify(selectionOf()) === JSON.stringify({ kind: 'path', id: 'pa-1' }), JSON.stringify(selectionOf()))
+  clickWorld({ x: -700, y: -700 })
+  check('点区域选中它', JSON.stringify(selectionOf()) === JSON.stringify({ kind: 'region', id: 'rg-1' }), JSON.stringify(selectionOf()))
+  clickWorld(axialToWorld({ kind: 'hex', orientation: 'pointy', size: 40, origin: [0, 0] }, 6, 0))
+  check(
+    '点有地形的那一格选中地块',
+    JSON.stringify(selectionOf()) === JSON.stringify({ kind: 'cell', id: cellKey(6, 0) }),
+    JSON.stringify(selectionOf()),
+  )
+  // 动作按表渲染：地块的动作表里只有 delete，所以界面上就应当只有删除按钮
+  const actionRoles = () =>
+    collectByClass(panel.contentEl, 'fc-selection-button')
+      .map((el) => el.dataset?.fcRole)
+      .filter((role) => typeof role === 'string' && role.length > 0)
+  check(
+    '地块的检查器只渲染删除（动作表里就这一个）',
+    actionRoles().join(',') === 'delete',
+    JSON.stringify(actionRoles()),
+  )
+  check(
+    '地块的检查器没有名称/链接栏（不是灰掉、而是根本不渲染 —— 动作由表决定）',
+    roleEl('name') === undefined && roleEl('link') === undefined,
+    JSON.stringify({ name: roleEl('name') === undefined, link: roleEl('link') === undefined }),
+  )
+
+  // ---- 点空白处清除选中 ----
+  clickWorld({ x: 4000, y: 4000 })
+  check('点空白处清空选中', selectionOf() === null, JSON.stringify(selectionOf()))
+  flushFrames()
+  check('没有选中时不再画高亮', stats()?.lastHighlight === null, JSON.stringify(stats()?.lastHighlight))
+
+  // ---- Esc 清除选中（优先级：先清选中，再谈草稿）----
+  clickWorld({ x: 0, y: 0 })
+  check('先选中一个对象（为 Esc 做准备）', selectionOf() !== null, JSON.stringify(selectionOf()))
+  const escEntry = app.keymap.activeScope?.registrations.find((item) => item.key === 'Escape')
+  check('地图层注册了 Esc 处理', escEntry !== undefined)
+  escEntry?.handler({ key: 'Escape' })
+  check('Esc 清除了选中', selectionOf() === null, JSON.stringify(selectionOf()))
+  check('Esc 之后仍在选择模式（没有顺手把模式也改掉）', editor.getStatus().mode === 'select', editor.getStatus().mode)
+
+  // ---- 检查器的「删除」走既有删除实现（可撤销）----
+  // ⚠️ 必须等过双击窗口（350ms）：同一坐标上连点两次是**重命名**手势，按设计不选中。
+  //    这条是写这个场景时抓到的（第二次点击之前选中一直是 null，看着像"选中坏了"）。
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  clickWorld({ x: 0, y: 0 })
+  const undoBeforeDelete = editor.getStatus().undo
+  buttonByRole('delete').dispatchEvent({ type: 'click' })
+  flushFrames()
+  const docAfterDelete = layers.getDocument(canvasPath)
+  check('删除按钮真的删掉了标记', docAfterDelete.markers.every((marker) => marker.id !== 'mk-1'), JSON.stringify(docAfterDelete.markers.map((marker) => marker.id)))
+  check('删除也进了撤销栈', editor.getStatus().undo === undoBeforeDelete + 1, `${undoBeforeDelete} → ${editor.getStatus().undo}`)
+  check('删掉之后选中自动清空（不指向一个不存在的对象）', selectionOf() === null, JSON.stringify(selectionOf()))
+  editor.undo()
+  const docAfterRestore = layers.getDocument(canvasPath)
+  check('撤销把标记变回来了', docAfterRestore.markers.some((marker) => marker.id === 'mk-1'), JSON.stringify(docAfterRestore.markers.map((marker) => marker.id)))
+
+  plugin.onunload()
+}
+
+// ---------------------------------------------- 文档基线自检（防止基线漂移）
   /**
    * 文档里写着"本次冒烟有多少条断言"，这里让它自己对一次账。
    *

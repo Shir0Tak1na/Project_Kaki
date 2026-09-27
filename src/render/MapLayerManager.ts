@@ -97,6 +97,13 @@ export interface MapLayerManagerDeps {
    */
   getCustomMarkers?: () => readonly CustomMarker[]
   /**
+   * 选中项发生变化（侧栏检查器据此重绘）。
+   *
+   * 由插件层提供（面板是 `ItemView`，这一层不认识它）—— 与 `getActions` 同一思路：
+   * 地图层只负责"发生了什么"，"界面怎么改"归外层。
+   */
+  onSelectionChanged?: () => void
+  /**
    * 图层可见性（来自插件设置）。
    *
    * 同样传函数：图层开关会被用户在设置页或工具条上随手改，必须"每次现读"，
@@ -150,7 +157,13 @@ export class MapLayerManager {
   private readonly deps: MapLayerManagerDeps
   private readonly entries = new Map<string, LayerEntry>()
   private readonly enabled = new Set<string>()
-
+  /**
+   * 最近一次交互过的 canvas（检查器的兜底依据，见 `getInspectorEditor`）。
+   *
+   * 为什么需要它：点侧栏会把活动叶子换成面板，这时只有「上一次点过哪张画布」
+   * 能告诉我们检查器该显示谁的选中项。
+   */
+  private lastInspectorPath: string | null = null
   constructor(deps: MapLayerManagerDeps) {
     this.deps = deps
   }
@@ -185,6 +198,35 @@ export class MapLayerManager {
   getActiveEditor(): MapEditor | null {
     const canvasPath = activeCanvasHandle(this.deps.app)?.file?.path
     return canvasPath ? this.getEditor(canvasPath) : null
+  }
+
+  /**
+   * 侧栏检查器该看哪个地图层的选中项。
+   *
+   * 与 `getActiveEditor()` 的差别只有一处：**优先挑「真的有选中项」的那一个**，再退回
+   * 最近交互过的、最后才退回活动画布。
+   *
+   * 为什么需要这一点：`activeCanvasHandle()` 在没有任何 canvas 活动时会**退回 `handles[0]`**
+   * —— 同时开着两张画布时，用户在第一张上点了对象、然后去点侧栏输入框，
+   * `getActiveEditor()` 有可能给出另一张（没有选中）的编辑器，检查器就显示"没有选中"，
+   * 而用户的选中其实还在。
+   *
+   * ⚠️ 诚实的边界：这一条**在冒烟里证不出来**（桩环境只有一张画布，两条实现结果相同；
+   * 把它改回 `getActiveEditor()` 一条断言都不会红 —— 见工程笔记"没红也是一种结果"）。
+   * 保留它是因为它在多画布下严格更合理，而不是因为某条断言钉住了它。
+   */
+  getInspectorEditor(): MapEditor | null {
+    const activePath = activeCanvasHandle(this.deps.app)?.file?.path
+    if (activePath !== undefined && activePath !== null) {
+      const entry = this.entries.get(activePath)
+      if (entry) return entry.editor
+    }
+    for (const path of this.enabled) {
+      const entry = this.entries.get(path)
+      if (entry && entry.editor.getSelection() !== null) return entry.editor
+    }
+    const last = this.lastInspectorPath === null ? undefined : this.entries.get(this.lastInspectorPath)
+    return last?.editor ?? null
   }
 
   /** 切换当前活动 canvas 的绘制/选择模式 */
@@ -347,6 +389,7 @@ export class MapLayerManager {
 
     this.detachEntry(canvasPath)
     this.enabled.add(canvasPath)
+    this.lastInspectorPath = canvasPath
 
     const overlay = new MapOverlay({
       handle,
@@ -377,6 +420,13 @@ export class MapLayerManager {
       loadTerrainImage: (path) => this.loadTerrainImage(path),
       onOpenLink: (link) => this.openNote(link, mapPath),
       onDeleteMarker: (placement) => this.deletePlacement(canvasPath, placement),
+      // 按下标记/文字就先选中它（用户要的"先选中，再决定操作"）
+      onSelect: (hit) => {
+        this.lastInspectorPath = canvasPath
+        this.entries.get(canvasPath)?.editor.setSelection({ kind: hit.kind, id: hit.id })
+      },
+      // 高亮每帧现读：选中变化时编辑器会请求重绘
+      getSelection: () => this.entries.get(canvasPath)?.editor.getSelection() ?? null,
       // 拖动移动：客户端坐标 → 世界坐标的换算只在这里做（标记层不认识画布内部坐标系）
       onEntityDragStart: (placement: MarkerPlacement) => {
         const editor = this.entries.get(canvasPath)?.editor
@@ -409,6 +459,15 @@ export class MapLayerManager {
       getPalette: () => this.deps.getStylePalette?.() ?? defaultStylePalette(),
       getPathTypes: () => this.deps.getPathTypes?.() ?? defaultPathTypeEntries(),
       getRegionTypes: () => this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries(),
+      // 检查器要显示人话名称（"标记 · 港口"而不是 `custom:port`），所以目录也要进来
+      getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
+      getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
+      onSelectionChanged: () => {
+        this.lastInspectorPath = canvasPath
+        overlay.requestRedraw()
+        // 侧栏检查器要跟着变：选中项与它的信息都显示在那里
+        this.deps.onSelectionChanged?.()
+      },
       onStateChanged: () => {
         // 单一收口点：任何模式/工具变化都会经过这里，
         // 因此标记层的交互开关放在这里最稳（不依赖调用方是否走了交互层）

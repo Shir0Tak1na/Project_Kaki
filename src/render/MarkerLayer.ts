@@ -28,6 +28,15 @@ export interface MarkerLayerOptions {
   onDragMove?: (client: { x: number; y: number }) => void
   onDragEnd?: (client: { x: number; y: number }) => void
   onDragCancel?: () => void
+  /**
+   * 按下实体时先**选中**它（用户要的"先选中，再决定操作"）。
+   *
+   * 为什么在这里而不是在画布上做命中测试：标记与文字是 DOM 元素、且它们是 pointer-events
+   * 唯一打开的实体 —— 元素自己最清楚"你点的是我"。放在画布上按坐标猜，会出现
+   * "视觉上点在图标上、逻辑上却选中了下面的地块"这种手感错位。
+   * 点击与拖动都会先经过它（按下即选中），于是拖动前不需要额外再点一次。
+   */
+  onSelect?: (hit: { kind: 'marker' | 'label'; id: string }) => void
   /** 注入图标校验（测试用；默认用 obsidian 的 getIcon） */
   hasIcon?: (name: string) => boolean
   /**
@@ -224,6 +233,8 @@ export class MarkerLayer {
       if (!this.interactive || event.button !== 0) return
       const current = this.currentPlacement.get(id)
       if (!current) return
+      // 先选中：这样"点一下"与"按住拖"都满足"先选中、再操作"，用户不必先点一次再拖一次
+      this.options.onSelect?.({ kind: current.kind, id })
       // 不让事件冒泡到画布：拖动标记不应该同时框选/平移
       event.stopPropagation()
       this.dragState = { id, pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, moved: false }

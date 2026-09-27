@@ -198,7 +198,18 @@ export class MapInteraction {
           Math.hypot(event.clientX - this.lastClickClient.x, event.clientY - this.lastClickClient.y) <= DOUBLE_CLICK_SLOP_PX
         this.lastClickAt = now
         this.lastClickClient = { x: event.clientX, y: event.clientY }
-        if (!isDoubleClick) return
+        if (!isDoubleClick) {
+          /**
+           * 单击 = 选中"这一点下面的对象"（命中顺序见 `selection.ts`）。
+           *
+           * 刻意**不** `swallow`：原生的框选 / 平移照常工作。用户抱怨的是
+           * "每个操作都由快捷键包揽"，所以这一层是**新增一个入口**，
+           * 不是把画布原有的能力换掉 —— 一旦拦下，平移画布就会在"起点落在某条路径上"时失灵。
+           */
+          const scale = readScale(this.options.handle.canvas).scale ?? 1
+          editor.selectAt(world, SHAPE_HIT_TOLERANCE_PX / scale)
+          return
+        }
 
         const scale = readScale(this.options.handle.canvas).scale ?? 1
         const hit = editor.hitTestShape(world, SHAPE_HIT_TOLERANCE_PX / scale)
@@ -397,6 +408,12 @@ export class MapInteraction {
     })
 
     register([], 'Escape', () => {
+      // 选中优先：按 Esc 的第一意图通常是"取消选中"。
+      // 有草稿时先清选中、再按一次才取消草稿 —— 顺序写死在这里，避免"有时取消草稿、有时清选中"
+      if (editor.getSelection() !== null) {
+        editor.clearSelection()
+        return false
+      }
       // 先取消进行中的草稿，再退出绘制模式：Esc 的语义是"退出当前这一步"
       if (editor.isDrafting()) {
         editor.cancelDraft()

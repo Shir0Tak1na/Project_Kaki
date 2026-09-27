@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 「从库里选一个文件」的弹窗（图片 / 定义文件）。
  *
  * 为什么是"库内文件"而不是系统文件对话框：
@@ -17,13 +17,13 @@
  */
 
 import { FuzzySuggestModal, type App } from 'obsidian'
-import { describeAssetChoice, listBundlePaths, listImagePaths } from '../base/assetFiles.ts'
+import { describeAssetChoice, listBundlePaths, listImagePaths, listNotePaths } from '../base/assetFiles.ts'
 
 /**
  * 候选属于哪一类。**必须由调用方显式给出**，不能在弹窗里靠扩展名猜 ——
  * 「该列什么」是调用方的知识（它才知道自己在选图片还是选定义文件）。
  */
-export type AssetPickerKind = 'image' | 'bundle'
+export type AssetPickerKind = 'image' | 'bundle' | 'note'
 
 export interface AssetPickerOptions {
   /** 候选路径（应当是库内文件路径；这里会按 `kind` 再筛一遍，避免调用方漏筛） */
@@ -46,7 +46,9 @@ export interface AssetPickerOptions {
 
 /** 搜索框占位文案：按类别给；调用方显式传了 `title` 就以它为准 */
 function defaultPickerPlaceholder(kind: AssetPickerKind): string {
-  return kind === 'bundle' ? '选择定义文件…' : '选择库内图片…'
+  if (kind === 'bundle') return '选择定义文件…'
+  if (kind === 'note') return '选择要链接的笔记…'
+  return '选择库内图片…'
 }
 
 /** 弹窗工厂：默认用真实的 `AssetSuggestModal`，测试里可替换 */
@@ -67,7 +69,8 @@ export class AssetSuggestModal extends FuzzySuggestModal<string> {
    * 这里必须按 `kind` 分流：写死图片白名单会让定义文件的选择器恒为空（见 `AssetPickerOptions.kind`）。
    */
   override getItems(): string[] {
-    return (this.options.kind === 'bundle' ? listBundlePaths : listImagePaths)(this.options.files)
+    const pick = this.options.kind === 'bundle' ? listBundlePaths : this.options.kind === 'note' ? listNotePaths : listImagePaths
+    return pick(this.options.files)
   }
 
   /** 显示成 `forest.png · Assets/地形`：同名文件也能分辨 */

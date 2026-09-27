@@ -13,6 +13,7 @@
  */
 
 import type { MapDocument } from '../data/mapDocument.ts'
+import type { MapSelection, SelectionKind } from '../editor/selection.ts'
 import {
   buildProjection,
   pickWorldHost,
@@ -26,6 +27,7 @@ import { axialToWorld, cellKey, hexCorners, parseCellKey } from '../core/hex.ts'
 import type { BBox } from '../core/viewport.ts'
 import { brushCellsAt, visibleCellBounds } from './hexGrid.ts'
 import { buildRenderPlan, worldToRaster, type MapRenderPlan } from './renderPlan.ts'
+import { SELECTION_HIGHLIGHTS } from './selectionHighlight.ts'
 import { MarkerLayer } from './MarkerLayer.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
 import { drawDraft, drawPath, drawRegion, labelCssPx } from './shapeDraw.ts'
@@ -87,6 +89,14 @@ export interface OverlayStats {
   labelCssPx: { path: number; region: number } | null
   lastDurationMs: number
   lastError: string | null
+  /**
+   * 本帧画出的**选中高亮**是什么（`null` = 没画）。
+   *
+   * 为什么要一个可读的字段：高亮画没画、画的是哪一类，在截图里都可能看漏
+   * （高亮很细、颜色也可能与地图撞色）。有了它就有一条能变红的断言，
+   * 而不是"看起来好像有框"。
+   */
+  lastHighlight: { kind: SelectionKind; id: string } | null
 }
 
 export interface MapOverlayOptions {
@@ -106,6 +116,8 @@ export interface MapOverlayOptions {
   onOpenLink?: (link: string) => void
   /** 右键删除标记/标注 */
   onDeleteMarker?: (placement: MarkerPlacement) => void
+  /** 按下标记/文字时先选中它（用户要的「先选中，再决定操作」） */
+  onSelect?: (hit: { kind: 'marker' | 'label'; id: string }) => void
   /** 拖动移动的四个阶段（客户端坐标；世界坐标换算由上层负责） */
   onEntityDragStart?: (placement: MarkerPlacement, client: { x: number; y: number }) => void
   onEntityDragMove?: (client: { x: number; y: number }) => void
@@ -113,6 +125,14 @@ export interface MapOverlayOptions {
   onEntityDragCancel?: () => void
   /** 注入图标可用性校验（测试用；默认用 obsidian 的 getIcon） */
   hasIcon?: (name: string) => boolean
+  /**
+   * 当前选中项（每帧现读）—— 覆盖层据此画高亮。
+   *
+   * 高亮画在**覆盖层**上（它常驻 `pointer-events: none`），所以任何高亮都**不会**
+   * 影响原生画布的命中测试。这是硬约束：一旦为了让高亮"可点"而打开它的 pointer-events，
+   * 整个画布的框选/平移就会失灵。
+   */
+  getSelection?: () => MapSelection | null
   /** 进行中的路径/区域草稿（预览用；由编辑器提供） */
   getDraft?: () => MapDraft | null
   /** 名称字号倍率（用户设置；1 = 默认） */
@@ -242,6 +262,7 @@ export class MapOverlay {
     labelCssPx: null,
     lastDurationMs: 0,
     lastError: null,
+    lastHighlight: null,
   }
 
   constructor(options: MapOverlayOptions) {
@@ -555,6 +576,7 @@ export class MapOverlay {
         host,
         onOpenLink: (link) => this.options.onOpenLink?.(link),
         onDelete: (placement) => this.options.onDeleteMarker?.(placement),
+        ...(this.options.onSelect ? { onSelect: this.options.onSelect } : {}),
         ...(this.options.onEntityDragStart ? { onDragStart: this.options.onEntityDragStart } : {}),
         ...(this.options.onEntityDragMove ? { onDragMove: this.options.onEntityDragMove } : {}),
         ...(this.options.onEntityDragEnd ? { onDragEnd: this.options.onEntityDragEnd } : {}),
@@ -903,7 +925,57 @@ export class MapOverlay {
     const draft = this.options.getDraft?.() ?? null
     if (draft) drawDraft(ctx, layer, draft)
 
+    // 选中高亮画在**最上层**（连草稿预览之上）：用户点了某个对象之后，第一眼要看到"选中了谁"。
+    // 统计字段只在真的画了的时候才有值 —— 于是"高亮没画"能被断言抓到，而不是靠肉眼看截图。
+    this.stats.lastHighlight = this.drawSelection(ctx, plan, document_, targetRadius)
+
     if (this.hover) this.drawHover(ctx, plan, document_, targetRadius)
+  }
+
+  /**
+   * 选中高亮：标记画圈、路径/区域画彩色描边、地块描六边形边。
+   *
+   * 为什么不复用对象自己的颜色：地图上很可能就有一条**同色**的路径，
+   * 那样"选中"看起来跟没选一样。这里固定用一组高对比的强调色 + 虚线，
+   * 与对象自身样式区分开（也刻意不用主题色变量：覆盖层要在任何主题下都看得清）。
+   */
+  /**
+   * 选中高亮：**按表分派**（一个 kind 一个绘制函数，见 `selectionHighlight.ts`）。
+   *
+   * 为什么不在这个方法里 `switch`：用户已明确这个项目要长期加新对象种类
+   * （"更多层信息"、温度带、深度分层…），绘制是最容易被新种类撑爆的地方。
+   * 现在加一种对象只需要在 `SELECTION_HIGHLIGHTS` 里加一行。
+   *
+   * 返回值仍是"本帧到底画了什么"——`stats.lastHighlight` 据此可被断言（见 OverlayStats）。
+   */
+  private drawSelection(
+    ctx: CanvasRenderingContext2D,
+    plan: MapRenderPlan,
+    document_: MapDocument,
+    targetRadius: number,
+  ): { kind: SelectionKind; id: string } | null {
+    const selection = this.options.getSelection?.() ?? null
+    if (selection === null) return null
+
+    // 对象自身的线宽：路径/区域的高亮要比它略粗，否则细线上的高亮看不见
+    const objectWidth =
+      selection.kind === 'path'
+        ? (plan.paths.find((item) => item.id === selection.id)?.width ?? 0)
+        : selection.kind === 'region'
+          ? (plan.regions.find((item) => item.id === selection.id)?.borderWidth ?? 0)
+          : 0
+
+    ctx.save()
+    const drawn = SELECTION_HIGHLIGHTS[selection.kind]({
+      ctx,
+      plan,
+      document: document_,
+      id: selection.id,
+      targetRadius,
+      objectWidth,
+    })
+    ctx.restore()
+    return drawn ? { kind: selection.kind, id: selection.id } : null
   }
 
   /** 悬停预览：高亮笔刷将覆盖的格（绘制模式下用户据此判断落点） */

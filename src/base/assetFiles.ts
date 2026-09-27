@@ -124,3 +124,35 @@ export function listBundlePaths(paths: unknown): string[] {
 export function emptyBundleListHint(): string {
   return `库里没有找到定义文件（${BUNDLE_EXTENSIONS.map((extension) => `.${extension}`).join(' / ')}）。先用「导出定义文件…」生成一份，或者把别人给你的定义文件放进库。`
 }
+
+/**
+ * 笔记的扩展名（唯一白名单）。
+ *
+ * 只列 `.md`：这个选择器的用途是"把地图上的对象链到一篇笔记"，
+ * 而链接最终是交给 Obsidian 去打开的 —— 列出 `.canvas`、`.pdf` 之类只会让用户踩空。
+ */
+export const NOTE_EXTENSIONS: readonly string[] = ['md']
+
+/** 是不是一篇可链接的笔记（按扩展名判断，大小写不敏感） */
+export function isNotePath(path: unknown): boolean {
+  const extension = imageExtensionOf(path)
+  return extension.length > 0 && NOTE_EXTENSIONS.includes(extension)
+}
+
+/** 从"一串库内路径"里筛出笔记，去重并确定排序（规则与 `listImagePaths` 一致） */
+export function listNotePaths(paths: unknown): string[] {
+  if (!Array.isArray(paths)) return []
+  const unique = new Set<string>()
+  for (const item of paths) {
+    if (typeof item !== 'string') continue
+    const text = item.trim().replace(/\\/g, '/')
+    if (!isNotePath(text)) continue
+    unique.add(text)
+  }
+  return [...unique].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+/** 库里一篇笔记都没有时的可读提示 */
+export function emptyNoteListHint(): string {
+  return '库里没有找到笔记（.md）。先建一篇笔记，再回来链接它。'
+}
