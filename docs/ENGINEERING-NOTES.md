@@ -1574,8 +1574,8 @@ A3 的设置页瘦身要回答一个绕不开的问题：**哪些控件留在设
 剩下的路在 §8，交接状态在 `docs/HANDOFF.md` 末尾的「暂停点交接」。
 
 ```
-Shir0Tak1na                                            2026-09-23 / 2026-09-27
-DeepSeek Harness Agent · deepseek-v4-flash                         2026-09-27
-DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器）            2026-09-27
+Shir0Tak1na                                                2026-09-23 / 2026-09-27
+DeepSeek Harness Agent · deepseek-v4-flash                 2026-09-27
+DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器）  2026-09-27
 ```
 

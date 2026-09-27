@@ -561,6 +561,6 @@ docs/         用户手册 · 工程笔记 · 技术方案 · 各阶段实施记
 字号的实际大小，全部以实测为准。
 
 ```
-Shir0Tak1na                                          2026-09-23
-DeepSeek Harness Agent · deepseek-v4-flash-vision-exp  2026-09-23
+Shir0Tak1na                                                2026-09-23
+DeepSeek Harness Agent · deepseek-v4-flash-vision-exp      2026-09-23
 ```

@@ -170,8 +170,8 @@ Base 视图这一阶段同样是 **Shir0Tak1na** 与 **DeepSeek Harness Agent
 记在这里是因为它值得被记住：**异步加载必须显式发起，并留下可观测的结果。**
 
 ```
-Shir0Tak1na                                            2026-09-23
-DeepSeek Harness Agent · deepseek-v4-flash-vision-exp   2026-09-23
-DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器） 2026-09-27 · 后续轮次补签（未改本文正文）
+Shir0Tak1na                                                2026-09-23
+DeepSeek Harness Agent · deepseek-v4-flash-vision-exp      2026-09-23
+DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器）  2026-09-27 · 后续轮次补签（未改本文正文）
 ```
 

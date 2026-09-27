@@ -585,8 +585,8 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 设计草案在 `.trae/documents/温度带与深度分层-设计草案.md`（不在仓库里，是本地讨论稿）。
 
 ```
-Shir0Tak1na                                                         2026-09-27
-DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器）             2026-09-27
+Shir0Tak1na                                                2026-09-27
+DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器）  2026-09-27
 ```
 
 ## 待办工单（交给下一位 agent；两项都可独立开工）

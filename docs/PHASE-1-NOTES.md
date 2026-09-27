@@ -619,8 +619,8 @@ ctx.font = `600 ${fontPx}px var(--font-interface, sans-serif)`   // ← 整条�
 是他一句"调整滑块，字体只有阴影在变化"把它逼出来的。
 
 ```
-Shir0Tak1na                                            2026-09-23
-DeepSeek Harness Agent · deepseek-v4-flash-vision-exp   2026-09-23
-DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器） 2026-09-27 · 后续轮次补签（未改本文正文）
+Shir0Tak1na                                                2026-09-23
+DeepSeek Harness Agent · deepseek-v4-flash-vision-exp      2026-09-23
+DeepSeek Harness Agent · deepseek-v4.1-flash（Trae 容器）  2026-09-27 · 后续轮次补签（未改本文正文）
 ```
 
