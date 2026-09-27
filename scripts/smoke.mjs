@@ -134,6 +134,23 @@ function check(label, condition, detail = '') {
   }
 }
 
+/**
+ * 读文档里写着的"本次冒烟有多少条断言"，用来对账（见场景末尾那条自检）。
+ *
+ * 只取**每个文件的第一次**匹配：只有基线行会写成"N 条断言"，正文里提到旧数字的句子
+ * （例如"（977 → 982）"）不带"条断言"这个词，所以第一次匹配就是当前基线。
+ */
+function readDocumentedAssertionCounts() {
+  const files = ['docs/ENGINEERING-NOTES.md', 'docs/HANDOFF.md', 'README.md']
+  const found = []
+  for (const relative of files) {
+    const text = fs.readFileSync(path.join(root, relative), 'utf8')
+    const match = text.match(/(\d+)\s*条断言/)
+    if (match) found.push({ file: relative, value: Number(match[1]) })
+  }
+  return found
+}
+
 // ---------------------------------------------------------------- 环境桩
 
 if (typeof globalThis.MouseEvent !== 'function') {
@@ -8492,6 +8509,27 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     '超过上限时被拒绝并给出可读原因（不静默失败）',
     regionNote().includes('最多 32 个自定义区域类型'),
     regionNote(),
+  )
+
+  // ---------------------------------------------- 文档基线自检（防止基线漂移）
+  /**
+   * 文档里写着"本次冒烟有多少条断言"，这里让它自己对一次账。
+   *
+   * 为什么要有这条：这条基线在本项目里漂过**至少两次** ——
+   * 一次是手写错成 278（用 dot reporter 的点数"数行数"），一次是改了断言却没同步文档。
+   * "去读汇总行、不要目测"这条纪律靠人记总会漏，让脚本自己报错成本更低。
+   *
+   * ⚠️ 自指：这条 `check` 本身也会计进 `assertions`，所以比的是 `assertions + 1`。
+   * ⚠️ 加了新断言之后，请同步 `docs/ENGINEERING-NOTES.md` 与 `docs/HANDOFF.md` 里的基线数字
+   *   （两处都写在"冒烟测试"那一行），否则这条会红 —— 这正是它的用途。
+   */
+  const documented = readDocumentedAssertionCounts()
+  const expectedTotal = assertions + 1
+  const documentedText = documented.map((entry) => `${entry.file}=${entry.value}`).join(' · ')
+  check(
+    `文档里的基线数字与实测一致（${documentedText}）`,
+    documented.length > 0 && documented.every((entry) => entry.value === expectedTotal),
+    `实测（含本条）= ${expectedTotal}；文档 = ${documentedText || '（一处都没找到）'}`,
   )
 
   plugin.onunload()

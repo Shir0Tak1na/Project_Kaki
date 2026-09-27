@@ -474,7 +474,7 @@ canvases:
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
 node --test --test-isolation=none                 # 404 个单元测试
-node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian，37 个场景 / 984 条断言
+node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian（场景数 / 断言数见输出末行）
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```
 
@@ -503,8 +503,11 @@ docs/         用户手册 · 工程笔记 · 技术方案 · 各阶段实施记
 - **样式与图层**：✅ 已支持自定义路径/区域颜色、名称字体族、自定义地形、图层开关与图例；
   剩余：把图例画进导出文件、把样式设置一键应用到已有对象（需要一个可撤销的新操作）；
 - **Phase 4**：✅ SVG 与 PNG 导出已完成；剩余：多图层导出（分层出图）；
+  导出侧还有两处**已知缺口**：标记在导出里是固定小圆点、区域类型的不透明度与边框不进导出；
 - **Phase 5**：把自定义地形从"颜色 + 字形 + 图片"扩展到图块与变体；
-- **Phase 6**：移动端与触控笔（长按代替右键、单指绘制、双指平移缩放）。
+- **Phase 6**：移动端与触控笔（长按代替右键、单指绘制、双指平移缩放）；
+- **待你确认的验收项**：④ 自定义标记、③ 定义文件、⑤① 路径类型、⑤② 区域类型四份清单，
+  以及③ 的导入选择器与设置页防溢出（清单在 `docs/HANDOFF.md` 的 §4、§7、§8）。
 
 ## 许可证
 
