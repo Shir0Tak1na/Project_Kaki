@@ -87,10 +87,27 @@ import {
   type CustomTerrain,
 } from './render/terrainCatalog.ts'
 import { isBlankCustomId, suggestCustomId } from './render/customDefinitionId.ts'
+import {
+  DEFINITION_KIND_LABELS,
+  definitionIdNormalize,
+  definitionIdProblem,
+  definitionKindFieldHint,
+  describeRenamePlan,
+  renameReferences,
+  type DefinitionKind,
+  type RenameFilePlan,
+} from './render/definitionRename.ts'
+import {
+  RenameDefinitionModal,
+  type RenameModalFactory,
+  type RenameOutcome,
+  type RenamePreview,
+} from './ui/RenameDefinitionModal.ts'
 import { CUSTOM_MARKER_PREFIX } from './render/markerCatalog.ts'
 import { CUSTOM_PATH_TYPE_PREFIX } from './render/pathTypeCatalog.ts'
 import { CUSTOM_REGION_TYPE_PREFIX } from './render/regionTypeCatalog.ts'
 import { CUSTOM_TERRAIN_PREFIX } from './render/terrainCatalog.ts'
+import { defaultMapNameFromPath } from './data/mapFile.ts'
 import { MAX_CUSTOM_MARKERS, validateCustomMarkerInput, type CustomMarker } from './render/markerCatalog.ts'
 
 import {
@@ -145,6 +162,8 @@ const EXPORT_HEIGHT = 1000
 
 export default class ProjectKakiPlugin extends Plugin {
   private store: MapDocumentStore | null = null
+  /** 「改 ID…」对话框：默认用真实实现，测试里可注入替身 */
+  private renameModalFactory: RenameModalFactory = (app, options) => new RenameDefinitionModal(app, options)
   private layers: MapLayerManager | null = null
   /** 放置对话框的工厂：默认用真实对话框，可被替换（自动化测试 / 将来的批量导入） */
   private placeModalFactory: PlaceModalFactory = (app, options) => new PlaceMarkerModal(app, options)
@@ -1241,9 +1260,174 @@ export default class ProjectKakiPlugin extends Plugin {
     this.layers?.setStylePalette()
   }
 
+  // -------------------------------------------------- 改 ID 并迁移地图里的引用
+
+  /**
+   * 想改 ID 时先做校验与归一化（与"新增"共用同一套规则）。
+   *
+   * 为什么复用各目录的纯函数：如果改名走一套独立规则，就会出现"建得出来的 ID 改不过去"
+   * 或者"改完的字面量下次解析被判非法"这种自相矛盾的状态。
+   */
+  private validateRenameTarget(
+    kind: DefinitionKind,
+    fromId: string,
+    rawNewId: string,
+  ): { ok: true; toId: string } | { ok: false; problem: string } {
+    const trimmed = rawNewId.trim()
+    if (trimmed.length === 0) return { ok: false, problem: '请输入新的 ID（留空不会改动任何东西）' }
+    const problem = definitionIdProblem(kind, trimmed)
+    if (problem !== null) return { ok: false, problem }
+    const toId = definitionIdNormalize(kind, trimmed)
+    if (toId === null) return { ok: false, problem: `这个 ID 不能用（${definitionKindFieldHint(kind)}），换个写法试试` }
+    if (toId === fromId) return { ok: false, problem: `新 ID 与当前 ID 相同（都是 ${fromId}），不需要改` }
+    const taken = this.definitionIds(kind).filter((id) => id !== fromId)
+    if (taken.includes(toId)) {
+      return { ok: false, problem: `已经有一个${DEFINITION_KIND_LABELS[kind]}用了 ID ${toId}` }
+    }
+    return { ok: true, toId }
+  }
+
+  /** 某一类当前所有定义 ID（含内置：改名时不许撞上内置 ID，否则语义会串） */
+  private definitionIds(kind: DefinitionKind): string[] {
+    switch (kind) {
+      case 'terrain':
+        return this.pluginSettings.customTerrains.map((item) => item.id)
+      case 'marker':
+        return this.pluginSettings.customMarkers.map((item) => item.id)
+      case 'path':
+        return this.pluginSettings.pathTypes.map((item) => item.id)
+      case 'region':
+        return this.pluginSettings.regionTypes.map((item) => item.id)
+    }
+  }
+
+  /**
+   * 扫一遍库里所有地图文档，算出"改这个 ID 会动哪些文件、各几处"。
+   *
+   * **只读不写**：预览与执行共用它，于是"对话框里说的"与"实际做的"不可能不一致
+   * （与定义文件导入同一套路）。只读打开（版本过高）的文档一律跳过 —— 那些文件我们无权改写。
+   */
+  private async collectRename(
+    kind: DefinitionKind,
+    fromId: string,
+    toId: string,
+  ): Promise<{
+    files: RenameFilePlan[]
+    writes: Array<{ file: TFile; document: MapDocument; name: string; canvases: string[]; rest: Record<string, string | string[]> }>
+  }> {
+    const store = this.store
+    if (store === null) return { files: [], writes: [] }
+    const files: RenameFilePlan[] = []
+    const writes: Array<{
+      file: TFile
+      document: MapDocument
+      name: string
+      canvases: string[]
+      rest: Record<string, string | string[]>
+    }> = []
+    for (const file of store.listMapFiles()) {
+      const loaded = await store.load(file)
+      if (loaded.document === null || loaded.readOnly) continue
+      const result = renameReferences(loaded.document, kind, fromId, toId)
+      if (result.changed === 0) continue
+      files.push({ path: file.path, changed: result.changed })
+      writes.push({
+        file,
+        document: result.document,
+        name: loaded.frontmatter.name ?? defaultMapNameFromPath(file.path),
+        canvases: loaded.frontmatter.canvases,
+        rest: loaded.frontmatter.rest,
+      })
+    }
+    files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    return { files, writes }
+  }
+
+  /** 只算影响面，不写任何东西（对话框里实时显示） */
+  async previewDefinitionRename(kind: DefinitionKind, fromId: string, rawNewId: string): Promise<RenamePreview> {
+    const target = this.validateRenameTarget(kind, fromId, rawNewId)
+    if (!target.ok) return { ok: false, problem: target.problem }
+    const collected = await this.collectRename(kind, fromId, target.toId)
+    const text = describeRenamePlan({
+      kind,
+      fromId,
+      toId: target.toId,
+      files: collected.files,
+      totalChanged: collected.files.reduce((sum, item) => sum + item.changed, 0),
+    })
+    return { ok: true, text: `${text}\n（现在只是预览；点「改 ID」才会真正写盘）` }
+  }
+
+  /**
+   * 真正执行：地图文件里的引用 + 设置里的定义 ID 一起改。
+   *
+   * 顺序有讲究：**先改文件、再改设置**。反过来的话，中途失败会留下"设置里已经是新 ID、
+   * 但地图里还写着旧 ID"的状态 —— 那种状态下用户看到的是满地"未知（custom:旧）"，
+   * 会以为数据丢了。按现在的顺序，最坏情况是"文件已改、设置没改"，此时旧 ID 仍被地图引用，
+   * 重新跑一次改名即可收敛（幂等）。
+   */
+  async renameCustomDefinition(kind: DefinitionKind, fromId: string, rawNewId: string): Promise<RenameOutcome> {
+    const target = this.validateRenameTarget(kind, fromId, rawNewId)
+    if (!target.ok) return { ok: false, problem: target.problem }
+    const collected = await this.collectRename(kind, fromId, target.toId)
+    for (const write of collected.writes) {
+      await this.store?.writeNow(write.file, write.document, write.name, write.canvases, write.rest)
+    }
+    await this.patchDefinitionId(kind, fromId, target.toId)
+    // 已打开的画布要重新读盘，否则它内存里还是旧 ID（界面会显示"未知（旧 ID）"）
+    for (const item of collected.files) await this.layers?.reloadMap(item.path)
+    const totalChanged = collected.files.reduce((sum, item) => sum + item.changed, 0)
+    const report = describeRenamePlan({ kind, fromId, toId: target.toId, files: collected.files, totalChanged })
+    // 多行文本走报告面板（与地图状态报告同一套路），不塞进 Notice
+    this.openReport({ title: '改 ID 完成', text: report })
+    return { ok: true, report }
+  }
+
+  /** 把设置里那一条定义的 ID 换掉（并维护区域预设色的镜像字段） */
+  private async patchDefinitionId(kind: DefinitionKind, fromId: string, toId: string): Promise<void> {
+    const patch = <T extends { id: string }>(list: T[]): T[] =>
+      list.map((item) => (item.id === fromId ? { ...item, id: toId } : item))
+    switch (kind) {
+      case 'terrain':
+        this.pluginSettings = { ...this.pluginSettings, customTerrains: patch(this.pluginSettings.customTerrains) }
+        break
+      case 'marker':
+        this.pluginSettings = { ...this.pluginSettings, customMarkers: patch(this.pluginSettings.customMarkers) }
+        break
+      case 'path': {
+        const pathTypes = patch(this.pluginSettings.pathTypes)
+        this.pluginSettings = { ...this.pluginSettings, pathTypes, pathColors: pathColorsFromEntries(pathTypes) }
+        break
+      }
+      case 'region': {
+        const regionTypes = patch(this.pluginSettings.regionTypes)
+        this.pluginSettings = { ...this.pluginSettings, regionTypes, regionColors: regionColorsFromEntries(regionTypes) }
+        break
+      }
+    }
+    await this.saveData(this.pluginSettings)
+    this.layers?.setStylePalette()
+  }
+
+  /** 打开「改 ID…」对话框（设置页每一行自定义定义都有入口） */
+  openRenameDefinitionModal(kind: DefinitionKind, id: string, displayName: string): void {
+    const options = {
+      kindLabel: DEFINITION_KIND_LABELS[kind],
+      currentId: id,
+      displayName: displayName.length > 0 ? displayName : id,
+      onPreview: (rawNewId: string) => this.previewDefinitionRename(kind, id, rawNewId),
+      onConfirm: (rawNewId: string) => this.renameCustomDefinition(kind, id, rawNewId),
+    }
+    this.renameModalFactory(this.app, options).open()
+  }
+
+  /** 供测试注入替身（与 `setReportModalFactory` 同一套路） */
+  setRenameModalFactory(factory: RenameModalFactory): void {
+    this.renameModalFactory = factory
+  }
+
   /** 改名称字体族（空串 = 跟随主题）；非法串会被收敛成空串而不是透传给 canvas */
-  async setLabelFontFamily(value: string): Promise<void> {
-    const next = normalizeFontFamily(value)
+  async setLabelFontFamily(value: string): Promise<void> {    const next = normalizeFontFamily(value)
     if (next === this.pluginSettings.labelFontFamily) return
     this.pluginSettings = { ...this.pluginSettings, labelFontFamily: next }
     await this.saveData(this.pluginSettings)

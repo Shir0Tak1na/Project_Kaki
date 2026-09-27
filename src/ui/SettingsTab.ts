@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 插件设置。
  *
  * 分两类：
@@ -410,6 +410,11 @@ export class CartographerSettingTab extends PluginSettingTab {
           }),
         )
         .addButton((button) =>
+          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+            this.plugin.openRenameDefinitionModal('terrain', terrain.id, terrain.label)
+          }),
+        )
+        .addButton((button) =>
           button.setButtonText('删除').onClick(() => {
             void this.plugin.removeCustomTerrain(index)
             this.rerenderKeepingScroll()
@@ -655,6 +660,11 @@ export class CartographerSettingTab extends PluginSettingTab {
             .onChange((value) => {
               void this.plugin.updateCustomMarker(index, { label: value })
             }),
+        )
+        .addButton((button) =>
+          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+            this.plugin.openRenameDefinitionModal('marker', marker.id, marker.label)
+          }),
         )
         .addButton((button) =>
           button.setButtonText('删除').onClick(() => {
@@ -914,6 +924,13 @@ export class CartographerSettingTab extends PluginSettingTab {
               })
             }),
         )
+        // 改 ID 同样只给自定义类型：内置类型的 ID 写死在代码里，改了等于把内置语义改坏
+        .addButton((button) => {
+          if (!isCustom) return
+          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+            this.plugin.openRenameDefinitionModal('path', entry.id, entry.label)
+          })
+        })
         // 删除只给自定义类型：内置 4 种删掉会让旧地图的路径全部变成"未知类型"
         .addButton((button) => {
           if (!isCustom) return
@@ -1136,6 +1153,13 @@ export class CartographerSettingTab extends PluginSettingTab {
                 })
             }),
         )
+        // 改 ID 同样只给自定义类型（理由同路径类型一节）
+        .addButton((button) => {
+          if (!isCustom) return
+          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+            this.plugin.openRenameDefinitionModal('region', entry.id, entry.label)
+          })
+        })
         // 删除只给自定义类型：内置 6 种删掉会让旧地图的区域全部变成"未知类型"
         .addButton((button) => {
           if (!isCustom) return

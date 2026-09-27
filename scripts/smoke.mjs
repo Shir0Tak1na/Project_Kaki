@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 运行时冒烟测试：用桩替身模拟 Obsidian，把编译产物 main.js 真正加载并执行一遍。
  *
  * 桩环境**复刻 Phase 0 在 Obsidian 1.13.7 上实测到的真实结构**（见 docs/PHASE-0-RESULTS.md）：
@@ -8642,6 +8642,71 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     regionNote().includes('最多 32 个自定义区域类型'),
     regionNote(),
   )
+
+  // ---------------------------------------------- 改 ID 并迁移地图里的引用
+  /**
+   * 这是**唯一会改动用户已有地图文件**的功能，所以断言必须盯住三件事：
+   * 改之前说清影响面、改之后文件里真的换了、以及冲突时一个字节都不许动。
+   */
+  let renameReport = null
+  plugin.setReportModalFactory((_app, options) => {
+    renameReport = options
+    return { open() {} }
+  })
+  const mapFile = plugin.store.listMapFiles().find((file) => file.path.endsWith('.map.md'))
+  const renameSeed = await plugin.store.load(mapFile)
+  const seededDoc = renameSeed.document
+  seededDoc.markers.push({ id: 'mk-rename', label: '待改名', p: [120, 120], icon: 'custom:renametest' })
+  await plugin.store.writeNow(
+    mapFile,
+    seededDoc,
+    renameSeed.frontmatter.name ?? 'World',
+    renameSeed.frontmatter.canvases,
+    renameSeed.frontmatter.rest,
+  )
+  await plugin.addCustomMarker({ id: 'renametest', label: '改名测试' })
+  check(
+    '地图文件里已经写进 custom:renametest（改名的前提）',
+    String(app.vault.files.get(mapFile.path)).includes('custom:renametest'),
+  )
+
+  const preview = await plugin.previewDefinitionRename('marker', 'custom:renametest', 'renamed')
+  check(
+    '改 ID 之前先说清影响面（几张地图、几处引用）',
+    preview.ok === true && preview.text.includes('1 张地图') && preview.text.includes('共 1 处'),
+    JSON.stringify(preview),
+  )
+  check(
+    '预览里写明"现在只是预览、点确认才写盘"',
+    preview.ok === true && preview.text.includes('预览'),
+    JSON.stringify(preview),
+  )
+  const unchangedBeforeApply = String(app.vault.files.get(mapFile.path))
+  const sameName = await plugin.previewDefinitionRename('marker', 'custom:renametest', 'renametest')
+  check('新 ID 与旧 ID 相同时被拒绝（不是"改了 0 处的假成功"）', sameName.ok === false, JSON.stringify(sameName))
+
+  const renamed = await plugin.renameCustomDefinition('marker', 'custom:renametest', 'renamed')
+  check('改名执行成功', renamed.ok === true, JSON.stringify(renamed))
+  const afterText = String(app.vault.files.get(mapFile.path))
+  check(
+    '地图文件里的引用被一起改掉（旧 ID 一处不留）',
+    afterText.includes('custom:renamed') && !afterText.includes('custom:renametest'),
+    afterText.slice(afterText.indexOf('custom:'), afterText.indexOf('custom:') + 120),
+  )
+  check(
+    '设置里的定义 ID 也改了（否则地图会显示"未知（旧 ID）"）',
+    plugin.getSettings().customMarkers.some((marker) => marker.id === 'custom:renamed') &&
+      !plugin.getSettings().customMarkers.some((marker) => marker.id === 'custom:renametest'),
+    JSON.stringify(plugin.getSettings().customMarkers.map((marker) => marker.id)),
+  )
+  check(
+    '结果走报告面板（多行影响面不塞进 Notice）',
+    renameReport !== null && String(renameReport.text).includes('custom:renamed'),
+    JSON.stringify(renameReport === null ? null : String(renameReport.text).slice(0, 80)),
+  )
+  check('未受影响的地图内容没被动过（只改了该改的那一处）', unchangedBeforeApply.replace('custom:renametest', 'custom:renamed') === afterText)
+
+  plugin.setReportModalFactory((app2, options) => new ReportModal(app2, options))
 
   // ---------------------------------------------- 文档基线自检（防止基线漂移）
   /**
