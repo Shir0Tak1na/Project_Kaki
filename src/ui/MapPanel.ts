@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 地图面板：右侧边栏里的一个视图，把常用动作变成按钮。
  *
  * 为什么需要它：常用命令原本只能走 `Ctrl+P` 再搜一次，用起来很累。
@@ -33,10 +33,12 @@ import {
   type LayerKey,
   type LayerVisibility,
 } from '../render/layerVisibility.ts'
+import { createCollapsibleGroup } from './collapsible.ts'
+import { QUICK_START_PANEL } from './quickStart.ts'
 
 export const MAP_PANEL_VIEW_TYPE = 'fictional-cartographer-panel'
 
-export type PanelActionGroup = 'panel' | 'map' | 'edit' | 'file' | 'dev'
+export type PanelActionGroup = 'panel' | 'map' | 'edit' | 'def' | 'file' | 'dev'
 
 export interface PluginAction {
   /** 命令 id（不含插件前缀） */
@@ -109,12 +111,31 @@ export interface MapPanelDeps {
    * 注意面板**不**自己改状态：它连"状态存在哪里"都不该知道。
    */
   onToggleLayer: (key: LayerKey, value: boolean) => void
+  /**
+   * 面板顶部那份「快速上手」清单**现在要不要显示**（两份引导各管各的，`A3`）。
+   *
+   * 与 `getLayerVisibility` 同一理由：面板不认识插件设置，只拿"要显示什么"，
+   * 隐藏 / 恢复都交回外面执行（写设置 + 落盘都在 `main.ts`）。
+   */
+  getQuickStartVisible: () => boolean
+  /** 隐藏面板这份引导（落盘；设置页那份不受影响） */
+  onHideQuickStart: () => void
+  /**
+   * 重新显示面板这份引导。
+   *
+   * 隐藏之后面板仍留一行「显示」可点回来 —— 引导本身是"找不到入口"的解法，
+   * 做成单向门就自相矛盾了（用户明确要求"必须可关闭且可逆"）。
+   */
+  onShowQuickStart: () => void
 }
 
 const GROUP_ORDER: ReadonlyArray<{ group: PanelActionGroup; title: string }> = [
   { group: 'panel', title: '' },
   { group: 'map', title: '地图层' },
   { group: 'edit', title: '编辑' },
+  // 定义管理（增删改自定义地形/标记/路径类型/区域类型）：从设置页搬来之后单独成组，
+  // 摆在编辑与文件之间 —— 它既不是画布操作，也不是文件导入导出
+  { group: 'def', title: '地图定义' },
   { group: 'file', title: '文件与导出' },
   { group: 'dev', title: '开发工具（仅开发者模式）' },
 ]
@@ -285,6 +306,7 @@ export class MapPanelView extends ItemView {
     const summary = this.deps.getSummary()
     const visibility = this.deps.getLayerVisibility()
     const selection = this.deps.getSelection()
+    const quickStartVisible = this.deps.getQuickStartVisible()
     const rows = actions.map((action) => ({
       action,
       available: action.available ? action.available() : true,
@@ -304,6 +326,9 @@ export class MapPanelView extends ItemView {
       summary,
       layerSignature,
       selectionSignature,
+      // 引导的可见性也要进签名：否则点了「不再显示」之后签名没变，面板会**跳过重绘**，
+      // 清单看起来"点了没反应"（同 §5.9 那条"签名漏了状态就会静默不更新"）。
+      quickStartVisible ? 'qs:1' : 'qs:0',
       ...rows.map((row) => `${row.action.id}:${row.available ? 1 : 0}:${row.description}`),
     ].join('|')
     if (!force && this.rendered && signature === this.lastSignature) return
@@ -315,6 +340,8 @@ export class MapPanelView extends ItemView {
 
     const summaryEl = root.createEl('div', { cls: 'fc-panel-summary' })
     summaryEl.createEl('div', { cls: 'fc-panel-summary-body', text: summary })
+
+    this.renderQuickStart(root, quickStartVisible)
 
     this.renderSelection(root, selection)
 
@@ -493,12 +520,53 @@ export class MapPanelView extends ItemView {
 
   /** 建一个默认收起的组（`<details>`）：首屏只留"是什么 + 能干什么" */
   private openGroup(parent: HTMLElement, title: string, role: string): HTMLElement {
-    const details = parent.createEl('details', { cls: 'fc-selection-group' })
-    details.dataset.fcGroup = role
-    // 显式设成收起：假 DOM 里没有 `open` 属性时，断言"默认收起"才有意义
-    details.open = false
-    details.createEl('summary', { cls: 'fc-selection-group-title', text: title })
-    return details
+    // 折叠组的实现在 `collapsible.ts`（设置页与「地图定义」弹窗也用它）——
+    // 三处共用一份，避免"某处忘了显式 open = false"导致"默认收起"的断言静默失效
+    return createCollapsibleGroup(parent, { title, role })
+  }
+
+  /**
+   * 顶部那份「快速上手」清单（A3）。
+   *
+   * 与设置页那份**不是同一份文案**（`QUICK_START_PANEL` vs `QUICK_START_SETTINGS`）：
+   * 这一份讲"画的时候能干什么"，设置页那份讲"怎么开始画"。
+   *
+   * 可关闭、也可逆：隐藏后面板仍留一行「显示」——引导是"找不到入口"的解法，不能做成单向门。
+   */
+  private renderQuickStart(root: HTMLElement, visible: boolean): void {
+    if (!visible) {
+      const row = root.createEl('div', { cls: 'fc-quickstart-restore' })
+      row.dataset.fcQuickStart = 'panel-hidden'
+      row.createEl('span', { cls: 'fc-quickstart-restore-text', text: '快速上手已隐藏。' })
+      const show = row.createEl('button', { cls: 'fc-quickstart-action' })
+      show.dataset.fcRole = 'quickstart-show'
+      show.textContent = '显示'
+      show.addEventListener('click', () => {
+        this.lastSignature = null
+        this.deps.onShowQuickStart()
+        this.requestRender()
+      })
+      return
+    }
+
+    const block = root.createEl('div', { cls: 'fc-quickstart' })
+    block.dataset.fcQuickStart = 'panel'
+    block.createEl('div', { cls: 'fc-quickstart-title', text: '快速上手' })
+    const list = block.createEl('ol', { cls: 'fc-quickstart-list' })
+    for (const item of QUICK_START_PANEL) {
+      const row = list.createEl('li', { cls: 'fc-quickstart-item' })
+      row.createEl('span', { cls: 'fc-quickstart-item-title', text: item.title })
+      row.createEl('span', { cls: 'fc-quickstart-item-hint', text: item.hint })
+    }
+    const hide = block.createEl('button', { cls: 'fc-quickstart-action' })
+    hide.dataset.fcRole = 'quickstart-hide'
+    hide.textContent = '不再显示'
+    hide.addEventListener('click', () => {
+      // 先清签名：可见性马上会变，直接告诉面板"下次一定要重绘"
+      this.lastSignature = null
+      this.deps.onHideQuickStart()
+      this.requestRender()
+    })
   }
 
   private renderSelection(root: HTMLElement, selection: SelectionInfo | null): void {

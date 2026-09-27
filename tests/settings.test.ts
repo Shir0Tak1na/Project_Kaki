@@ -39,6 +39,8 @@ test('彻底坏的输入一律收敛成完整默认值（而不是抛异常或�
     'customTerrains',
     'layers',
     'showLegend',
+    'hideQuickStartSettings',
+    'hideQuickStartPanel',
   ] as const satisfies readonly (keyof CartographerSettings)[]
   for (const bad of [null, undefined, 42, 'nope', [], true, Symbol('x')]) {
     const settings = normalizeSettings(bad)
@@ -151,6 +153,41 @@ test('布尔字段：只有明确为 true 才为真（垃圾值一律当"关"）
   assert.equal(normalizeSettings({ showLegend: true }).showLegend, true)
   assert.equal(normalizeSettings({ developerMode: 'on' }).developerMode, false)
   assert.equal(normalizeSettings({ developerMode: true }).developerMode, true)
+})
+
+/* ------------------------------------------- 快速上手引导的可见性（A3）
+
+   两个布尔字段，口径与 showLegend / developerMode 完全一致：
+   默认显示（false）、只有明确 true 才是"已隐藏"、垃圾值当显示。
+   这里额外钉住"两份互不影响" —— 它们各自对应一份不同的文案与一处不同的界面。 */
+
+test('引导可见性：默认显示；明确 true 才是"已隐藏"；垃圾值一律当显示', () => {
+  assert.equal(DEFAULT_SETTINGS.hideQuickStartSettings, false)
+  assert.equal(DEFAULT_SETTINGS.hideQuickStartPanel, false)
+  assert.equal(normalizeSettings({}).hideQuickStartSettings, false)
+  assert.equal(normalizeSettings({}).hideQuickStartPanel, false)
+  assert.equal(normalizeSettings({ hideQuickStartSettings: true }).hideQuickStartSettings, true)
+  assert.equal(normalizeSettings({ hideQuickStartPanel: true }).hideQuickStartPanel, true)
+  // 垃圾值当"显示"：读不懂的设置只会多一次引导，而不是让人再也找不到入口
+  for (const bad of ['yes', 1, {}, [], 'true']) {
+    assert.equal(normalizeSettings({ hideQuickStartSettings: bad }).hideQuickStartSettings, false, String(bad))
+    assert.equal(normalizeSettings({ hideQuickStartPanel: bad }).hideQuickStartPanel, false, String(bad))
+  }
+})
+
+test('引导可见性：两份互不影响（关掉设置页那份不会顺手关掉面板那份）', () => {
+  const onlySettings = normalizeSettings({ hideQuickStartSettings: true })
+  assert.equal(onlySettings.hideQuickStartSettings, true)
+  assert.equal(onlySettings.hideQuickStartPanel, false)
+  const onlyPanel = normalizeSettings({ hideQuickStartPanel: true })
+  assert.equal(onlyPanel.hideQuickStartSettings, false)
+  assert.equal(onlyPanel.hideQuickStartPanel, true)
+})
+
+test('引导可见性：归一化是幂等的（写回再读回不改变结果）', () => {
+  const once = normalizeSettings({ hideQuickStartSettings: true, hideQuickStartPanel: 'maybe' })
+  const twice = normalizeSettings(JSON.parse(JSON.stringify(once)))
+  assert.deepEqual(twice, once)
 })
 
 test('图层对象是新建的（不与出厂默认共享引用，避免一处改动污染所有实例）', () => {

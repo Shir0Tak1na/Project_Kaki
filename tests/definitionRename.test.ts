@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 自定义定义"改 ID 并迁移引用"的单元测试。
  *
  * 这一层的赌注很大：它是**唯一会改动用户已有地图文件**的功能，
@@ -13,6 +13,7 @@ import {
   DEFINITION_KIND_FIELDS,
   countReferences,
   countReferencesById,
+  describeDeletionPlan,
   describeRenamePlan,
   renameReferences,
 } from '../src/render/definitionRename.ts'
@@ -140,6 +141,52 @@ test('describeRenamePlan：没引用时说"只改定义"，有引用时逐文件
   assert.match(plan, /Maps\/World\.map\.md：2 处/)
   assert.match(plan, /Maps\/Other\.map\.md：1 处/)
   assert.match(plan, /标记/)
+})
+
+test('describeDeletionPlan：没有引用时说"可以安全删除"，一个字都不提"回退样式"', () => {
+  const text = describeDeletionPlan({ kind: 'marker', id: 'custom:lighthouse', files: [], total: 0 })
+  assert.match(text, /没有地图引用它，可以安全删除/)
+  assert.match(text, /标记/)
+  assert.match(text, /custom:lighthouse/)
+  // 没有引用就没有影响面：这段额外的解释只会变成噪音
+  assert.doesNotMatch(text, /回退样式/)
+  assert.doesNotMatch(text, /张地图/)
+})
+
+test('describeDeletionPlan：有引用时给数字、逐文件明细，并说清"对象不会被删除"', () => {
+  const text = describeDeletionPlan({
+    kind: 'terrain',
+    id: 'custom:swamp2',
+    files: [
+      { path: 'Maps/World.map.md', count: 12 },
+      { path: 'Maps/Other.map.md', count: 3 },
+    ],
+    total: 15,
+  })
+  // 三件必须说清的事：多少、在哪、以及"数据没丢"
+  assert.match(text, /2 张地图里共 15 处引用 custom:swamp2/)
+  assert.match(text, /Maps\/World\.map\.md：12 处/)
+  assert.match(text, /Maps\/Other\.map\.md：3 处/)
+  assert.match(text, /这些对象不会被删除，仍留在文件里，只是画成回退样式（未知）。/)
+  assert.match(text, /可随时重新建回/)
+  assert.match(text, /地形/)
+})
+
+test('describeDeletionPlan：逐字比对全文（文案是承诺，不能随手改口径）', () => {
+  assert.equal(
+    describeDeletionPlan({
+      kind: 'path',
+      id: 'custom:highway',
+      files: [{ path: 'Maps/A.map.md', count: 2 }],
+      total: 2,
+    }),
+    [
+      '1 张地图里共 2 处引用 custom:highway：',
+      '  · Maps/A.map.md：2 处',
+      '这些对象不会被删除，仍留在文件里，只是画成回退样式（未知）。',
+      '删除的只是这条路径类型定义（custom:highway），可随时重新建回。',
+    ].join('\n'),
+  )
 })
 
 test('字段名表与四类定义一一对应（报告文案要说清改的是哪个字段）', () => {

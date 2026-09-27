@@ -98,12 +98,15 @@ import {
 import { isBlankCustomId, suggestCustomId } from './render/customDefinitionId.ts'
 import {
   DEFINITION_KIND_LABELS,
+  countReferences,
   definitionIdNormalize,
   definitionIdProblem,
   definitionKindFieldHint,
+  describeDeletionPlan,
   describeRenamePlan,
   renameReferences,
   type DefinitionKind,
+  type DeletionFilePlan,
   type RenameFilePlan,
 } from './render/definitionRename.ts'
 import {
@@ -112,6 +115,11 @@ import {
   type RenameOutcome,
   type RenamePreview,
 } from './ui/RenameDefinitionModal.ts'
+import { DefinitionManagerModal, type DefinitionModalFactory } from './ui/DefinitionManagerModal.ts'
+import {
+  ConfirmDefinitionDeleteModal,
+  type ConfirmDeleteModalFactory,
+} from './ui/ConfirmDefinitionDeleteModal.ts'
 import { CUSTOM_MARKER_PREFIX } from './render/markerCatalog.ts'
 import { listResolvedMarkerStyles } from './render/markerCatalog.ts'
 import { listResolvedTerrainStyles } from './render/terrainCatalog.ts'
@@ -176,6 +184,21 @@ export default class ProjectKakiPlugin extends Plugin {
   private store: MapDocumentStore | null = null
   /** 「改 ID…」对话框：默认用真实实现，测试里可注入替身 */
   private renameModalFactory: RenameModalFactory = (app, options) => new RenameDefinitionModal(app, options)
+  /**
+   * 「地图定义」弹窗（A3：四类定义的增删改从设置页搬到这里）。
+   *
+   * 默认工厂写成惰性闭包：真实弹窗只在"真的被打开"时构造，冒烟可以注入替身绕开假 DOM，
+   * 也可以读回这个默认工厂再自行实例化（与 `reportModalFactory` 同一手法）。
+   */
+  private definitionModalFactory: DefinitionModalFactory = (app, plugin) =>
+    new DefinitionManagerModal(app, plugin)
+  /**
+   * 「删除定义」确认框（**只在有地图引用它时**才弹，见 `requestRemoveCustomDefinition`）。
+   *
+   * 同样是惰性默认工厂：没有引用的删除走的是"直接删"这条快路，根本不碰这个工厂。
+   */
+  private deleteModalFactory: ConfirmDeleteModalFactory = (app, options) =>
+    new ConfirmDefinitionDeleteModal(app, options)
   private layers: MapLayerManager | null = null
   /** 放置对话框的工厂：默认用真实对话框，可被替换（自动化测试 / 将来的批量导入） */
   private placeModalFactory: PlaceModalFactory = (app, options) => new PlaceMarkerModal(app, options)
@@ -477,6 +500,17 @@ export default class ProjectKakiPlugin extends Plugin {
         run: () => this.importResourceBundle(),
       },
       {
+        // 定义管理从设置页搬出来之后的新家：侧栏面板「地图定义」组 + 命令面板都能到。
+        // 刻意**不给** `available`（也不需要地图层）：四类定义是插件设置里的数据，
+        // 没有打开任何 Canvas 时同样该能管理（与 export-resource-bundle 同一理由）。
+        id: 'manage-definitions',
+        name: '管理地图定义…',
+        icon: 'shapes',
+        group: 'def',
+        describe: () => '新增 / 删除 / 改 ID 自定义地形、标记、路径类型、区域类型',
+        run: () => this.openDefinitionManagerModal(),
+      },
+      {
         id: 'diagnose-canvas',
         name: '诊断当前 Canvas（开发用探针）',
         icon: 'stethoscope',
@@ -582,6 +616,14 @@ export default class ProjectKakiPlugin extends Plugin {
       getLayerVisibility: () => this.pluginSettings.layers,
       onToggleLayer: (key, value) => {
         void this.setLayerVisible(key, value)
+      },
+      // 「快速上手」清单：面板这份与设置页那份各存各的开关（两份文案不同源，见 quickStart.ts）
+      getQuickStartVisible: () => !this.pluginSettings.hideQuickStartPanel,
+      onHideQuickStart: () => {
+        void this.setQuickStartHidden('panel', true)
+      },
+      onShowQuickStart: () => {
+        void this.setQuickStartHidden('panel', false)
       },
     }))
 
@@ -1596,8 +1638,136 @@ export default class ProjectKakiPlugin extends Plugin {
     this.renameModalFactory = factory
   }
 
+  // -------------------------------------------------- 「地图定义」弹窗与删除定义
+
+  /** 打开「地图定义」弹窗（侧栏面板「地图定义」组与命令面板的共同入口） */
+  openDefinitionManagerModal(): void {
+    this.definitionModalFactory(this.app, this).open()
+  }
+
+  /** 供测试注入替身（与 `setReportModalFactory` 同一套路） */
+  setDefinitionModalFactory(factory: DefinitionModalFactory): void {
+    this.definitionModalFactory = factory
+  }
+
+  /** 同上：替换「删除定义」确认框（测试里用替身直接驱动"有引用才弹"这条分流） */
+  setDeleteModalFactory(factory: ConfirmDeleteModalFactory): void {
+    this.deleteModalFactory = factory
+  }
+
+  /** 取一条定义当前的显示名（找不到就用 ID）—— 只用于对话框标题，帮用户确认删的是哪一条 */
+  private definitionDisplayName(kind: DefinitionKind, id: string): string {
+    const found = ((): { label: string } | undefined => {
+      switch (kind) {
+        case 'terrain':
+          return this.pluginSettings.customTerrains.find((item) => item.id === id)
+        case 'marker':
+          return this.pluginSettings.customMarkers.find((item) => item.id === id)
+        case 'path':
+          return this.pluginSettings.pathTypes.find((entry) => entry.id === id)
+        case 'region':
+          return this.pluginSettings.regionTypes.find((entry) => entry.id === id)
+      }
+    })()
+    return found?.label ?? id
+  }
+
+  /**
+   * 扫一遍库里所有地图文档，数出"这条定义被谁引用了多少次"。
+   *
+   * **只读不写**：预览与"要不要拦一下"的判断共用它，于是"对话框里说的"与"实际做的"
+   * 不可能不一致（与 `collectRename` / 定义文件导入同一套路）。只读打开的文档一律跳过 ——
+   * 那些文件我们无权改写，也不该把它们算进影响面。
+   */
+  private async collectReferences(
+    kind: DefinitionKind,
+    id: string,
+  ): Promise<{ files: DeletionFilePlan[]; total: number }> {
+    const store = this.store
+    if (store === null) return { files: [], total: 0 }
+    const files: DeletionFilePlan[] = []
+    for (const file of store.listMapFiles()) {
+      const loaded = await store.load(file)
+      if (loaded.document === null || loaded.readOnly) continue
+      const count = countReferences(loaded.document, kind, id)
+      if (count === 0) continue
+      files.push({ path: file.path, count })
+    }
+    // 按路径排序：报告里顺序稳定才可比对（与 collectRename 一致）
+    files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    return { files, total: files.reduce((sum, item) => sum + item.count, 0) }
+  }
+
+  /**
+   * 把定义从设置里移除（复用各目录既有的 `removeCustom*`，行为与设置页时代一字不变）。
+   *
+   * 地形 / 标记按**下标**定位（它们的删除接口是按下标的），所以这里先把 id 换成下标；
+   * 找不到就不动（用户可能在别处已经删掉了）。
+   */
+  private async performRemoveCustomDefinition(kind: DefinitionKind, id: string): Promise<void> {
+    switch (kind) {
+      case 'terrain': {
+        const index = this.pluginSettings.customTerrains.findIndex((item) => item.id === id)
+        if (index >= 0) await this.removeCustomTerrain(index)
+        return
+      }
+      case 'marker': {
+        const index = this.pluginSettings.customMarkers.findIndex((item) => item.id === id)
+        if (index >= 0) await this.removeCustomMarker(index)
+        return
+      }
+      case 'path':
+        await this.removeCustomPathType(id)
+        return
+      case 'region':
+        await this.removeCustomRegionType(id)
+        return
+    }
+  }
+
+  /**
+   * 删除一条自定义定义（「地图定义」弹窗里每一行的「删除」）。
+   *
+   * ## 只在**有引用**时才拦一下
+   *
+   * - **没有人用它** → 直接删，只给一条 Notice。那种情况下没有任何影响面可说，
+   *   弹框只会白挡一下（用户明确要求"无引用就别打扰"）；
+   * - **有人用它** → 先弹确认框把影响面说清楚（几张地图、共几处、**对象不会被删**），
+   *   用户在看清之后才决定。
+   *
+   * 两种情况下真正执行的删除**完全一样**，也都不碰地图文件 —— 差别只在"要不要先让人看一眼"。
+   */
+  async requestRemoveCustomDefinition(kind: DefinitionKind, id: string): Promise<void> {
+    const displayName = this.definitionDisplayName(kind, id)
+    const collected = await this.collectReferences(kind, id)
+    if (collected.total === 0) {
+      await this.performRemoveCustomDefinition(kind, id)
+      new Notice(`已删除${DEFINITION_KIND_LABELS[kind]}定义 ${displayName}（没有地图在用它）`, NOTICE_MAX_MS)
+      return
+    }
+    this.deleteModalFactory(this.app, {
+      kindLabel: DEFINITION_KIND_LABELS[kind],
+      id,
+      displayName,
+      // 预览与判断共用同一次只读扫描的产物；真要重算也不写任何东西
+      onPreview: async () => ({
+        ok: true,
+        text: describeDeletionPlan({ kind, id, files: collected.files, total: collected.total }),
+      }),
+      onConfirm: async () => {
+        try {
+          await this.performRemoveCustomDefinition(kind, id)
+          return { ok: true }
+        } catch (error) {
+          return { ok: false, problem: error instanceof Error ? error.message : String(error) }
+        }
+      },
+    }).open()
+  }
+
   /** 改名称字体族（空串 = 跟随主题）；非法串会被收敛成空串而不是透传给 canvas */
-  async setLabelFontFamily(value: string): Promise<void> {    const next = normalizeFontFamily(value)
+  async setLabelFontFamily(value: string): Promise<void> {
+    const next = normalizeFontFamily(value)
     if (next === this.pluginSettings.labelFontFamily) return
     this.pluginSettings = { ...this.pluginSettings, labelFontFamily: next }
     await this.saveData(this.pluginSettings)
@@ -1667,6 +1837,31 @@ export default class ProjectKakiPlugin extends Plugin {
     if (next === this.pluginSettings.showLegend) return
     this.pluginSettings = { ...this.pluginSettings, showLegend: next }
     this.layers?.setLayers()
+    await this.saveData(this.pluginSettings)
+  }
+
+  /**
+   * 隐藏 / 重新显示「快速上手」清单。
+   *
+   * **两份各有各的开关**（设置页一份、侧栏面板一份）：它们是两份不同的文案
+   * （各自讲各自的入口），也出现在两个不同的地方 —— 用户可能只想关掉其中一份。
+   *
+   * 顺序与 `setShowLegend` 同套路：**先改内存 → 通知面板 → 再落盘**。
+   * 设置页那边由调用方自己重绘（它就在设置页里，知道要保住滚动位置）。
+   *
+   * ⚠️ 这个开关必须是**可逆**的：隐藏之后设置页要留一行「重新显示」，
+   * 否则用户一旦点错就再也找不到引导（引导本身正是"找不到入口"的解法）。
+   */
+  async setQuickStartHidden(where: 'settings' | 'panel', hidden: boolean): Promise<void> {
+    const next = hidden === true
+    if (where === 'settings') {
+      if (next === this.pluginSettings.hideQuickStartSettings) return
+      this.pluginSettings = { ...this.pluginSettings, hideQuickStartSettings: next }
+    } else {
+      if (next === this.pluginSettings.hideQuickStartPanel) return
+      this.pluginSettings = { ...this.pluginSettings, hideQuickStartPanel: next }
+    }
+    this.refreshPanel()
     await this.saveData(this.pluginSettings)
   }
 

@@ -72,8 +72,16 @@
 
 **现状（阻碍）**：四类 catalog 是**同一模式的四份实现**（各 400–600 行，结构几乎一字不差）。
 
+**定义管理界面的现状（A3 之后）**：四类定义的**新增 / 删除 / 改 ID** 集中在
+`src/ui/DefinitionManagerModal.ts` —— 一个弹窗里用 `createCollapsibleGroup(...)` 分成
+**四个默认收起**的组（`role` 依次 `terrain / marker / pathType / regionType`），
+每组各自渲染"列表 + 改 ID + 删除 + 新增"，**共用同一套渲染骨架**。
+入口只有一处：`main.ts` 的 `buildActions()` 里 `id: 'manage-definitions'`（`group: 'def'`），
+它同时出现在侧栏面板与命令面板。参数编辑仍留在 `SettingsTab`（那是"新对象默认值"，不是定义）。
+
 **落位时**：抽一个"定义目录"工厂（`id / label / 参数表 / 上限 / 前缀 / 三级回退`），四类改成配置；
-新的第五类只写配置 + 一处 `SELECTION_KINDS` 行。
+新的第五类只写配置 + 一处 `SELECTION_KINDS` 行 + `DefinitionManagerModal` 里加一组
+（**渲染骨架复用，不要第五份手写**）。
 **别做**：在抽象之前先复制第五份 —— 一旦有了两份以上真实使用者，抽象的形状才是被证据支持的。
 
 ### 3.4 视图旋转

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 自定义定义的**重命名迁移**：改一个定义的 ID 时，把地图里已经画好的引用一起改掉。
  *
  * 为什么要有这个：ID 是机器认的键，用户想改它（拼错了、想统一命名）时，
@@ -197,6 +197,51 @@ export interface RenamePlan {
   /** 逐文件的影响面（只含 `changed > 0` 的文件，按路径排序 —— 报告里顺序稳定才可比对） */
   files: RenameFilePlan[]
   totalChanged: number
+}
+
+export interface DeletionFilePlan {
+  /** 库内路径 */
+  path: string
+  /** 这份文件里引用了多少次 */
+  count: number
+}
+
+export interface DeletionPlan {
+  kind: DefinitionKind
+  /** 要删掉的定义 ID */
+  id: string
+  /** 逐文件的影响面（只含 `count > 0` 的文件，按路径排序 —— 报告里顺序稳定才可比对） */
+  files: DeletionFilePlan[]
+  /** 库里所有地图加起来引用了它多少次 */
+  total: number
+}
+
+/**
+ * 汇总一份"删除定义"的影响面。
+ *
+ * 为什么删除也要先说影响面：删除**不动地图数据**（格子/标记/路径/区域都还在文件里，
+ * 只是画成"未知"回退样式），但用户看不到这一点 —— 他能看到的只是"我画的地形变成了灰菱形"。
+ * 于是这段文案必须把**两件事分开说**：
+ * 1. 有哪些地图、各多少处在用它（"变了的是什么"）；
+ * 2. **这些对象不会被删除**、删除的只是这条定义、随时可以重建（"没变的是什么"）。
+ *
+ * `total === 0` 时不说任何"会变成未知"的话 —— 没有引用就没有影响面，
+ * 那种情况下的额外解释只会变成噪音（用户删的是一条从没被用过的定义）。
+ */
+export function describeDeletionPlan(plan: DeletionPlan): string {
+  const label = DEFINITION_KIND_LABELS[plan.kind]
+  if (plan.total === 0) {
+    return `没有地图引用它，可以安全删除：只会把${label}定义 ${plan.id} 从设置里移除。`
+  }
+  const lines = [`${plan.files.length} 张地图里共 ${plan.total} 处引用 ${plan.id}：`]
+  for (const file of plan.files) {
+    lines.push(`  · ${file.path}：${file.count} 处`)
+  }
+  lines.push(
+    '这些对象不会被删除，仍留在文件里，只是画成回退样式（未知）。',
+    `删除的只是这条${label}定义（${plan.id}），可随时重新建回。`,
+  )
+  return lines.join('\n')
 }
 
 /** 汇总一份计划：把"逐文件的改动数"拼成人话（确认框与报告共用，文案只有一份） */

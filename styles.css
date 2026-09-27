@@ -590,6 +590,167 @@
   font-size: var(--font-ui-smaller);
 }
 
+/* ---- 快速上手清单（设置页顶部一份、侧栏面板顶部一份） ---- */
+/*
+ * 两份清单的 DOM 同源（`quickStart.ts` 里是两份不同的文案，渲染在各自那一侧），
+ * 所以样式也只有这一份。要求有两条：
+ * 1) 一眼看出"这是一份引导"，但**不抢主体内容的注意力**（所以底色用次级背景、字号更小）；
+ * 2) 收起之后留下的那一行同样是它的一部分 —— 引导必须可逆（`fc-quickstart-restore`）。
+ */
+.fc-quickstart {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.fc-quickstart-title {
+  margin-bottom: 6px;
+  color: var(--text-normal);
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+}
+
+.fc-quickstart-list {
+  margin: 0;
+  padding-left: 1.4em;
+  font-size: var(--font-ui-smaller);
+}
+
+/* 一条一步：标题一行、说明紧随其后另起一行（挤在同一行会读成一句话） */
+.fc-quickstart-item {
+  margin: 4px 0;
+  color: var(--text-muted);
+}
+
+.fc-quickstart-item-title {
+  display: block;
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.fc-quickstart-item-hint {
+  display: block;
+}
+
+/* 「不再显示 / 重新显示」按钮：右下角，不跟正文抢视线 */
+.fc-quickstart-action {
+  margin: 8px 0 0;
+  padding: 2px 8px;
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+
+/* 隐藏之后留下的那一行：这句话本身就是"回来的路"（单向门是明确不做的） */
+.fc-quickstart-restore {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.fc-quickstart-restore .fc-quickstart-action {
+  margin: 0;
+}
+
+/* ---- 设置页的折叠分组（图层 / 新对象默认值） ---- */
+/*
+ * 折叠本身由 `collapsible.ts` 的 `<details open=false>` 负责，这里只管观感：
+ * 这些组是"进阶内容"，默认收起是对的 —— 首屏要留给出引导与最常用的两项。
+ */
+.fc-settings-group {
+  margin: 14px 0 4px;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 8px;
+}
+
+.fc-settings-group > summary.fc-settings-group-title {
+  cursor: pointer;
+  color: var(--text-normal);
+  font-weight: 600;
+  /* 收起时也要一眼看出"这里有东西可以展开" */
+  list-style: revert;
+}
+
+/* ---- 「地图定义」弹窗（A3：四类定义的增删改搬到这里） ---- */
+
+.fc-defmodal {
+  /* 四组都在同一个弹窗里，内容可能很长 */
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.fc-defmodal-group {
+  margin: 14px 0 4px;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 8px;
+}
+
+.fc-defmodal-group > summary.fc-defmodal-group-title {
+  cursor: pointer;
+  color: var(--text-normal);
+  font-weight: 600;
+  list-style: revert;
+}
+
+/*
+ * 弹窗里那几行控件同样可能很多（「新增自定义路径类型」一行 6 个控件）——
+ * 与设置页 `.fc-settings` 那一组同源：**空间够时什么都不变，不够时折行而不是溢出**。
+ * 这里只加"允许收缩 / 允许折行"，不改任何固定宽度、字号或间距。
+ */
+.fc-defmodal .setting-item {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.fc-defmodal .setting-item-info {
+  min-width: 0;
+}
+
+.fc-defmodal .setting-item-control {
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fc-defmodal .setting-item-control input[type='text'],
+.fc-defmodal .setting-item-control input[type='number'],
+.fc-defmodal .setting-item-control input[type='search'] {
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+}
+
+.fc-defmodal .setting-item-control select,
+.fc-defmodal .setting-item-control input[type='color'],
+.fc-defmodal .setting-item-control button,
+.fc-defmodal .setting-item-control .clickable-icon {
+  flex-shrink: 0;
+  max-width: 100%;
+}
+
+.fc-defmodal .fc-terrain-mode {
+  flex-wrap: wrap;
+}
+
+/* ---- 「删除定义」确认框 ---- */
+/* 影响面正文沿用报告/导入那一类的等宽正文观感（`.fc-rename-preview` 已在别处定义） */
+.fc-defdelete .fc-rename-preview {
+  max-height: 46vh;
+  overflow: auto;
+}
+
 /* ---- 设置页：自定义地形的「调色 / 图片」模式分段控件 ---- */
 
 .fc-terrain-mode {

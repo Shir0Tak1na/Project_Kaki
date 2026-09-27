@@ -94,6 +94,17 @@ export interface CartographerSettings {
   layers: LayerVisibility
   /** 是否显示画布上的图例（默认关：图例是"要看的时候才看"的东西） */
   showLegend: boolean
+  /**
+   * 是否隐藏**设置页顶部**的「快速上手」清单。
+   *
+   * 两份引导各有一个开关（设置页 / 侧栏面板），因为它们是两份不同的文案、
+   * 出现的时机也不同：用户可能只想关掉其中一份。
+   * 语义是"用户主动关掉的" —— 默认 `false`（显示），垃圾值也当显示，
+   * 这样"读不懂的设置"只会多一次引导，而不是让人再也找不到它。
+   */
+  hideQuickStartSettings: boolean
+  /** 是否隐藏**侧栏面板顶部**的「快速上手」清单（同上，两份互不影响） */
+  hideQuickStartPanel: boolean
 }
 
 /** 出厂路径类型目录（内置 4 种、参数即出厂值） */
@@ -114,6 +125,8 @@ export const DEFAULT_SETTINGS: CartographerSettings = {
   customMarkers: [],
   layers: DEFAULT_LAYER_VISIBILITY,
   showLegend: false,
+  hideQuickStartSettings: false,
+  hideQuickStartPanel: false,
 }
 
 export const LABEL_SCALE_MIN = 0.5
@@ -178,6 +191,10 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     // 老用户把它关掉过的话必须变成"隐藏网格"，不能因为换代就把他的选择丢掉。
     layers: layerVisibilityFromLegacy({ showGrid: source.showGrid, layers: source.layers }),
     showLegend: source.showLegend === true,
+    // 引导可见性：与 showLegend / developerMode 同一口径 —— 只有明确写着 true 才算"关掉了"。
+    // 反过来的话（垃圾值当"已隐藏"）会让用户与引导失联，而引导正是他唯一能找到入口的地方。
+    hideQuickStartSettings: source.hideQuickStartSettings === true,
+    hideQuickStartPanel: source.hideQuickStartPanel === true,
   }
 }
 

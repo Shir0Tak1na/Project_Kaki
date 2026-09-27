@@ -1841,6 +1841,41 @@ function captureReports(plugin) {
 }
 
 /**
+ * 打开「地图定义」弹窗（A3：四类定义的增删改从设置页搬到了这里）。
+ *
+ * 读回**默认工厂**再自行实例化 —— 与 `captureReports` 的做法一致：我们不拦截它，
+ * 而是要拿到真实实现，然后用假 DOM（`FakeSetting.created`）驱动它的控件。
+ * 这一步替代了旧的「`plugin.settingTabs[0].display()` 然后去设置页里找控件」。
+ */
+function openDefinitionManager(plugin) {
+  const modal = plugin.definitionModalFactory(plugin.app, plugin)
+  modal.open()
+  return modal
+}
+
+/**
+ * 捕获「删除定义」确认框收到的选项（与 `captureReports` / `captureExportModals` 同一套路）。
+ *
+ * 用来钉住 A3 的一条明确要求：**只在有地图引用它时才拦一下**。
+ * 没有引用的删除走的是"直接删"那条快路，根本不会碰这个工厂 ——
+ * 所以"`opened` 是空的"本身就是"没有弹窗打扰用户"的证据。
+ */
+function captureDeleteModals(plugin) {
+  const opened = []
+  const defaultFactory = plugin.deleteModalFactory
+  plugin.setDeleteModalFactory((_app, options) => {
+    opened.push(options)
+    return { open() {} }
+  })
+  return {
+    opened,
+    last: () => opened.at(-1),
+    restore: () => plugin.setDeleteModalFactory(defaultFactory),
+    defaultFactory,
+  }
+}
+
+/**
  * 捕获「导出地图」对话框收到的选项（与 `captureReports` 同一套路）。
  *
  * 为什么要捕获：对话框里"范围/格式/区域"这些内容全是 `main.ts` 现算出来传进去的，
@@ -3570,8 +3605,24 @@ console.log('\n场景 18：名称字号的实测标定与用户可调（"字太�
   check('设置界面已渲染 Project Kaki 标题', heading?.textContent === 'Project Kaki', String(heading?.textContent))
   const sliderSetting = FakeSetting.created.find((setting) => setting.slider)
   check('设置界面有字号滑块', sliderSetting !== undefined)
-  const gridSetting = FakeSetting.created.find((setting) => setting.info.name === '显示六边形网格')
-  check('设置界面有网格开关', gridSetting?.toggle?.value === true, String(gridSetting?.toggle?.value))
+  // A3：设置页原来那一行「显示六边形网格」已撤掉 —— 它和图层开关是**同一个值**（`setLayerVisible`
+  // 是唯一入口），留两个入口只会让人以为是两件事。现在网格开关只出现在「图层」折叠组里
+  // （工具条上还有同一个开关，那是画图时手边需要的那个）。
+  const legacyGrid = FakeSetting.created.find((setting) => setting.info.name === '显示六边形网格')
+  check('设置页里不再有重复的「显示六边形网格」那一行（它并入了图层开关）', legacyGrid === undefined)
+  const gridSetting = FakeSetting.created.find((setting) => setting.info.name === '显示网格')
+  check('设置页的网格开关带出当前值（默认显示）', gridSetting?.toggle?.value === true, String(gridSetting?.toggle?.value))
+  check(
+    '图层开关住在默认收起的「图层」折叠组里（首屏留给出引导与最常用的两项）',
+    gridSetting?.containerEl?.tagName === 'DETAILS' &&
+      gridSetting?.containerEl?.open === false &&
+      gridSetting?.containerEl?.dataset?.fcGroup === 'layers',
+    JSON.stringify({
+      tag: gridSetting?.containerEl?.tagName,
+      open: gridSetting?.containerEl?.open,
+      role: gridSetting?.containerEl?.dataset?.fcGroup,
+    }),
+  )
   check(
     '滑块带当前倍率与合法区间',
     sliderSetting?.slider.value === 1 &&
@@ -4535,15 +4586,19 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
     firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
   }
+  // 定义管理（A3）从设置页搬到了「地图定义」弹窗：控件由弹窗建，断言因此改成对着弹窗取。
+  // 每次 openSettings() 都会**新开一个弹窗**（新的 contentEl），旧对象随即过期 ——
+  // 与设置页整页重建是同一回事，调用方在动作之后都要重新拿一次控件。
+  let defModal = null
   const openSettings = () => {
     FakeSetting.created.length = 0
-    plugin.settingTabs[0].display()
+    defModal = openDefinitionManager(plugin)
     return FakeSetting.created
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  /** 设置页底部那一行"就地提示"（按 `dataset.fcNote` 取 —— 设置页现在有两节各一条） */
+  /** 弹窗里那一行"就地提示"（按 `dataset.fcNote` 取 —— 四节各一条） */
   const noteText = () =>
-    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'terrain')
+    collectByClass(defModal.contentEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'terrain')
       ?.textContent ?? ''
   /** 画一笔地形（世界坐标） */
   const paintAt = (x, y) => {
@@ -4556,12 +4611,12 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
    * 把某条自定义地形切到指定模式。
    *
    * 模式控件是"地形 N · 显示名"那一行右侧的两个按钮（`dataset.mode`）。
-   * 换了模式之后设置页会整页重绘，所以这里切完再 `openSettings()` 一次，
+   * 换了模式之后弹窗会整块重绘，所以这里切完再 `openSettings()` 一次，
    * 调用方拿到的才是新控件（旧对象是过期的 —— 这个坑本项目已经踩过）。
    */
   const switchMode = async (label, mode) => {
     openSettings()
-    const container = plugin.settingTabs[0].containerEl
+    const container = defModal.contentEl
     const row = collectByClass(container, 'fc-terrain-mode').find((candidate) =>
       (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
     )
@@ -4573,10 +4628,10 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     openSettings()
   }
 
-  // ---------------------------------------------------------- 设置界面：新增
+  // ---------------------------------------------------------- 弹窗：新增
   openSettings()
   const addSetting = settingNamed('新增自定义地形')
-  check('设置页有「新增自定义地形」一节', addSetting !== undefined)
+  check('「地图定义」弹窗里有「新增自定义地形」一节（A3：它已经从设置页搬走了）', addSetting !== undefined)
   check(
     '新增区有 ID、显示名、颜色三个控件（ID 与显示名必须分开，否则又会被耦合在一起）',
     (addSetting?.texts?.length ?? 0) === 2 && addSetting?.colorPicker !== undefined,
@@ -4881,26 +4936,79 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(oldLoaded.issues.map((issue) => issue.message)),
   )
 
-  // ---------------------------------------------------------- 删除定义：数据不受影响
-  openSettings()
-  await settingNamed('名称与颜色 · 沼泽地').button.click()
-  check(
-    '删除后设置里没有它了',
-    plugin.getSettings().customTerrains.length === 3 && !plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:marsh'),
-    JSON.stringify(plugin.getSettings().customTerrains.map((terrain) => terrain.id)),
-  )
-  check(
-    '删除定义**不会**删掉已经画好的格子（不可逆的数据操作绝不能顺手做）',
-    Object.values(doc().terrain).some((cell) => cell.t === 'custom:marsh'),
-    String(Object.values(doc().terrain).filter((cell) => cell.t === 'custom:marsh').length),
-  )
-  check('工具条随之少一个按钮', terrainButtons().length === 12, String(terrainButtons().length))
-  const afterDelete = frame()
-  check(
-    '被删掉定义的那些格子仍在绘制（回退视觉，而不是消失）',
-    afterDelete.calls.drawImage === Object.keys(doc().terrain).length,
-    `文档格数=${Object.keys(doc().terrain).length} drawImage=${afterDelete.calls.drawImage}`,
-  )
+  // ---------------------------------------------------------- 删除定义：有引用才拦一下，数据不受影响
+  // A3 的明确要求：**有地图引用它时**先弹影响面确认框，看清再删；
+  // **没有引用**则直接删、一个字都不打扰（无影响面可说，弹框只会白挡一下）。
+  const deletes = captureDeleteModals(plugin)
+  try {
+    openSettings()
+    const beforeDeleteData = plugin._data
+    await settingNamed('名称与颜色 · 沼泽地').button.click()
+    // 「删除」按钮的处理函数不返回 promise（它 fire-and-forget 地发起影响面扫描），
+    // 所以这里要等一拍，让 collectReferences 的读盘跑完
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    check('有地图引用它时先弹确认框，而不是直接删', deletes.opened.length === 1, `弹了 ${deletes.opened.length} 次`)
+    const preview = await deletes.last()?.onPreview?.()
+    check(
+      '确认框的影响面说清了"几张地图、共几处"',
+      (preview?.text ?? '').includes('张地图') &&
+        (preview?.text ?? '').includes('处引用') &&
+        (preview?.text ?? '').includes('custom:marsh'),
+      String(preview?.text),
+    )
+    check(
+      '影响面里必须写明"这些对象不会被删除"、只会变成回退样式（否则用户会以为删除会毁掉地图）',
+      (preview?.text ?? '').includes('不会被删除') && (preview?.text ?? '').includes('回退样式'),
+      String(preview?.text),
+    )
+    check(
+      '只是弹了框：此刻定义**还没**被删（删不删由用户在对话框里决定）',
+      plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:marsh'),
+      JSON.stringify(plugin.getSettings().customTerrains.map((terrain) => terrain.id)),
+    )
+    check(
+      '而且此刻一个字节都没落盘（弹框本身不许改动数据 —— 要等用户在框里确认）',
+      plugin._data === beforeDeleteData,
+      String(plugin._data).slice(0, 160),
+    )
+    const outcome = await deletes.last()?.onConfirm?.()
+    check('在确认框里点删除之后才真的删掉', outcome?.ok === true, JSON.stringify(outcome))
+    check(
+      '删除后设置里没有它了',
+      plugin.getSettings().customTerrains.length === 3 && !plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:marsh'),
+      JSON.stringify(plugin.getSettings().customTerrains.map((terrain) => terrain.id)),
+    )
+    check(
+      '删除定义**不会**删掉已经画好的格子（不可逆的数据操作绝不能顺手做）',
+      Object.values(doc().terrain).some((cell) => cell.t === 'custom:marsh'),
+      String(Object.values(doc().terrain).filter((cell) => cell.t === 'custom:marsh').length),
+    )
+    check('工具条随之少一个按钮', terrainButtons().length === 12, String(terrainButtons().length))
+    const afterDelete = frame()
+    check(
+      '被删掉定义的那些格子仍在绘制（回退视觉，而不是消失）',
+      afterDelete.calls.drawImage === Object.keys(doc().terrain).length,
+      `文档格数=${Object.keys(doc().terrain).length} drawImage=${afterDelete.calls.drawImage}`,
+    )
+
+    // 对照组：一条**从没被画过**的定义 → 不弹框，直接删（这条断言在"总是拦一下"的写法上会失败）
+    const openedBefore = deletes.opened.length
+    openSettings()
+    await settingNamed('名称与颜色 · 幽灵地').button.click()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    check(
+      '没有引用时**不弹**确认框（无影响面可说就别打扰用户）',
+      deletes.opened.length === openedBefore,
+      `多弹了 ${deletes.opened.length - openedBefore} 次`,
+    )
+    check(
+      '没有引用时定义照样被删掉了（不弹框 ≠ 什么都没发生）',
+      !plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:ghost'),
+      JSON.stringify(plugin.getSettings().customTerrains.map((terrain) => terrain.id)),
+    )
+  } finally {
+    deletes.restore()
+  }
 
   plugin.onunload()
 }
@@ -5736,19 +5844,19 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
    */
   const defaultPickerFactory = plugin.imagePickerFactory
 
+  // 定义管理（A3）搬到了「地图定义」弹窗：控件对着弹窗取（设置页那一侧只剩引导与全局开关）。
+  // 每次 openSettings() 都会新开一个弹窗（新 contentEl），旧对象随即过期。
+  let defModal = null
   const openSettings = () => {
     FakeSetting.created.length = 0
-    plugin.settingTabs[0].display()
+    defModal = openDefinitionManager(plugin)
     return FakeSetting.created
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  /**
-   * 这一条地形新建后默认是「调色」模式，而调色模式下**不显示图片那一栏** ——
-   * 所以想选图必须先切到「图片」模式（这正是模式控件存在的意义）。
-   */
+  /** 切换某条地形的模式（模式控件是弹窗里"地形 N · 显示名"那一行右侧的两个按钮） */
   const switchMode = async (label, mode) => {
     openSettings()
-    const container = plugin.settingTabs[0].containerEl
+    const container = defModal.contentEl
     const row = collectByClass(container, 'fc-terrain-mode').find((candidate) =>
       (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
     )
@@ -5760,26 +5868,26 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
     openSettings()
   }
   const imageRow = () => settingNamed('图片 · 沼泽地')
-  const allNotes = () => collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').map((el) => el.textContent ?? '')
-  /** 地形那一节的就地提示（按 `dataset.fcNote` 取：设置页有两节，各有一条提示行） */
+  const allNotes = () => collectByClass(defModal.contentEl, 'fc-settings-note').map((el) => el.textContent ?? '')
+  /** 地形那一节的就地提示（按 `dataset.fcNote` 取：弹窗里四节各有一条提示行） */
   const noteText = () =>
-    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'terrain')
+    collectByClass(defModal.contentEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'terrain')
       ?.textContent ?? ''
   const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
   const imagePathInSettings = () => plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:marsh')?.imagePath
 
-  openSettings()
   /**
-   * ---- 设置页的布局契约（CSS 那一侧）----
+   * ---- 设置页那一侧的布局契约（与弹窗无关，单独渲染一次设置页来验）----
    *
    * CSS 布局在假 DOM 里**无法断言**（假 DOM 没有布局引擎）。所以这里只钉**挂载点**：
    * `styles.css` 里那一组"控件多的一行不许溢出"的规则挂在 `.fc-settings` 上，
    * 设置页必须真的带上这个类 —— 否则规则静默失效，用户下次又会看到"按钮跑到区域外面"
    * （这个现象是用户实测报的，当时「新增自定义路径类型」一行有 6 个控件，见 §5.31）。
    *
-   * ⚠️ 顺序有讲究：类是在 `display()` 里加的，所以必须先 `openSettings()` 再断言
+   * ⚠️ 顺序有讲究：类是在 `display()` 里加的，所以必须先渲染再断言
    *（第一版写反了，读到的是加类之前的 `setting-tab`）。
    */
+  plugin.settingTabs[0].display()
   const settingsRoot = plugin.settingTabs[0].containerEl
   check(
     '设置页容器带 fc-settings 类（防溢出规则的挂载点）',
@@ -5792,6 +5900,13 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
     /\.fc-settings\s+\.setting-item-control\s*\{[^}]*flex-wrap:\s*wrap/.test(stylesCssText),
     '未找到 .fc-settings .setting-item-control { … flex-wrap: wrap … }',
   )
+  check(
+    'styles.css 里也有挂在 .fc-defmodal 上的折行规则（弹窗里同样有控件很多的那几行）',
+    /\.fc-defmodal\s+\.setting-item-control\s*\{[^}]*flex-wrap:\s*wrap/.test(stylesCssText),
+    '未找到 .fc-defmodal .setting-item-control { … flex-wrap: wrap … }',
+  )
+
+  openSettings()
   check('默认是「调色」模式（新建时的默认值：不依赖任何外部资源）', plugin.getSettings().customTerrains[0]?.mode === 'color', String(plugin.getSettings().customTerrains[0]?.mode))
   check(
     '调色模式下**也有**图片那一栏（用户实测反馈"没有看到图片导入按钮" —— 找不到入口就等于没有这个功能）',
@@ -5842,14 +5957,9 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   check('弹窗标题带上了是哪一条地形（用户要能确认自己在给谁选图）', (good.calls[0]?.title ?? '').includes('沼泽地'), String(good.calls[0]?.title))
   check('选中的路径写进了设置', imagePathInSettings() === 'Assets/forest.png', String(imagePathInSettings()))
   check('并且已落盘（不是只改了内存）', persisted()?.customTerrains?.[0]?.imagePath === 'Assets/forest.png', JSON.stringify(persisted()?.customTerrains))
-  const tab = plugin.settingTabs[0]
   const noteDiag = () => {
-    const live = collectByClass(tab.containerEl, 'fc-settings-note')
-    return JSON.stringify({
-      noteElText: tab.noteEl?.textContent ?? null,
-      noteElStillInDom: live.includes(tab.noteEl),
-      liveNotes: live.map((el) => el.textContent ?? ''),
-    })
+    const live = collectByClass(defModal.contentEl, 'fc-settings-note')
+    return JSON.stringify({ liveNotes: live.map((el) => el.textContent ?? '') })
   }
   check(
     '就地提示说明了选中的是哪张图',
@@ -6046,18 +6156,20 @@ console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）�
     firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
     firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
   }
+  // 定义管理（A3）搬到了「地图定义」弹窗：模式控件对着弹窗取
+  let defModal = null
   const openSettings = () => {
     FakeSetting.created.length = 0
-    plugin.settingTabs[0].display()
+    defModal = openDefinitionManager(plugin)
     return FakeSetting.created
   }
   const terrainOf = () => plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:reef')
   const modeRow = (label) =>
-    collectByClass(plugin.settingTabs[0].containerEl, 'fc-terrain-mode').find((candidate) =>
+    collectByClass(defModal.contentEl, 'fc-terrain-mode').find((candidate) =>
       (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
     )
   const modeButton = (label, mode) =>
-    collectByClass(modeRow(label) ?? plugin.settingTabs[0].containerEl, 'fc-terrain-mode-button').find(
+    collectByClass(modeRow(label) ?? defModal.contentEl, 'fc-terrain-mode-button').find(
       (candidate) => candidate.dataset.mode === mode,
     )
   const switchMode = async (label, mode) => {
@@ -6870,22 +6982,24 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
   const iconElFor = (id) => collectByClass(markerElFor(id), 'fc-marker-icon')[0]
   /** 该标记的图标框里挂着的图片元素（图片模式才应该非空） */
   const imagesIn = (id) => (iconElFor(id)?.children ?? []).filter((child) => child.__isFakeImage === true)
+  // A3：自定义标记的增删改搬到了「地图定义」弹窗（设置页里只剩参数默认值）
+  let defModal = null
   const openSettings = () => {
     FakeSetting.created.length = 0
-    plugin.settingTabs[0].display()
+    defModal = openDefinitionManager(plugin)
     return FakeSetting.created
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  /** 自定义标记区底部那一行就地提示（按 `dataset.fcNote` 取，见 SettingsTab） */
+  /** 自定义标记区底部那一行就地提示（按 `dataset.fcNote` 取，见 DefinitionManagerModal） */
   const markerNoteText = () =>
-    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'marker')
+    collectByClass(defModal.contentEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'marker')
       ?.textContent ?? ''
   const markerRow = (label) =>
-    collectByClass(plugin.settingTabs[0].containerEl, 'fc-terrain-mode').find((candidate) =>
+    collectByClass(defModal.contentEl, 'fc-terrain-mode').find((candidate) =>
       (collectByClass(candidate, 'fc-terrain-mode-title')[0]?.textContent ?? '').includes(label),
     )
   const markerModeButton = (label, mode) =>
-    collectByClass(markerRow(label) ?? plugin.settingTabs[0].containerEl, 'fc-terrain-mode-button').find(
+    collectByClass(markerRow(label) ?? defModal.contentEl, 'fc-terrain-mode-button').find(
       (candidate) => candidate.dataset.mode === mode,
     )
   const switchMarkerMode = async (label, mode) => {
@@ -6901,10 +7015,10 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
     flushFrames()
   }
 
-  // ---------------------------------------------------------- 设置界面：新增
+  // ------------------------------------------- 「地图定义」弹窗：新增（A3 从设置页搬来）
   openSettings()
   const addMarkerSetting = settingNamed('新增自定义标记')
-  check('设置页有「新增自定义标记」一节', addMarkerSetting !== undefined)
+  check('「地图定义」弹窗里有「新增自定义标记」一节', addMarkerSetting !== undefined)
   check(
     '新增区有 ID 与显示名两个控件',
     (addMarkerSetting?.texts?.length ?? 0) === 2,
@@ -7319,13 +7433,27 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   const openSettings = () => {
     FakeSetting.created.length = 0
     plugin.settingTabs[0].display()
+    noteHost = plugin.settingTabs[0].containerEl
+    return FakeSetting.created
+  }
+  /**
+   * 打开「地图定义」弹窗（A3：路径类型的**增删改**搬到了这里；**参数行**仍在设置页）。
+   *
+   * 两侧各有一条 `dataset.fcNote === 'pathType'` 的就地提示，所以 `pathNote()` 跟着
+   * 最后一次打开的宿主走 —— 不然"非法 ID"与"非法虚线"这两条断言会读到对方的提示元素。
+   */
+  let defModal = null
+  let noteHost = plugin.settingTabs[0].containerEl
+  const openDefModal = () => {
+    FakeSetting.created.length = 0
+    defModal = openDefinitionManager(plugin)
+    noteHost = defModal.contentEl
     return FakeSetting.created
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  /** 路径类型区底部那一行就地提示（按 `dataset.fcNote` 取，见 SettingsTab） */
+  /** 当前宿主（设置页或弹窗）底部那一行路径类型就地提示（按 `dataset.fcNote` 取） */
   const pathNote = () =>
-    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'pathType')
-      ?.textContent ?? ''
+    collectByClass(noteHost, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'pathType')?.textContent ?? ''
   const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
   const pathOptions = () => collectByClass(toolbarEl(), 'fc-toolbar-path-option')
   const pathOption = (id) => pathOptions().find((button) => button.dataset.pathType === id)
@@ -7409,10 +7537,10 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   check('奇数段虚线被拒绝并给出原因', pathNote().includes('偶数'), pathNote())
   check('非法虚线没有改写目录', entryOf('river')?.params.dash.join(',') === riverDashBefore, String(entryOf('river')?.params.dash.join(',')))
 
-  // ---------------------------------------------------------- 自定义路径类型：新增
-  openSettings()
+  // ------------------------------- 自定义路径类型：新增（A3 从设置页搬进「地图定义」弹窗）
+  openDefModal()
   const addSetting = settingNamed('新增自定义路径类型')
-  check('设置页有「新增自定义路径类型」一节', addSetting !== undefined)
+  check('「地图定义」弹窗里有「新增自定义路径类型」一节', addSetting !== undefined)
   check('新增区有 ID / 显示名 / 线宽 / 虚线四个文本框 + 一个颜色选择器', (addSetting?.texts?.length ?? 0) === 4 && (addSetting?.colorPickers?.length ?? 0) === 1, `texts=${addSetting?.texts?.length} pickers=${addSetting?.colorPickers?.length}`)
   check('新增区的说明写清了 ID 规则与自动前缀', (addSetting?.info.desc ?? '').includes('custom:'), addSetting?.info.desc)
 
@@ -7449,7 +7577,7 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   )
 
   // 重复 ID（大小写不同）必须被拒绝：同一个 ID 两条定义说不清该用哪条
-  openSettings()
+  openDefModal()
   await settingNamed('新增自定义路径类型').texts[0].type('highway')
   await settingNamed('新增自定义路径类型').button.click()
   check('重复 ID 被拒绝', plugin.getSettings().pathTypes.filter((entry) => entry.id === 'custom:highway').length === 1)
@@ -7615,16 +7743,28 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   }
 
   // ---------------------------------------------------------- 删除定义：数据不动，画布回退
-  openSettings()
+  openDefModal()
   const deleteSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('官道') && (setting.buttons ?? []).some((button) => button.text === '删除'))
   check('自定义类型那两行里有一行带「删除」按钮（内置类型没有）', deleteSetting !== undefined)
   check(
     '内置类型行里没有「删除」按钮',
     !(FakeSetting.created.find((setting) => setting.info.name === '河流')?.buttons ?? []).some((button) => button.text === '删除'),
   )
+  // 这条自定义类型**已经被画到地图上过**（上面那条 custom:highway），所以属于"有引用"：
+  // A3 要求这时先弹影响面确认框；这里捕获它、看清影响面，再在框里确认删除。
+  const deletes = captureDeleteModals(plugin)
   const optionsBeforeDelete = pathOptions().length
   await deleteSetting.buttons.find((button) => button.text === '删除').click()
   await new Promise((resolve) => setTimeout(resolve, 20))
+  check('有地图引用它时先弹确认框，而不是直接删', deletes.opened.length === 1, `弹了 ${deletes.opened.length} 次`)
+  check(
+    '此刻定义**还没**被删（删不删由用户在对话框里决定）',
+    plugin.getSettings().pathTypes.some((entry) => entry.id === 'custom:highway'),
+    JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)),
+  )
+  const outcome = await deletes.last()?.onConfirm?.()
+  check('在确认框里点删除之后才真的删掉', outcome?.ok === true, JSON.stringify(outcome))
+  deletes.restore()
   check(
     '删除后设置里没有它了',
     plugin.getSettings().pathTypes.every((entry) => entry.id !== 'custom:highway'),
@@ -7675,9 +7815,9 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
     overflow.ok === false && overflow.problem.includes('32'),
     JSON.stringify(overflow),
   )
-  openSettings()
+  openDefModal()
   check(
-    '设置页在上限时写明「已达上限」',
+    '达到上限时弹窗里写明「已达上限」',
     (settingNamed('新增自定义路径类型')?.info.desc ?? '').includes('已达上限'),
     settingNamed('新增自定义路径类型')?.info.desc,
   )
@@ -8031,12 +8171,18 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   check('有东西可导入时确认按钮可用', plan?.canImport === true, String(plan?.canImport))
   check('打开对话框这一步还没有改任何设置（要等用户确认）', JSON.stringify(plugin.getSettings()) === settingsBefore)
 
-  const realModal = openRealImportModal(plan)
-  check('真对话框的确认按钮此时可点', buttonByRole('confirm')?.disabled === false, String(buttonByRole('confirm')?.disabled))
   // 设置页正开着：先渲染一次作为"导入前"的样子（下面要验证导入之后它自己刷新了）
   const settingsHas = (text) => FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(text))
   plugin.settingTabs[0].display()
-  check('前提：导入前设置页里还没有这份文件带来的地形', !settingsHas('火山'), '设置页里不该已经出现火山')
+  check('前提：导入前设置页里还没有这份文件带来的路径类型', !settingsHas('小径'), '设置页里不该已经出现小径')
+  // A3：地形/标记的**定义**住在「地图定义」弹窗里，所以"导入前没有火山"要去那边看。
+  // 注意顺序：下面 `openRealImportModal` 会清空并重建 `FakeSetting.created`（`buttonByRole` 依赖它）
+  FakeSetting.created.length = 0
+  openDefinitionManager(plugin)
+  check('前提：「地图定义」弹窗里还没有火山的定义', !settingsHas('火山'), '弹窗里不该已经出现火山')
+
+  const realModal = openRealImportModal(plan)
+  check('真对话框的确认按钮此时可点', buttonByRole('confirm')?.disabled === false, String(buttonByRole('confirm')?.disabled))
   clearNotices()
   await buttonByRole('confirm')?.click()
   await wait()
@@ -8095,11 +8241,18 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   check('导入成功后对话框关闭了', collectByClass(realModal?.contentEl, 'fc-import-plan').length === 0)
   check(
     '导入之后已打开的设置页自己刷新了（不需要用户关掉再打开设置）',
+    settingsHas('小径'),
+    FakeSetting.created.map((setting) => setting.info.name).join(' | '),
+  )
+  check('刷新后的设置页里也有新的区域类型（导入后不必关掉设置再打开）', settingsHas('绿洲'))
+  // 地形定义的新家：弹窗那边也应该看得到导入进来的火山（重开一次即可看到，数据已经写进去了）
+  FakeSetting.created.length = 0
+  openDefinitionManager(plugin)
+  check(
+    '导入进来的新地形在「地图定义」弹窗里（定义的新家）',
     settingsHas('火山'),
     FakeSetting.created.map((setting) => setting.info.name).join(' | '),
   )
-  check('刷新后的设置页里也有新的路径类型', settingsHas('小径'))
-  check('刷新后的设置页里也有新的区域类型（导入后不必关掉设置再打开）', settingsHas('绿洲'))
   capture.restore()
 
   // ---- 取消 = 一个字节都不改 ----
@@ -8283,14 +8436,26 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   const openSettings = () => {
     FakeSetting.created.length = 0
     plugin.settingTabs[0].display()
+    noteHost = plugin.settingTabs[0].containerEl
+    return FakeSetting.created
+  }
+  /**
+   * 打开「地图定义」弹窗（A3：区域类型的**增删改**搬到了这里；**参数行**仍在设置页）。
+   *
+   * 两侧各有一条 `dataset.fcNote === 'regionType'` 的就地提示，所以 `regionNote()`
+   * 跟着最后一次打开的宿主走（与场景 34 的 `pathNote()` 同一处理）。
+   */
+  let noteHost = plugin.settingTabs[0].containerEl
+  const openDefModal = () => {
+    FakeSetting.created.length = 0
+    const modal = openDefinitionManager(plugin)
+    noteHost = modal.contentEl
     return FakeSetting.created
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  /** 区域类型区底部那一行就地提示（按 `dataset.fcNote` 取，见 SettingsTab） */
+  /** 当前宿主（设置页或弹窗）底部那一行区域类型就地提示（按 `dataset.fcNote` 取） */
   const regionNote = () =>
-    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find(
-      (el) => el.dataset?.fcNote === 'regionType',
-    )?.textContent ?? ''
+    collectByClass(noteHost, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'regionType')?.textContent ?? ''
   const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
   const regionOptions = () => collectByClass(toolbarEl(), 'fc-toolbar-region-option')
   const regionOption = (id) => regionOptions().find((button) => button.dataset.regionType === id)
@@ -8474,10 +8639,10 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     JSON.stringify(legendLabels('region')),
   )
 
-  // ---------------------------------------------------------- 自定义区域类型：新增 → 用 → 删
-  openSettings()
+  // ------------------------------- 自定义区域类型：新增 → 用 → 删（A3 搬到「地图定义」弹窗）
+  openDefModal()
   const addSetting = settingNamed('新增自定义区域类型')
-  check('设置页有「新增自定义区域类型」一节', addSetting !== undefined)
+  check('「地图定义」弹窗里有「新增自定义区域类型」一节', addSetting !== undefined)
   check(
     '新增区有 ID / 显示名 / 不透明度 / 边框宽 / 边框虚线五个文本框 + 一个颜色选择器',
     (addSetting?.texts?.length ?? 0) === 5 && (addSetting?.colorPickers?.length ?? 0) === 1,
@@ -8525,11 +8690,25 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   check('自定义类型的颜色生效', custom.color === '#00aa88' && custom.opacity === 0.35, JSON.stringify(custom))
 
   // ---- 删掉自定义定义：地图数据不许被顺手删掉 ----
-  openSettings()
-  // 删除按钮在第二种行（与路径类型同构：名字行放参数，第二行放尺寸与删除）
-  const customSetting = FakeSetting.created.find((item) => (item.info.name ?? '').includes('边框 · 边境侯国'))
-  check('自定义区域类型那一行有删除按钮', customSetting?.button !== undefined)
-  await customSetting.button.click()
+  // 先落盘：删除时的影响面统计是**读文件**算出来的，内存里刚画的区域还没写进去就不算引用
+  //（否则这一节会静默走"没有引用 → 直接删"那条快路，确认框那几条断言就成了空转）
+  store.scheduleSave(file, doc(), 'Regions', [canvasPath])
+  await store.flush()
+  await settleEvents()
+  // 弹窗里「删除 / 改 ID」就在自定义类型自己那一行上（参数行住在设置页，那边没有删除按钮）
+  openDefModal()
+  const customSetting = FakeSetting.created.find(
+    (item) => (item.info.name ?? '').includes('边境侯国') && (item.buttons ?? []).some((button) => button.text === '删除'),
+  )
+  check('自定义区域类型那一行有删除按钮', customSetting !== undefined)
+  // 刚才用 custom:march 画过一个区域 → 属于"有引用"，A3 要求先弹影响面确认框
+  const deletes = captureDeleteModals(plugin)
+  await customSetting.buttons.find((button) => button.text === '删除').click()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('有地图引用它时先弹确认框，而不是直接删', deletes.opened.length === 1, `弹了 ${deletes.opened.length} 次`)
+  const outcome = await deletes.last()?.onConfirm?.()
+  check('在确认框里点删除之后才真的删掉', outcome?.ok === true, JSON.stringify(outcome))
+  deletes.restore()
   check('定义被删掉了', entryOf('custom:march') === undefined)
   check(
     '但地图上的那个区域仍在、type 也没被改写（删定义 ≠ 删数据）',
@@ -8554,7 +8733,7 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
    * 用户的反馈是"主要是需要自己手动输入各种 id、文件地址，输错也不知道怎么改"。
    * 这条链路要验的是：**一个字都不填也能建出来**，而且生成出来的 ID 可读、不撞车。
    */
-  openSettings()
+  openDefModal()
   const autoForm = settingNamed('新增自定义区域类型')
   check(
     '新增区的说明里写明「ID 可以留空、留空就自动生成」',
@@ -8577,7 +8756,7 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   )
   check('留空创建不留下"ID 不能为空"这类报错', !regionNote().includes('ID'), regionNote())
 
-  openSettings()
+  openDefModal()
   const autoForm2 = settingNamed('新增自定义区域类型')
   await (autoForm2?.texts ?? []).find((text) => (text.placeholder ?? '').includes('显示名')).type('后花园')
   await autoForm2.button.click()
@@ -8587,7 +8766,7 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     JSON.stringify(plugin.getSettings().regionTypes.filter((entry) => entry.label === '后花园').map((entry) => entry.id)),
   )
 
-  openSettings()
+  openDefModal()
   const autoForm3 = settingNamed('新增自定义区域类型')
   await (autoForm3?.texts ?? []).find((text) => (text.placeholder ?? '').includes('显示名')).type('My Forest')
   await autoForm3.button.click()
@@ -8602,26 +8781,34 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
    * 机制：每次改动都是整页重建，第一步 `containerEl.empty()` 会把滚动容器清空，
    * 浏览器随即把 `scrollTop` 钳回 0 —— 于是用户每改一项就被弹回顶部。
    * 桩里的 `empty()` 已如实模拟这一步（否则这条断言是空转的：什么都不做 scrollTop 也不会变）。
+   *
+   * A3：驱动这件事的按钮换了位置 —— 原来用的「设置页里的新增/删除定义」已经搬到
+   * 「地图定义」弹窗，而弹窗是**局部重建**（自己 `contentEl.empty()`，不经过设置页这套滚动机制）。
+   * 这里改用设置页里**仍然**走整页重建的入口：顶部「快速上手」的「不再显示」与「重新显示」
+   * —— 隐藏/恢复都要立刻重画整页，跟当初的新增/删除是同一类重建。
    */
   const scrollHost = plugin.settingTabs[0].containerEl
   scrollHost.scrollHeight = 2000
   scrollHost.clientHeight = 600
   openSettings()
   scrollHost.scrollTop = 420
-  const scrollForm = settingNamed('新增自定义区域类型')
-  await (scrollForm?.texts ?? []).find((text) => (text.placeholder ?? '').includes('显示名')).type('滚动测试')
-  await scrollForm.button.click()
+  const hideQuickStart = collectByClass(scrollHost, 'fc-quickstart-action')[0]
+  check('前提：设置页顶部有「不再显示」按钮（滚动契约的驱动入口）', hideQuickStart !== undefined)
+  fireEvent(hideQuickStart, 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
   check(
-    '新增之后设置页没跳回顶部（重建前后保住了滚动位置）',
+    '隐藏引导之后设置页没跳回顶部（重建前后保住了滚动位置）',
     scrollHost.scrollTop === 420,
     `scrollTop=${scrollHost.scrollTop}`,
   )
-  openSettings()
-  const removeScrollForm = FakeSetting.created.find((item) => (item.info.name ?? '').includes('边框 · 滚动测试'))
+  // 反向：恢复显示走的是同一条整页重建（不是只给"隐藏"打补丁）
+  const showQuickStart = collectByClass(scrollHost, 'fc-quickstart-action')[0]
+  check('隐藏之后仍有一行「重新显示」可点回来（引导不是单向门）', showQuickStart !== undefined)
   scrollHost.scrollTop = 310
-  await removeScrollForm.button.click()
+  fireEvent(showQuickStart, 'click')
+  await new Promise((resolve) => setTimeout(resolve, 20))
   check(
-    '删除定义之后同样不跳回顶部（同一条入口，不是只给"新增"打补丁）',
+    '恢复显示之后同样不跳回顶部（同一条入口，不是只给"隐藏"打补丁）',
     scrollHost.scrollTop === 310,
     `scrollTop=${scrollHost.scrollTop}`,
   )
@@ -8635,7 +8822,7 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     plugin.getSettings().regionTypes.filter((entry) => entry.id.startsWith('custom:')).length === 32,
     String(plugin.getSettings().regionTypes.filter((entry) => entry.id.startsWith('custom:')).length),
   )
-  openSettings()
+  openDefModal()
   const cappedSetting = settingNamed('新增自定义区域类型')
   check('达到上限时说明文字给出明确原因', (cappedSetting?.info.desc ?? '').includes('已达上限'), cappedSetting?.info.desc)
   await cappedSetting.texts[0].type('overflow')
@@ -9163,6 +9350,193 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   )
   changeField('type', 'mountain')
   check('改地形种类写进了文档', doc().terrain[cellKey(6, 0)]?.t === 'mountain', String(doc().terrain[cellKey(6, 0)]?.t))
+
+  plugin.onunload()
+}
+
+console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」引导与「地图定义」的新家')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const canvasPath = 'Maps/World.canvas'
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const settingsRoot = plugin.settingTabs[0].containerEl
+  const renderSettings = () => {
+    FakeSetting.created.length = 0
+    plugin.settingTabs[0].display()
+    return FakeSetting.created
+  }
+  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  /** 设置页顶部那一份引导（隐藏后这里就没有了，改用 `fc-quickstart-restore` 那一行） */
+  const quickStart = () => collectByClass(settingsRoot, 'fc-quickstart').find((el) => el.dataset?.fcQuickStart === 'settings')
+  const restoreRow = () => collectByClass(settingsRoot, 'fc-quickstart-restore').find((el) => el.dataset?.fcQuickStart === 'settings-hidden')
+  const settingsGroup = (role) => collectByClass(settingsRoot, 'fc-settings-group').find((el) => el.dataset?.fcGroup === role)
+  const quickStartAction = (root, role) =>
+    collectByClass(root, 'fc-quickstart-action').find((el) => el.dataset?.fcRole === role)
+  const itemTitles = (block) => collectByClass(block, 'fc-quickstart-item-title').map((el) => el.textContent ?? '')
+  const persisted = () => (plugin._data === null ? null : JSON.parse(plugin._data))
+
+  // ---------------------------------------------------------- 1. 设置页顶部那份引导
+  renderSettings()
+  const block = quickStart()
+  check('设置页顶部有「快速上手」清单', block !== undefined, `fc-quickstart=${String(block?.dataset?.fcQuickStart)}`)
+  const items = collectByClass(block, 'fc-quickstart-item')
+  check(
+    '清单里每一条都有标题与一句说明（不是一串光秃秃的命令名）',
+    items.length >= 4 &&
+      items.every(
+        (el) =>
+          (collectByClass(el, 'fc-quickstart-item-title')[0]?.textContent ?? '').length > 0 &&
+          (collectByClass(el, 'fc-quickstart-item-hint')[0]?.textContent ?? '').length > 0,
+      ),
+    `${items.length} 条`,
+  )
+  check(
+    '设置页这份讲的是"设置页附近的入口"：里面写了定义的新家（面板 →「地图定义」）',
+    (block?.textContent ?? '').includes('地图定义'),
+    String(block?.textContent).slice(0, 160),
+  )
+  const settingsTitles = itemTitles(block)
+
+  // ---------------------------------------------------------- 2. 可关闭、可逆、且落盘
+  const hideSettings = quickStartAction(block, 'quickstart-hide')
+  check('「不再显示」按钮带稳定标记（断言不怕以后改文案）', hideSettings !== undefined)
+  fireEvent(hideSettings, 'click')
+  await tick(40)
+  check('点「不再显示」后清单真的消失了', quickStart() === undefined)
+  check(
+    '但留了一行「重新显示」（引导本身是"找不到入口"的解法，不能做成单向门）',
+    restoreRow() !== undefined && (restoreRow()?.textContent ?? '').includes('重新显示'),
+    String(restoreRow()?.textContent),
+  )
+  check('隐藏状态写进了设置并落盘', persisted()?.hideQuickStartSettings === true, String(plugin._data).slice(0, 160))
+  check(
+    '面板那份引导不受影响（两份各管各的，关一份不会顺手关另一份）',
+    plugin.getSettings().hideQuickStartPanel === false && persisted()?.hideQuickStartPanel === false,
+    String(persisted()?.hideQuickStartPanel),
+  )
+  fireEvent(quickStartAction(restoreRow(), 'quickstart-show'), 'click')
+  await tick(40)
+  check('点「重新显示」清单回来了（可逆）', quickStart() !== undefined)
+  check('恢复也落了盘（下次打开设置页看到的是展开的）', persisted()?.hideQuickStartSettings === false, String(persisted()?.hideQuickStartSettings))
+
+  // ---------------------------------------------------------- 3. 重区块默认收起
+  renderSettings()
+  const layersGroup = settingsGroup('layers')
+  const defaultsGroup = settingsGroup('defaults')
+  check(
+    '「图层」是个默认收起的折叠组',
+    layersGroup?.tagName === 'DETAILS' && layersGroup.open === false,
+    `tag=${String(layersGroup?.tagName)} open=${String(layersGroup?.open)}`,
+  )
+  check(
+    '「新对象默认值」也是个默认收起的折叠组（一屏不再摊开几十个输入框）',
+    defaultsGroup?.tagName === 'DETAILS' && defaultsGroup.open === false,
+    `tag=${String(defaultsGroup?.tagName)} open=${String(defaultsGroup?.open)}`,
+  )
+  check(
+    '折叠只是"收起"，不是"拿掉"：网格开关仍然挂在这个组里（改的还是 `layers.grid` 那一份设置）',
+    FakeSetting.created.find((setting) => setting.info.name === '显示网格')?.containerEl === layersGroup,
+    String(FakeSetting.created.find((setting) => setting.info.name === '显示网格')?.containerEl?.tagName),
+  )
+
+  // ---------------------------------------------------------- 4. 定义管理控件搬走了，但留了指路
+  check('设置页里找不到「新增自定义地形」（已搬进弹窗）', settingNamed('新增自定义地形') === undefined)
+  check('设置页里找不到「新增自定义标记」（已搬进弹窗）', settingNamed('新增自定义标记') === undefined)
+  const hint = collectByClass(settingsRoot, 'fc-settings-note').find((el) => el.dataset?.fcSettingsRole === 'definitions-hint')
+  check(
+    '设置页留了一行指路（告诉用户定义的新家在哪）',
+    (hint?.textContent ?? '').includes('地图定义'),
+    String(hint?.textContent).slice(0, 200),
+  )
+
+  // ---------------------------------------------------------- 5. 面板：动作组 + 面板那份引导
+  plugin.ribbonIcons[0].callback()
+  await tick(40)
+  const panel = app.workspace.getLeavesOfType('fictional-cartographer-panel')[0].view
+  const panelButton = (fragment) =>
+    collectByClass(panel.contentEl, 'fc-panel-button').find((button) =>
+      (collectByClass(button, 'fc-panel-button-label')[0]?.textContent ?? '').includes(fragment),
+    )
+  const manage = plugin.getPanelActions().find((action) => action.id === 'manage-definitions')
+  check(
+    '动作表里有「管理地图定义…」，且它属于新的一组 `def`（与编辑/文件分开）',
+    manage !== undefined && manage.group === 'def',
+    JSON.stringify(manage),
+  )
+  check('面板里真的画出了这个按钮（命令面板与面板同一份定义）', panelButton('管理地图定义') !== undefined)
+  check(
+    '面板里出现了「地图定义」这一组标题',
+    collectByClass(panel.contentEl, 'fc-panel-group-title')
+      .map((el) => el.textContent ?? '')
+      .includes('地图定义'),
+    JSON.stringify(collectByClass(panel.contentEl, 'fc-panel-group-title').map((el) => el.textContent)),
+  )
+
+  const panelBlock = () => collectByClass(panel.contentEl, 'fc-quickstart').find((el) => el.dataset?.fcQuickStart === 'panel')
+  const panelRestore = () =>
+    collectByClass(panel.contentEl, 'fc-quickstart-restore').find((el) => el.dataset?.fcQuickStart === 'panel-hidden')
+  check('面板里也有一份「快速上手」', panelBlock() !== undefined)
+  check(
+    '两份引导是**两份不同的文案**（各自介绍各自的用法，不是同一份复制粘贴）',
+    JSON.stringify(itemTitles(panelBlock())) !== JSON.stringify(settingsTitles),
+    JSON.stringify(itemTitles(panelBlock())),
+  )
+  fireEvent(quickStartAction(panelBlock(), 'quickstart-hide'), 'click')
+  await tick(40)
+  flushFrames()
+  check('点面板那份的「不再显示」后它消失了', panelBlock() === undefined)
+  check('面板也留了一行能点回来（同样是可逆的）', panelRestore() !== undefined, String(panelRestore()?.textContent))
+  check('面板那份的隐藏状态同样落盘', persisted()?.hideQuickStartPanel === true, String(persisted()?.hideQuickStartPanel))
+  check(
+    '设置页那份不受影响（刚恢复过，仍是显示状态）',
+    plugin.getSettings().hideQuickStartSettings === false,
+    String(plugin.getSettings().hideQuickStartSettings),
+  )
+  fireEvent(quickStartAction(panelRestore(), 'quickstart-show'), 'click')
+  await tick(40)
+  flushFrames()
+  check('点面板那行的「显示」后面板引导回来了', panelBlock() !== undefined)
+
+  // ---------------------------------------------------------- 6. 弹窗：四组默认收起 + 改定义仍能落盘
+  await plugin.addCustomTerrain({ id: 'reef', label: '礁石' })
+  FakeSetting.created.length = 0
+  const defModal = openDefinitionManager(plugin)
+  const defGroups = collectByClass(defModal.contentEl, 'fc-defmodal-group')
+  check(
+    '弹窗里四类定义各有一组（地形 / 标记 / 路径类型 / 区域类型）',
+    defGroups.map((el) => el.dataset?.fcGroup).join(',') === 'terrain,marker,pathType,regionType',
+    JSON.stringify(defGroups.map((el) => el.dataset?.fcGroup)),
+  )
+  check(
+    '四组都默认收起（首屏只有四行标题，不再是一大片输入框）',
+    defGroups.length === 4 && defGroups.every((el) => el.tagName === 'DETAILS' && el.open === false),
+    JSON.stringify(defGroups.map((el) => [el.tagName, el.open])),
+  )
+  const reefRow = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('名称与颜色 · 礁石'))
+  check('地形组里有这条定义的配色行（搬迁前后控件一个不少）', reefRow !== undefined)
+  await reefRow.colorPickers[0].pick('#123456')
+  await tick(30)
+  check(
+    '在弹窗里改颜色真的写进了设置',
+    plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:reef')?.color === '#123456',
+    JSON.stringify(plugin.getSettings().customTerrains),
+  )
+  check(
+    '并落了盘（与设置页时代是同一条写入路径）',
+    (persisted()?.customTerrains ?? []).some((terrain) => terrain.id === 'custom:reef' && terrain.color === '#123456'),
+    JSON.stringify(persisted()?.customTerrains),
+  )
+  check(
+    '弹窗里那条「改 ID…」按钮也在（定义管理只剩这一个住处）',
+    (reefRow.buttons ?? []).some((button) => button.text === '改 ID…') &&
+      (reefRow.buttons ?? []).some((button) => button.text === '删除'),
+    JSON.stringify((reefRow.buttons ?? []).map((button) => button.text)),
+  )
 
   plugin.onunload()
 }
