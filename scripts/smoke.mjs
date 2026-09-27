@@ -32,6 +32,7 @@ import { summarizeMapDocument } from '../src/data/mapDocument.ts'
 import { worldToAxial } from '../src/core/hex.ts'
 import { snapToCellCenter } from '../src/render/markerPlacement.ts'
 import { assertBundleIsFresh } from './lib/bundleFreshness.mjs'
+import { scanSources } from './lib/sourceSanity.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
 const verbose = process.argv.includes('--verbose')
@@ -133,6 +134,26 @@ function check(label, condition, detail = '') {
     console.log(`  ✖ ${label}${detail ? ` — ${detail}` : ''}`)
   }
 }
+
+/* --------------------------------------------------- 源码粘贴污染体检 */
+
+/**
+ * 拒绝"把读文件工具的输出贴进源码"这类破坏（`scripts/lib/sourceSanity.mjs`）。
+ *
+ * 这条是 **真的会红** 的：§5.32 那次 `src/base/pngExport.ts` 被追加带行号正文、
+ * `tsc` 报 79 个错才拦住；若同样的粘贴落进注释或字符串，类型系统不会报错，
+ * 垃圾会跟着产物发出去。这里在文本层再守一道（构建前也会走同一条检查）。
+ *
+ * ⚠️ 位置有讲究：必须放在 `assertions` / `check` **之后** —— 放在文件开头会撞上
+ * `let assertions` 的暂时性死区，整个冒烟当场崩掉（实现时踩过一次：
+ * `ReferenceError: Cannot access 'assertions' before initialization`）。
+ */
+const sourceFindings = scanSources(root)
+check(
+  '源码里没有被粘贴进来的带行号正文（§5.32 那一类污染）',
+  sourceFindings.length === 0,
+  sourceFindings.map((finding) => `${finding.file}:${finding.line}(${finding.kind})`).join(', '),
+)
 
 /**
  * 读文档里写着的"本次冒烟有多少条断言"，用来对账（见场景末尾那条自检）。

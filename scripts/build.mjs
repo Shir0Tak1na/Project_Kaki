@@ -17,6 +17,8 @@ import path from 'node:path'
 import process from 'node:process'
 import ts from 'typescript'
 
+import { assertSourcesAreSane } from './lib/sourceSanity.mjs'
+
 const root = path.resolve(import.meta.dirname, '..')
 const buildDir = path.join(root, '.build')
 const outFile = path.join(root, 'main.js')
@@ -168,6 +170,8 @@ module.exports = (__fcEntry && __fcEntry.default) || __fcEntry;`)
 // ---------------------------------------------------------------- 主流程
 
 function buildOnce() {
+  // 先做文本层体检，再编译：粘贴事故若落在注释/字符串里，`tsc` 是发现不了的（§5.32）
+  assertSourcesAreSane(root)
   compile()
   const modules = collectModules()
   if (!modules.has(entryId)) {
