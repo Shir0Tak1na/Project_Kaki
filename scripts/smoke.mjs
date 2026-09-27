@@ -4584,8 +4584,23 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   // 非法 ID：必须当场给出可读原因，且**不能**写进设置
   await addSetting.texts[0].type('Bad Id!')
   check('非法 ID 就地给出可读原因', noteText().includes('ID'), noteText())
+  check(
+    '提示里除了"为什么错"，还写明"接下来怎么办"（用户实测：输错也不知道怎么改）',
+    noteText().includes('还没写进设置') && noteText().includes('改好上面那一栏'),
+    noteText(),
+  )
+  check(
+    '正确写法的**例子**由输入框占位提示承担（提示行与占位提示各说一件事）',
+    (addSetting.texts[0].placeholder ?? '').includes('例如') && (addSetting.texts[0].placeholder ?? '').includes('留空'),
+    String(addSetting.texts[0].placeholder),
+  )
   await addSetting.button.click()
   check('非法 ID 点「新增」不会写进设置', plugin.getSettings().customTerrains.length === 0, JSON.stringify(plugin.getSettings().customTerrains))
+  check(
+    '失败之后已经填好的内容还在（不用重打，改好那一栏再点新增即可）',
+    addSetting.texts[0].value === 'Bad Id!',
+    String(addSetting.texts[0].value),
+  )
 
   // 合法 ID：新增成功，ID 收敛成 custom: 前缀
   await addSetting.texts[0].type('Marsh')

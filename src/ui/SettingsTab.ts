@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 插件设置。
  *
  * 分两类：
@@ -564,7 +564,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           .onChange((value) => {
             pending.id = value
             // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
-            this.setNoteText(value.trim().length === 0 ? '' : (terrainIdProblem(value) ?? ''))
+            this.setNoteText(this.idNote(terrainIdProblem(value), value))
           }),
       )
       .addText((text) =>
@@ -585,12 +585,12 @@ export class CartographerSettingTab extends PluginSettingTab {
           // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
           const problem = pending.id.trim().length === 0 ? null : terrainIdProblem(pending.id)
           if (problem !== null) {
-            this.setNoteText(problem)
+            this.setNoteText(this.noteProblem(problem))
             return
           }
           void this.plugin.addCustomTerrain(pending).then((result) => {
             if (!result.ok) {
-              this.setNoteText(result.problem)
+              this.setNoteText(this.noteProblem(result.problem))
               return
             }
             this.setNoteText('')
@@ -802,7 +802,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           .onChange((value) => {
             pending.id = value
             // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
-            this.setMarkerNoteText(value.trim().length === 0 ? '' : (markerIdProblem(value) ?? ''))
+            this.setMarkerNoteText(this.idNote(markerIdProblem(value), value))
           }),
       )
       .addText((text) =>
@@ -818,12 +818,12 @@ export class CartographerSettingTab extends PluginSettingTab {
           // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
           const problem = pending.id.trim().length === 0 ? null : markerIdProblem(pending.id)
           if (problem !== null) {
-            this.setMarkerNoteText(problem)
+            this.setMarkerNoteText(this.noteProblem(problem))
             return
           }
           void this.plugin.addCustomMarker(pending).then((result) => {
             if (!result.ok) {
-              this.setMarkerNoteText(result.problem)
+              this.setMarkerNoteText(this.noteProblem(result.problem))
               return
             }
             this.setMarkerNoteText('')
@@ -867,7 +867,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         .addColorPicker((picker) =>
           picker.setValue(entry.params.color).onChange((value) => {
             void this.plugin.updatePathType(entry.id, { color: value }).then((result) => {
-              if (!result.ok) this.setPathTypeNoteText(result.problem)
+              if (!result.ok) this.setPathTypeNoteText(this.noteProblem(result.problem))
             })
           }),
         )
@@ -953,7 +953,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           .onChange((value) => {
             pending.id = value
             // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
-            this.setPathTypeNoteText(value.trim().length === 0 ? '' : (pathTypeIdProblem(value) ?? ''))
+            this.setPathTypeNoteText(this.idNote(pathTypeIdProblem(value), value))
           }),
       )
       .addText((text) =>
@@ -990,7 +990,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
           const problem = pending.id.trim().length === 0 ? null : pathTypeIdProblem(pending.id)
           if (problem !== null) {
-            this.setPathTypeNoteText(problem)
+            this.setPathTypeNoteText(this.noteProblem(problem))
             return
           }
           const dash = parsePathDashInput(pending.dash)
@@ -1009,7 +1009,7 @@ export class CartographerSettingTab extends PluginSettingTab {
             })
             .then((result) => {
               if (!result.ok) {
-                this.setPathTypeNoteText(result.problem)
+                this.setPathTypeNoteText(this.noteProblem(result.problem))
                 return
               }
               this.setPathTypeNoteText('')
@@ -1022,6 +1022,29 @@ export class CartographerSettingTab extends PluginSettingTab {
   /** 设置页里那一行就地提示（错误原因、保存结果） */
   private setNoteText(text: string): void {
     if (this.noteEl) this.noteEl.textContent = text
+  }
+
+  /**
+   * 把"为什么不行"变成"接下来怎么办"。
+   *
+   * 用户实测反馈：「输错也不知道怎么改」。原来提示只写原因（例如"ID 必须以小写字母开头"），
+   * 用户得自己推出三件事：**这一条没被写进去**、**改哪里**、**改完要不要重来**。
+   * 这里统一补上后半句，四个新建区共用同一段话 —— 文案只有一份，改一次全对。
+   */
+  private noteProblem(problem: string): string {
+    return `${problem}（这一条还没写进设置；改好上面那一栏再点「新增」即可，已填的其它内容不会丢）`
+  }
+
+  /**
+   * ID 输入框那一行的提示。留空 = 什么都不说（留空是合法用法，见自动生成）；
+   * 不合法 = 与「点新增失败」用**同一段话**，免得用户看到两套说法。
+   *
+   * 例子由输入框的占位提示承担（「ID（留空 = 自动生成，例如 swamp2）」）：
+   * 提示行只说「为什么」与「接下来怎么办」，两处各说一件事、不重复。
+   */
+  private idNote(problem: string | null, value: string): string {
+    if (value.trim().length === 0) return ''
+    return problem === null ? '' : this.noteProblem(problem)
   }
 
   /** 路径类型区底部那一行提示（与地形/标记两节分开，理由见 `setMarkerNoteText`） */
@@ -1060,7 +1083,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         .addColorPicker((picker) =>
           picker.setValue(entry.params.color).onChange((value) => {
             void this.plugin.updateRegionType(entry.id, { color: value }).then((result) => {
-              if (!result.ok) this.setRegionTypeNoteText(result.problem)
+              if (!result.ok) this.setRegionTypeNoteText(this.noteProblem(result.problem))
             })
           }),
         )
@@ -1160,7 +1183,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           .onChange((value) => {
             pending.id = value
             // 边输入边给原因：用户不必等点了"新增"才知道哪里不对
-            this.setRegionTypeNoteText(value.trim().length === 0 ? '' : (regionTypeIdProblem(value) ?? ''))
+            this.setRegionTypeNoteText(this.idNote(regionTypeIdProblem(value), value))
           }),
       )
       .addText((text) =>
@@ -1205,7 +1228,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
           const problem = pending.id.trim().length === 0 ? null : regionTypeIdProblem(pending.id)
           if (problem !== null) {
-            this.setRegionTypeNoteText(problem)
+            this.setRegionTypeNoteText(this.noteProblem(problem))
             return
           }
           const dash = parsePathDashInput(pending.borderDash)
@@ -1225,7 +1248,7 @@ export class CartographerSettingTab extends PluginSettingTab {
             })
             .then((result) => {
               if (!result.ok) {
-                this.setRegionTypeNoteText(result.problem)
+                this.setRegionTypeNoteText(this.noteProblem(result.problem))
                 return
               }
               this.setRegionTypeNoteText('')

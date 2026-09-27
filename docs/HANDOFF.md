@@ -19,7 +19,7 @@
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
 - 单元测试：413 个通过
-- 冒烟测试：37 个场景、994 条断言全部通过
+- 冒烟测试：37 个场景、997 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - **本轮（2026-09-25 → 09-27）四个轮次的收口状态**（每一轮都跑完四道闸并推送，CI 全绿）：
   - §6 **文档轮**：补 ⑤（路径/区域类型）与 ③（定义文件）到 README / 手册 / CHANGELOG（当时基线 977）；
