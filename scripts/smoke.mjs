@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 运行时冒烟测试：用桩替身模拟 Obsidian，把编译产物 main.js 真正加载并执行一遍。
  *
  * 桩环境**复刻 Phase 0 在 Obsidian 1.13.7 上实测到的真实结构**（见 docs/PHASE-0-RESULTS.md）：
@@ -579,6 +579,15 @@ function makeEl({
     _ctx: null,
     _rect: rect,
     _listeners: new Map(),
+    /** 滚动相关：真实元素都有这四个成员；桩里默认"不滚动"，测试需要时自己设 */
+    scrollTop: 0,
+    scrollLeft: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    /** 与真实 DOM 同构：`parentElement` 就是父元素（没有父节点时为 null） */
+    get parentElement() {
+      return el.parentNode ?? null
+    },
     addEventListener(type, handler) {
       if (!el._listeners.has(type)) el._listeners.set(type, new Set())
       el._listeners.get(type).add(handler)
@@ -673,6 +682,11 @@ function makeEl({
     },
     empty() {
       el.children.length = 0
+      // 真实浏览器里，把滚动容器的内容清空会让 `scrollHeight` 变成 0，
+      // 于是 `scrollTop` 被**钳回 0** —— 这就是"重建整页会把设置面板弹回顶上"的机制。
+      // 桩里如实模拟这一步，否则"重建前后保住滚动位置"那条断言是空转的
+      // （不模拟的话，什么都不做 scrollTop 也不会变）。
+      el.scrollTop = 0
     },
     addClass(...names) {
       el.classList.add(...names)
@@ -1272,6 +1286,11 @@ const fakeObsidian = {
       }
       container.empty = () => {
         container.children.length = 0
+        // 与 `makeEl` 里的 `empty()` **同一口径**：内容被清空 ⇒ 浏览器把 scrollTop 钳回 0。
+        // ⚠️ 这里必须重复一次，不能指望上面那个实现：设置页用的是这个**覆盖版** empty，
+        // 漏掉这一行的话"重建整页会弹回顶部"那条断言就是空转的
+        // （实测过：把修复去掉，断言照样绿 —— 因为桩根本没模拟滚动被钳位）。
+        container.scrollTop = 0
       }
       this.containerEl = container
     }
@@ -8558,6 +8577,35 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     'ASCII 显示名生成可读 ID custom:my-forest',
     plugin.getSettings().regionTypes.some((entry) => entry.id === 'custom:my-forest' && entry.label === 'My Forest'),
     JSON.stringify(plugin.getSettings().regionTypes.map((entry) => [entry.id, entry.label])),
+  )
+
+  // ------------------- 重建整页不许把滚动位置弹回顶部（用户实测："按新增会跳到最顶上"）
+  /**
+   * 机制：每次改动都是整页重建，第一步 `containerEl.empty()` 会把滚动容器清空，
+   * 浏览器随即把 `scrollTop` 钳回 0 —— 于是用户每改一项就被弹回顶部。
+   * 桩里的 `empty()` 已如实模拟这一步（否则这条断言是空转的：什么都不做 scrollTop 也不会变）。
+   */
+  const scrollHost = plugin.settingTabs[0].containerEl
+  scrollHost.scrollHeight = 2000
+  scrollHost.clientHeight = 600
+  openSettings()
+  scrollHost.scrollTop = 420
+  const scrollForm = settingNamed('新增自定义区域类型')
+  await (scrollForm?.texts ?? []).find((text) => (text.placeholder ?? '').includes('显示名')).type('滚动测试')
+  await scrollForm.button.click()
+  check(
+    '新增之后设置页没跳回顶部（重建前后保住了滚动位置）',
+    scrollHost.scrollTop === 420,
+    `scrollTop=${scrollHost.scrollTop}`,
+  )
+  openSettings()
+  const removeScrollForm = FakeSetting.created.find((item) => (item.info.name ?? '').includes('边框 · 滚动测试'))
+  scrollHost.scrollTop = 310
+  await removeScrollForm.button.click()
+  check(
+    '删除定义之后同样不跳回顶部（同一条入口，不是只给"新增"打补丁）',
+    scrollHost.scrollTop === 310,
+    `scrollTop=${scrollHost.scrollTop}`,
   )
 
   // ---------------------------------------------------------- 上限：明确提示，不静默失败

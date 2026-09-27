@@ -123,6 +123,43 @@ export class CartographerSettingTab extends PluginSettingTab {
     this.plugin = plugin
   }
 
+  /**
+   * 重建设置页，但**保住滚动位置**。
+   *
+   * 用户实测反馈：「按新增的时候面板会跳到最顶上」。原因不在 Obsidian，而在这里：
+   * 每次改动（新增/删除/切模式/选图片）我们都是整页 `display()` 重建，
+   * 而重建第一步是 `containerEl.empty()` —— 内容被清空时滚动容器的 `scrollHeight` 变成 0，
+   * 浏览器随即把 `scrollTop` **钳回 0**。于是用户每改一项就被弹回页面顶部，
+   * 要建的条目在下面就得重新滚一遍。
+   *
+   * 修法是把"重建前后同一件事"写成一个入口：先记下滚动位置，重建后再放回去。
+   * 只改这一处、所有调用点共用，避免以后有人新加一个 `this.display()` 又把这个坑带回来。
+   */
+  private rerenderKeepingScroll(): void {
+    const scroller = this.findScroller()
+    const top = scroller.scrollTop
+    this.display()
+    // 重建不会换掉滚动容器本身（换掉的是它的子节点），所以这里可以直接写回
+    scroller.scrollTop = top
+  }
+
+  /**
+   * 找到真正在滚动的那个祖先。
+   *
+   * Obsidian 的设置页把内容放进 `.vertical-tab-content` 之类的容器里由它来滚，
+   * 而 `containerEl` 只是内容本身。这里从自身往上找第一个"内容比可视区高"的元素；
+   * 一个都没有（内容不长、或假 DOM 里没设尺寸）就退回 `containerEl` 自己 ——
+   * 写回一个本来就为 0 的位置也无害。
+   */
+  private findScroller(): HTMLElement {
+    let node: HTMLElement | null = this.containerEl
+    while (node !== null) {
+      if (node.scrollHeight > node.clientHeight) return node
+      node = node.parentElement
+    }
+    return this.containerEl
+  }
+
   override display(): void {
     const { containerEl } = this
     containerEl.empty()
@@ -154,7 +191,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange((value) => {
             void this.plugin.setLabelScale(value)
-            this.display()
+            this.rerenderKeepingScroll()
           }),
       )
 
@@ -175,7 +212,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           // 内部写的是图层设置（`layers.grid`）—— 网格就是六个图层之一，
           // 保留这个开关是为了不让老用户重新找一遍位置
           void this.plugin.setLayerVisible('grid', value)
-          this.display()
+          this.rerenderKeepingScroll()
         }),
       )
 
@@ -188,7 +225,7 @@ export class CartographerSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(settings.developerMode).onChange((value) => {
           void this.plugin.setDeveloperMode(value)
-          this.display()
+          this.rerenderKeepingScroll()
         }),
       )
 
@@ -208,7 +245,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         .addToggle((toggle) =>
           toggle.setValue(isLayerVisible(settings.layers, key)).onChange((value) => {
             void this.plugin.setLayerVisible(key, value)
-            this.display()
+            this.rerenderKeepingScroll()
           }),
         )
     }
@@ -222,7 +259,7 @@ export class CartographerSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(settings.showLegend).onChange((value) => {
           void this.plugin.setShowLegend(value)
-          this.display()
+          this.rerenderKeepingScroll()
         }),
       )
 
@@ -271,7 +308,7 @@ export class CartographerSettingTab extends PluginSettingTab {
       .addButton((button) =>
         button.setButtonText('恢复默认').onClick(() => {
           void this.plugin.resetStylePalette()
-          this.display()
+          this.rerenderKeepingScroll()
         }),
       )
 
@@ -346,7 +383,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           if (terrain.mode === option.mode) return
           // 只改模式：其余字段原样带着走（见 main.ts 的 updateCustomTerrain），
           // 所以来回切不会丢配置 —— 切回图片模式时之前选的图还在。
-          void this.plugin.updateCustomTerrain(index, { mode: option.mode }).then(() => this.display())
+          void this.plugin.updateCustomTerrain(index, { mode: option.mode }).then(() => this.rerenderKeepingScroll())
         })
       }
 
@@ -375,7 +412,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         .addButton((button) =>
           button.setButtonText('删除').onClick(() => {
             void this.plugin.removeCustomTerrain(index)
-            this.display()
+            this.rerenderKeepingScroll()
           }),
         )
 
@@ -437,7 +474,7 @@ export class CartographerSettingTab extends PluginSettingTab {
             const ensureImageMode = imageMode
               ? Promise.resolve()
               : this.plugin.updateCustomTerrain(index, { mode: 'image' }).then(() => {
-                  this.display()
+                  this.rerenderKeepingScroll()
                 })
             void ensureImageMode
               .then(() =>
@@ -454,7 +491,7 @@ export class CartographerSettingTab extends PluginSettingTab {
                       .then(() => {
                         // 顺序要紧：`display()` 会重建提示行，所以提示必须写在重绘**之后**，
                         // 否则那句话刚写上去就被冲掉了（用户只会看到"点了没反应"）。
-                        this.display()
+                        this.rerenderKeepingScroll()
                         this.setNoteText(`已选择图片：${check.path}`)
                       })
                       .catch((error: unknown) => {
@@ -489,7 +526,7 @@ export class CartographerSettingTab extends PluginSettingTab {
           dropdown.setValue(terrain.imageLayout)
           dropdown.onChange((value) => {
             void this.plugin.updateCustomTerrain(index, { imageLayout: value })
-            this.display()
+            this.rerenderKeepingScroll()
           })
         })
     })
@@ -557,7 +594,7 @@ export class CartographerSettingTab extends PluginSettingTab {
               return
             }
             this.setNoteText('')
-            this.display()
+            this.rerenderKeepingScroll()
           })
         }),
       )
@@ -600,7 +637,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         button.title = option.hint
         button.addEventListener('click', () => {
           if (marker.mode === option.mode) return
-          void this.plugin.updateCustomMarker(index, { mode: option.mode }).then(() => this.display())
+          void this.plugin.updateCustomMarker(index, { mode: option.mode }).then(() => this.rerenderKeepingScroll())
         })
       }
 
@@ -622,7 +659,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         .addButton((button) =>
           button.setButtonText('删除').onClick(() => {
             void this.plugin.removeCustomMarker(index)
-            this.display()
+            this.rerenderKeepingScroll()
           }),
         )
 
@@ -678,7 +715,7 @@ export class CartographerSettingTab extends PluginSettingTab {
             const ensureImageMode = imageMode
               ? Promise.resolve()
               : this.plugin.updateCustomMarker(index, { mode: 'image' }).then(() => {
-                  this.display()
+                  this.rerenderKeepingScroll()
                 })
             void ensureImageMode
               .then(() =>
@@ -694,7 +731,7 @@ export class CartographerSettingTab extends PluginSettingTab {
                       .updateCustomMarker(index, { imagePath: check.path })
                       .then(() => {
                         // 顺序要紧：`display()` 会重建提示行，所以提示必须写在重绘**之后**
-                        this.display()
+                        this.rerenderKeepingScroll()
                         this.setMarkerNoteText(`已选择图片：${check.path}`)
                       })
                       .catch((error: unknown) => {
@@ -790,7 +827,7 @@ export class CartographerSettingTab extends PluginSettingTab {
               return
             }
             this.setMarkerNoteText('')
-            this.display()
+            this.rerenderKeepingScroll()
           })
         }),
       )
@@ -881,7 +918,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         .addButton((button) => {
           if (!isCustom) return
           button.setButtonText('删除').setWarning().setTooltip(`删除自定义类型 ${entry.id}`).onClick(() => {
-            void this.plugin.removeCustomPathType(entry.id).then(() => this.display())
+            void this.plugin.removeCustomPathType(entry.id).then(() => this.rerenderKeepingScroll())
           })
         })
     }
@@ -976,7 +1013,7 @@ export class CartographerSettingTab extends PluginSettingTab {
                 return
               }
               this.setPathTypeNoteText('')
-              this.display()
+              this.rerenderKeepingScroll()
             })
         }),
       )
@@ -1080,7 +1117,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         .addButton((button) => {
           if (!isCustom) return
           button.setButtonText('删除').setWarning().setTooltip(`删除自定义区域类型 ${entry.id}`).onClick(() => {
-            void this.plugin.removeCustomRegionType(entry.id).then(() => this.display())
+            void this.plugin.removeCustomRegionType(entry.id).then(() => this.rerenderKeepingScroll())
           })
         })
     }
@@ -1192,7 +1229,7 @@ export class CartographerSettingTab extends PluginSettingTab {
                 return
               }
               this.setRegionTypeNoteText('')
-              this.display()
+              this.rerenderKeepingScroll()
             })
         }),
       )
