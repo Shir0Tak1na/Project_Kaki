@@ -190,6 +190,21 @@ export class MapLayerManager {
     return this.entries.get(canvasPath)?.editor ?? null
   }
 
+  /**
+   * 某个编辑器属于哪张画布（`getInspectorEditor()` 的配套）。
+   *
+   * 侧栏的「移到视口中心」需要"这个选中项所在画布的可见世界矩形"，
+   * 而那个矩形来自 `listStatus()`（按 canvasPath 索引）—— 所以必须先把编辑器映射回画布。
+   * 不这么做的话，同时开两张画布时会把对象移到**另一张**画布的中心。
+   */
+  canvasPathOfEditor(editor: MapEditor | null): string | null {
+    if (editor === null) return null
+    for (const [canvasPath, entry] of this.entries) {
+      if (entry.editor === editor) return canvasPath
+    }
+    return null
+  }
+
   /** 当前覆盖层持有的地图文档（诊断与测试用） */
   getDocument(canvasPath: string): MapDocument | null {
     return this.entries.get(canvasPath)?.document ?? null

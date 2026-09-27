@@ -36,10 +36,12 @@ import {
 import { exportBasePathFor, rasterizeSvgToPng, uniqueExportPath, type PngRasterDeps } from './base/pngExport.ts'
 import { ExportModal, type ExportFormat, type ExportModalFactory } from './ui/ExportModal.ts'
 import type { BBox } from './core/viewport.ts'
+import type { Point } from './core/hex.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
 import { ReportModal, type ReportModalFactory, type ReportModalOptions } from './ui/ReportModal.ts'
 import { AssetSuggestModal, type AssetPickerKind, type AssetPickerOptions, type ImagePickerFactory } from './ui/AssetSuggestModal.ts'
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type PluginAction } from './ui/MapPanel.ts'
+import type { SelectionFieldValue } from './editor/selection.ts'
 import {
   CartographerSettingTab,
   normalizeLabelScale,
@@ -47,7 +49,7 @@ import {
   paletteOf,
   type CartographerSettings,
 } from './ui/SettingsTab.ts'
-import { normalizeFontFamily, type StylePalette } from './render/stylePalette.ts'
+import { normalizeFontFamily, normalizeColor, type StylePalette } from './render/stylePalette.ts'
 import {
   MAX_CUSTOM_PATH_TYPES,
   applyPathTypePatch,
@@ -111,6 +113,9 @@ import {
   type RenamePreview,
 } from './ui/RenameDefinitionModal.ts'
 import { CUSTOM_MARKER_PREFIX } from './render/markerCatalog.ts'
+import { listResolvedMarkerStyles } from './render/markerCatalog.ts'
+import { listResolvedTerrainStyles } from './render/terrainCatalog.ts'
+import { parsePathDashInput } from './render/pathTypeCatalog.ts'
 import { CUSTOM_PATH_TYPE_PREFIX } from './render/pathTypeCatalog.ts'
 import { CUSTOM_REGION_TYPE_PREFIX } from './render/regionTypeCatalog.ts'
 import { CUSTOM_TERRAIN_PREFIX } from './render/terrainCatalog.ts'
@@ -544,6 +549,35 @@ export default class ProjectKakiPlugin extends Plugin {
         if (!editor) return
         if (editor.removeSelection()) this.refreshPanel()
       },
+      // ---- 就地编辑：类型 / 位置 / 外观（A2）----
+      // 候选清单按**当前选中项声明的来源**去查对应目录（面板只知道"来源名"）
+      getSelectionTypeOptions: () => this.selectionTypeOptions(),
+      onSetSelectionType: (value) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        if (editor.setSelectionType(value)) this.refreshPanel()
+      },
+      onSetSelectionField: (field, rawValue) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        const parsed = this.parseSelectionFieldInput(field, rawValue)
+        if (parsed === undefined) return
+        if (editor.setSelectionField(field, parsed)) this.refreshPanel()
+      },
+      onSetSelectionPosition: (x, y) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        if (editor.setSelectionPosition(x, y)) this.refreshPanel()
+      },
+      onMoveSelectionToViewportCenter: () => {
+        const editor = this.layers?.getInspectorEditor()
+        const center = this.selectionViewportCenter()
+        if (!editor || center === null) {
+          new Notice('当前没有可见的地图视图，无法居中。', NOTICE_MAX_MS)
+          return
+        }
+        if (editor.moveSelectionTo(center)) this.refreshPanel()
+      },
       // 图层开关：状态与写入口都从插件这边注入（面板不认识插件实例）
       getLayerVisibility: () => this.pluginSettings.layers,
       onToggleLayer: (key, value) => {
@@ -556,8 +590,77 @@ export default class ProjectKakiPlugin extends Plugin {
     })
   }
 
-  /** 打开（或聚焦）右侧边栏里的地图面板 */
-  async activatePanel(): Promise<void> {
+  /**
+   * 「类型」下拉的候选：按当前选中项声明的 `typeSource` 去查对应目录（内置 + 自定义）。
+   *
+   * 为什么不在这里按 kind 分派：来源是**选中项自己声明的**（`SelectionInfo.typeSource`），
+   * 面板把它给过来，这里只负责"按名字查目录"。以后加"温度带"这类新对象，
+   * 只要在新目录里补一个来源名，这里一行都不用改。
+   */
+  private selectionTypeOptions(): Array<{ value: string; label: string }> {
+    const source = this.layers?.getInspectorEditor()?.selectionInfo()?.typeSource ?? null
+    switch (source) {
+      case 'terrain':
+        return listResolvedTerrainStyles(this.pluginSettings.customTerrains).map((style) => ({
+          value: style.id,
+          label: style.label,
+        }))
+      case 'marker':
+        return listResolvedMarkerStyles(this.pluginSettings.customMarkers).map((style) => ({
+          value: style.id,
+          label: style.label,
+        }))
+      case 'path':
+        // 设置里这两类本来就是"内置 + 自定义"的完整条目列表，直接映射即可（不必另查目录）
+        return this.pluginSettings.pathTypes.map((entry) => ({ value: entry.id, label: entry.label }))
+      case 'region':
+        return this.pluginSettings.regionTypes.map((entry) => ({ value: entry.id, label: entry.label }))
+      default:
+        return []
+    }
+  }
+
+  /**
+   * 把面板传来的**原始文本**解析成字段值（`null` = 清除该字段，`undefined` = 解析失败、不写）。
+   *
+   * 解析放在这里而不是面板里：面板不该知道"虚线怎么写"这类规则，
+   * 而"合法值的规则"必须与设置页共用同一份（复用各目录的纯函数）。
+   */
+  private parseSelectionFieldInput(field: string, raw: string): SelectionFieldValue | undefined {
+    const info = this.layers?.getInspectorEditor()?.selectionInfo() ?? null
+    if (info === null) return undefined
+    const spec = info.fields.find((item) => item.field === field)
+    // 类型字段不经过这里（它走 onSetSelectionType，值是下拉给出的合法 ID）
+    if (spec === undefined) return undefined
+    const text = raw.trim()
+    if (text.length === 0) return null
+    if (spec.control === 'color') return normalizeColor(text, '') === '' ? undefined : normalizeColor(text, '')
+    if (spec.control === 'number') {
+      // 只接受纯数字：`Number('12px')` 是 NaN，但 `Number('')` 是 0 —— 所以先判空（上面已判）
+      const value = Number(text)
+      return Number.isFinite(value) ? value : undefined
+    }
+    // 虚线：复用路径类型目录里那套三态解析（缺失 / 实线 / 虚线），不重新发明
+    const parsed = parsePathDashInput(text)
+    return parsed.ok ? parsed.dash : undefined
+  }
+
+  /**
+   * 当前视口的**世界中心**（侧栏「移到视口中心」用）；没有可见帧时返回 null。
+   *
+   * 与导出范围里的"当前视口"取的是同一份数据（`layers.listStatus().stats.lastVisibleWorld`）：
+   * 两处若各算一套，用户会遇到"导出按视口是对的、居中却偏了"这种诡异现象。
+   */
+  private selectionViewportCenter(): Point | null {
+    const editor = this.layers?.getInspectorEditor()
+    const canvasPath = this.layers?.canvasPathOfEditor(editor ?? null) ?? null
+    if (canvasPath === null) return null
+    const world = this.currentViewportWorld(canvasPath)
+    if (world === null) return null
+    return { x: (world.minX + world.maxX) / 2, y: (world.minY + world.maxY) / 2 }
+  }
+
+  /** 打开（或聚焦）右侧边栏里的地图面板 */  async activatePanel(): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(MAP_PANEL_VIEW_TYPE)
     const first = existing[0]
     if (first) {

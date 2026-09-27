@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 选中状态、检查器信息、以及"改名 / 改链接"两个新 op 的单元测试。
  *
  * 这一层的赌注：检查器是用户**唯一**能改链接的入口（以前只在创建标记时能填一次）。
@@ -14,13 +14,18 @@ import type { SelectionKind } from '../src/editor/selection.ts'
 import { createEmptyMapDocument, type MapDocument } from '../src/data/mapDocument.ts'
 import { applyOp, invertOp, type MapOp } from '../src/editor/history.ts'
 import {
+  COLLECTION_KINDS,
   SELECTION_EMPTY_HINT,
   SELECTION_HIT_ORDER,
   SELECTION_KINDS,
   SELECTION_KIND_LABELS,
   describeSelection,
+  formatSelectionFieldValue,
   hitTestSelection,
+  isCollectionKind,
   pointHitRadius,
+  sameObjectFieldValue,
+  selectionSupports,
 } from '../src/editor/selection.ts'
 
 const LABELS = {
@@ -287,4 +292,188 @@ test('每一行的 hit() 在没有任何对象时都不命中（加新 kind 也�
     const id = SELECTION_KINDS[kind].hit({ document: empty, grid, world: { x: 0, y: 0 }, toleranceWorld: 6, hitShape: () => null })
     assert.equal(id, null, `${kind} 在空文档里不该命中`)
   }
+})
+
+/* ------------------------------------------------ A2：类型 / 位置 / 外观三组的表驱动 */
+
+test('类型字段与来源写进表里，且与"存在哪"一致（加新种类只加一行）', () => {
+  assert.equal(SELECTION_KINDS.marker.typeField, 'icon')
+  assert.equal(SELECTION_KINDS.marker.typeSource, 'marker')
+  assert.equal(SELECTION_KINDS.cell.typeField, 't')
+  assert.equal(SELECTION_KINDS.cell.typeSource, 'terrain')
+  assert.equal(SELECTION_KINDS.path.typeField, 'type')
+  assert.equal(SELECTION_KINDS.path.typeSource, 'path')
+  assert.equal(SELECTION_KINDS.region.typeField, 'type')
+  assert.equal(SELECTION_KINDS.region.typeSource, 'region')
+  // 文字标注没有类型：这两列都不该有值（面板据此不渲染类型组）
+  assert.equal(SELECTION_KINDS.label.typeField, undefined)
+  assert.equal(SELECTION_KINDS.label.typeSource, undefined)
+})
+
+test('位置表达方式写进表里：点对象可编辑坐标、地块只读格号、形状只读顶点数', () => {
+  assert.equal(SELECTION_KINDS.marker.position, 'point')
+  assert.equal(SELECTION_KINDS.label.position, 'point')
+  assert.equal(SELECTION_KINDS.cell.position, 'cell')
+  assert.equal(SELECTION_KINDS.path.position, 'shape')
+  assert.equal(SELECTION_KINDS.region.position, 'shape')
+})
+
+test('describeSelection 把类型 / 位置 / 外观的当前值一并给出（面板不再自己去文档里翻）', () => {
+  const document = doc()
+  const marker = describeSelection(document, { kind: 'marker', id: 'mk-1' }, LABELS)
+  assert.equal(marker?.typeField, 'icon')
+  assert.equal(marker?.typeValue, 'town')
+  assert.deepEqual(marker?.positionValue, { kind: 'point', x: 0, y: 0 })
+  assert.deepEqual(
+    marker?.fields.map((field) => field.field),
+    ['c'],
+  )
+  // 标记没有覆盖色：字段值是 null（面板据此把"清除"按钮灰掉）
+  assert.equal(marker?.fieldValues.c, null)
+
+  const path = describeSelection(document, { kind: 'path', id: 'pa-1' }, LABELS)
+  assert.deepEqual(path?.positionValue, { kind: 'shape', points: 3 })
+  assert.deepEqual(
+    path?.fields.map((field) => field.field),
+    ['color', 'width', 'dash'],
+  )
+  assert.equal(path?.fieldValues.color, '#2288ff')
+  assert.equal(path?.fieldValues.width, 8)
+  assert.equal(path?.fieldValues.dash, null)
+
+  const cell = describeSelection(document, { kind: 'cell', id: cellKey(0, 0) }, LABELS)
+  assert.deepEqual(cell?.positionValue, { kind: 'cell', q: 0, r: 0 })
+  assert.equal(cell?.typeValue, 'forest')
+
+  // 旧区域没有 type 字段 → typeValue 为 null（面板显示"未知"而不是编一个名字）
+  const legacy = describeSelection(document, { kind: 'region', id: 'rg-legacy' }, LABELS)
+  assert.equal(legacy?.typeValue, null)
+})
+
+test('字段值的显示文本：数字/颜色原样，虚线用逗号连接，缺失是空串', () => {
+  const dash = SELECTION_KINDS.path.fields.find((field) => field.field === 'dash')
+  assert.ok(dash)
+  assert.equal(formatSelectionFieldValue(dash, null), '')
+  assert.equal(formatSelectionFieldValue(dash, []), '')
+  assert.equal(formatSelectionFieldValue(dash, [12, 4]), '12,4')
+  assert.equal(formatSelectionFieldValue(dash, 3), '3')
+})
+
+test('字段值的"相同"判断按内容比：重复提交同样的虚线不该记成一次改动', () => {
+  assert.equal(sameObjectFieldValue([12, 4], [12, 4]), true)
+  assert.equal(sameObjectFieldValue([12, 4], [12, 5]), false)
+  assert.equal(sameObjectFieldValue([12, 4], null), false)
+  assert.equal(sameObjectFieldValue(null, null), true)
+  assert.equal(sameObjectFieldValue('#fff', '#fff'), true)
+})
+
+test('能力判断只有一处来源：selectionSupports 与表里的 actions 完全一致', () => {
+  for (const kind of SELECTION_HIT_ORDER) {
+    for (const action of ['rename', 'link', 'delete'] as const) {
+      assert.equal(selectionSupports(kind, action), SELECTION_KINDS[kind].actions.includes(action))
+    }
+  }
+  // 地块：没有改名与链接（这是"检查器里不出现这两栏"的**唯一**依据）
+  assert.equal(selectionSupports('cell', 'rename'), false)
+  assert.equal(selectionSupports('cell', 'link'), false)
+  assert.equal(selectionSupports('marker', 'rename'), true)
+})
+
+test('storage 列派生出的集合：地块不在"对象数组"里（编辑器据此选 op，不写 kind === cell）', () => {
+  assert.deepEqual([...COLLECTION_KINDS].sort(), ['label', 'marker', 'path', 'region'])
+  assert.equal(isCollectionKind('cell'), false)
+  assert.equal(isCollectionKind('marker'), true)
+})
+
+/* ------------------------------------------------ A2：三个新 op 的可逆性与"别顺手改坏别的字段" */
+
+test('setObjectField：只改一个键，别的字段（含不认识的）原样保留', () => {
+  const document = doc()
+  const marker = document.markers[0] as unknown as Record<string, unknown>
+  marker.futureField = { hello: 'world' }
+  const op: MapOp = {
+    kind: 'setObjectField',
+    target: 'marker',
+    id: 'mk-1',
+    field: 'icon',
+    from: 'town',
+    to: 'city',
+  }
+  applyOp(document, op)
+  assert.equal(document.markers[0]?.icon, 'city')
+  assert.equal(document.markers[0]?.label, '港口')
+  // ⚠️ 必须**从文档里重新读**，不能拿改之前抓的那个对象引用去断言：
+  // 实现若把对象换成一个新对象（丢掉未知字段），旧引用照样是好的 —— 断言会空转。
+  // 这条是跑鉴别力验证时抓出来的（那次破坏一条都没红）。
+  assert.deepEqual((document.markers[0] as unknown as Record<string, unknown>).futureField, { hello: 'world' })
+  applyOp(document, invertOp(op))
+  assert.equal(document.markers[0]?.icon, 'town')
+  assert.deepEqual((document.markers[0] as unknown as Record<string, unknown>).futureField, { hello: 'world' })
+})
+
+test('setObjectField：值为 null = 删掉该字段（而不是写一个 null 进去）', () => {
+  const document = doc()
+  const op: MapOp = { kind: 'setObjectField', target: 'marker', id: 'mk-1', field: 'c', from: null, to: '#ff0000' }
+  applyOp(document, op)
+  assert.equal(document.markers[0]?.c, '#ff0000')
+  const clear: MapOp = { kind: 'setObjectField', target: 'marker', id: 'mk-1', field: 'c', from: '#ff0000', to: null }
+  applyOp(document, clear)
+  assert.equal('c' in (document.markers[0] as object), false)
+  applyOp(document, invertOp(clear))
+  assert.equal(document.markers[0]?.c, '#ff0000')
+})
+
+test('setCellField：改地形种类时不碰格上的未知字段（extra 那套接缝）', () => {
+  const document = doc()
+  const key = cellKey(0, 0)
+  const cell = document.terrain[key] as unknown as Record<string, unknown>
+  cell.futureValue = 42
+  const op: MapOp = { kind: 'setCellField', key, field: 't', from: 'forest', to: 'mountain' }
+  applyOp(document, op)
+  assert.equal(document.terrain[key]?.t, 'mountain')
+  // 同上：从文档重新读，别用会被换掉的旧引用（否则"重建对象"这种破坏一条都不红）
+  assert.equal((document.terrain[key] as unknown as Record<string, unknown>).futureValue, 42)
+  applyOp(document, invertOp(op))
+  assert.equal(document.terrain[key]?.t, 'forest')
+  assert.equal((document.terrain[key] as unknown as Record<string, unknown>).futureValue, 42)
+})
+
+test('translateObject：整体平移后顶点相对位置不变，撤销回到原位', () => {
+  const document = doc()
+  const before = document.paths[0]?.pts.map((point) => [...point])
+  const op: MapOp = { kind: 'translateObject', target: 'path', id: 'pa-1', dx: 100, dy: -50 }
+  applyOp(document, op)
+  assert.deepEqual(document.paths[0]?.pts, [
+    [-300, 250],
+    [100, 250],
+    [500, 250],
+  ])
+  applyOp(document, invertOp(op))
+  assert.deepEqual(document.paths[0]?.pts, before)
+})
+
+test('translateObject：区域同样按位移还原（op 里不抄整份顶点）', () => {
+  const document = doc()
+  const op: MapOp = { kind: 'translateObject', target: 'region', id: 'rg-1', dx: 10, dy: 20 }
+  applyOp(document, op)
+  assert.deepEqual(document.regions[0]?.pts[0], [-290, -280])
+  applyOp(document, invertOp(op))
+  assert.deepEqual(document.regions[0]?.pts[0], [-300, -300])
+})
+
+test('新 op 都进了 MapOp 联合：invertOp 对每一种都能来回（不会漏掉某种 op）', () => {
+  const document = doc()
+  // ⚠️ `from` 必须是**文档里真实的前值**：op 的"还原"就是把它写回去，
+  // 随手编一个 from 会让这条断言失败 —— 而那正是它在防的事（op 记错前值 = 撤销后数据不对）
+  const ops: MapOp[] = [
+    { kind: 'setObjectField', target: 'path', id: 'pa-1', field: 'color', from: '#2288ff', to: '#222222' },
+    { kind: 'setCellField', key: cellKey(0, 0), field: 'c', from: null, to: '#333333' },
+    { kind: 'translateObject', target: 'region', id: 'rg-1', dx: 5, dy: 6 },
+  ]
+  const snapshot = JSON.stringify(document)
+  for (const op of ops) {
+    applyOp(document, op)
+    applyOp(document, invertOp(op))
+  }
+  assert.equal(JSON.stringify(document), snapshot)
 })

@@ -147,6 +147,65 @@ export type MapOp =
   | RenameRegionOp
   | SetLinkOp
   | RenameObjectOp
+  | SetObjectFieldOp
+  | SetCellFieldOp
+  | TranslateObjectOp
+
+/**
+ * 改对象上的**一个字段**（类型 / 颜色 / 线宽 / 虚线 / 不透明度 / 位置…）。
+ *
+ * 为什么是一个通用 op、而不是给每种字段各写一个（`setMarkerIcon` / `setPathColor`…）：
+ * 侧栏检查器里这些编辑是同一件事（改对象自己的一个参数），一套 op 就是一条撤销路径。
+ * 加一个新字段（以后可能是"温度带"）不需要碰历史层。
+ *
+ * `to === null` = **删掉该字段**（例如"清除覆盖色"），而不是写一个 null 进去 ——
+ * 文件里少一个键和多一个 `null` 是两种不同的东西（解析层对前者的处理是"没有这个覆盖"）。
+ */
+export interface SetObjectFieldOp {
+  kind: 'setObjectField'
+  target: ObjectKind
+  id: string
+  field: string
+  from: ObjectFieldValue
+  to: ObjectFieldValue
+}
+
+/** 字段可接受的取值（`null` = 删除该字段） */
+export type ObjectFieldValue = string | number | number[] | null
+
+/**
+ * 原地改**格上**的一个字段（地块的类型 `t` / 覆盖色 `c`）。
+ *
+ * 为什么不能复用 `setObjectField`：地块不是"带 id 的对象数组"，而是 `terrain` 映射里的一项，
+ * 键是 `cellKey(q, r)`。单独一个 op 比"给 setObjectField 加一个 key 分支"更好读，
+ * 也避免把两种存储形状混进同一段代码。
+ *
+ * ⚠️ 实现里**改的是映射里那个对象本身**，不重建它：这样格上不认识的字段（`extra`，
+ * 见 `mapDocument.ts` 的 `TerrainCell.extra`）在改类型时不会被顺手丢掉。
+ */
+export interface SetCellFieldOp {
+  kind: 'setCellField'
+  /** `cellKey(q, r)` */
+  key: string
+  field: string
+  from: ObjectFieldValue
+  to: ObjectFieldValue
+}
+
+/**
+ * 整体平移一个路径或区域（顶点相对位置不变）。
+ *
+ * 为什么记 `dx/dy` 而不是新旧顶点列表：平移是**刚体**变换，记位移量就够还原，
+ * op 也小得多（几十个顶点的区域不该把整套坐标抄两遍）。
+ * 逆操作就是把 `dx/dy` 取反。
+ */
+export interface TranslateObjectOp {
+  kind: 'translateObject'
+  target: 'path' | 'region'
+  id: string
+  dx: number
+  dy: number
+}
 
 /**
  * 按 `target` 取出对象本体（**返回原对象引用**，调用方只改它自己的字段）。
@@ -261,6 +320,28 @@ export function applyOp(document: MapDocument, op: MapOp): void {
       object.label = op.to
       return
     }
+    case 'setObjectField': {
+      const object = objectOf(document, op.target, op.id)
+      if (object === null) return
+      // 只动这一个键：对象上别的字段（含这一版不认识的）原样留着
+      if (op.to === null) delete object[op.field]
+      else object[op.field] = Array.isArray(op.to) ? [...op.to] : op.to
+      return
+    }
+    case 'setCellField': {
+      const cell = document.terrain[op.key] as unknown as Record<string, unknown> | undefined
+      if (cell === undefined) return
+      if (op.to === null) delete cell[op.field]
+      else cell[op.field] = Array.isArray(op.to) ? [...op.to] : op.to
+      return
+    }
+    case 'translateObject': {
+      const list = op.target === 'path' ? document.paths : document.regions
+      const shape = list.find((item) => item.id === op.id)
+      if (!shape) return
+      shape.pts = shape.pts.map((point) => [point[0] + op.dx, point[1] + op.dy] as [number, number])
+      return
+    }
   }
 }
 
@@ -298,6 +379,13 @@ export function invertOp(op: MapOp): MapOp {
       return { ...op, from: op.to, to: op.from }
     case 'renameObject':
       return { ...op, from: op.to, to: op.from }
+    case 'setObjectField':
+      return { ...op, from: op.to, to: op.from }
+    case 'setCellField':
+      return { ...op, from: op.to, to: op.from }
+    case 'translateObject':
+      // 逆操作就是把位移取反（刚体变换的逆还是刚体变换）
+      return { ...op, dx: -op.dx, dy: -op.dy }
   }
 }
 

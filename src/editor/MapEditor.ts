@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 地图编辑器：模式、当前地形、笔刷大小、笔画生命周期与撤销栈。
  *
  * 笔画的关键设计：**边拖边画**（用户要立刻看到），但历史只记一条。
@@ -33,12 +33,19 @@ import { History, applyOp, opsFromPrevious, type MapOp } from './history.ts'
 import {
   describeSelection,
   hitTestSelection,
+  isCollectionKind,
+  objectRecordOf,
+  readObjectFieldValue,
+  sameObjectFieldValue,
+  selectionSupports,
+  SELECTION_KINDS,
   type MapSelection,
+  type SelectionFieldValue,
   type SelectionInfo,
   type SelectionLabelResolvers,
 } from './selection.ts'
 import { nextLabelId, nextMarkerId, snapToCellCenter } from '../render/markerPlacement.ts'
-import { hitTestPolygon, hitTestPolyline, visiblePolyline } from '../render/shapeGeometry.ts'
+import { hitTestPolygon, hitTestPolyline, shapeBounds, visiblePolyline } from '../render/shapeGeometry.ts'
 import {
   DEFAULT_PATH_CAP,
   DEFAULT_PATH_JOIN,
@@ -374,7 +381,10 @@ export class MapEditor {
    */
   setSelectionLink(link: string): boolean {
     const selection = this.selection
-    if (selection === null || selection.kind === 'cell') return false
+    // 能力判断**读表**：地块的动作表里没有 link，于是这里自然拒绝 —— 不写 `kind === 'cell'`
+    if (selection === null || !selectionSupports(selection.kind, 'link')) return false
+    // 存储形状也读表（地块在 `terrain` 映射里，不适用"按 id 找对象"的 op）
+    if (!isCollectionKind(selection.kind)) return false
     const document_ = this.options.getDocument()
     if (!document_) return false
     const current = currentLinkOf(document_, selection)
@@ -386,7 +396,8 @@ export class MapEditor {
   /** 给当前选中项改名（文字标注改的是它的文字）；地块没有名字，返回 false */
   setSelectionName(name: string): boolean {
     const selection = this.selection
-    if (selection === null || selection.kind === 'cell') return false
+    if (selection === null || !selectionSupports(selection.kind, 'rename')) return false
+    if (!isCollectionKind(selection.kind)) return false
     const document_ = this.options.getDocument()
     if (!document_) return false
     const current = currentNameOf(document_, selection)
@@ -431,8 +442,113 @@ export class MapEditor {
     return removed
   }
 
-  getPathLink(id: string): string {
-    return this.options.getDocument()?.paths.find((path) => path.id === id)?.link ?? ''
+  // ------------------------------------------------- 侧栏就地编辑（类型 / 位置 / 外观）
+
+  /**
+   * 改**当前选中项的类型**（标记图标 / 地形种类 / 路径类型 / 区域类型）。
+   *
+   * 「类型写在文件里的哪个键」不是这里写死的，而是读 `SELECTION_KINDS[kind].typeField`：
+   * 以后加一种新对象（例如温度带）时，这一段不用改。
+   *
+   * **只改这一个字段**：颜色 / 线宽 / 虚线是对象自己的参数，改类型不许连带改它们
+   * （与"改设置里的默认值只影响新对象"是同一条语义）。
+   */
+  setSelectionType(id: string): boolean {
+    const selection = this.selection
+    if (selection === null) return false
+    const field = SELECTION_KINDS[selection.kind].typeField
+    if (field === undefined) return false
+    return this.setSelectionField(field, id)
+  }
+
+  /**
+   * 改当前选中项**自己的一个字段**（外观与坐标都走这里）。
+   *
+   * 两道闸，都是为了"别把垃圾写进用户文件"：
+   * - 只允许改**表里声明过**的字段（类型字段 / 位置字段 `p` / `fields` 里列出的外观字段），
+   *   面板传错键名就直接拒绝，而不是悄悄新增一个没人认识的键；
+   * - 数字字段必须在声明的范围内。**刻意不做"悄悄夹到边界"**：夹了以后用户看到的输入
+   *   与文件里的值会不一致，那是更难查的问题（历史上"输入被静默改写"已经出过一次，§5.33）。
+   *
+   * `value === null` = 删掉该字段（例如"清除覆盖色"），而不是写一个 null 进去 ——
+   * 文件里少一个键与多一个 `null` 是两种东西。
+   */
+  setSelectionField(field: string, value: SelectionFieldValue): boolean {
+    const selection = this.selection
+    if (selection === null) return false
+    const document_ = this.options.getDocument()
+    if (!document_) return false
+    const spec = SELECTION_KINDS[selection.kind]
+    const positionField = spec.position === 'point' ? 'p' : null
+    const fieldSpec = spec.fields.find((item) => item.field === field)
+    const declared = field === spec.typeField || field === positionField || fieldSpec !== undefined
+    if (!declared) return false
+    if (fieldSpec !== undefined && fieldSpec.control === 'number' && typeof value === 'number') {
+      if (fieldSpec.min !== undefined && value < fieldSpec.min) return false
+      if (fieldSpec.max !== undefined && value > fieldSpec.max) return false
+    }
+    const record = objectRecordOf(document_, selection.kind, selection.id)
+    if (record === null) return false
+    const current = readObjectFieldValue(record, field)
+    if (sameObjectFieldValue(current, value)) return false
+    // 存储形状决定用哪个 op（数组里的对象 vs `terrain` 映射里的一格）——依据同样来自表
+    const op: MapOp = isCollectionKind(selection.kind)
+      ? { kind: 'setObjectField', target: selection.kind, id: selection.id, field, from: current, to: value }
+      : { kind: 'setCellField', key: selection.id, field, from: current, to: value }
+    this.commit([op], `修改${fieldSpec?.label ?? '属性'}`)
+    return true
+  }
+
+  /**
+   * 给点对象（标记 / 名称）设坐标。
+   *
+   * 面板只在**回车或失焦**时调它 —— 于是"输入框里敲一串数字"是**一条**历史，
+   * 而不是每敲一个字符写一次盘（一次提交 = 一条历史，见 history.ts 顶部设计）。
+   */
+  setSelectionPosition(x: number, y: number): boolean {
+    const selection = this.selection
+    if (selection === null) return false
+    if (SELECTION_KINDS[selection.kind].position !== 'point') return false
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false
+    return this.setSelectionField('p', [x, y])
+  }
+
+  /**
+   * 把当前选中项整体移到某个世界坐标（侧栏的「移到视口中心」用）。
+   *
+   * - 点对象：直接设坐标；
+   * - 路径 / 区域：按**包围盒中心**平移，顶点相对位置不变，记的是位移量（撤销即取反）；
+   * - 地块：不支持 —— 搬地形会牵涉覆盖色、相邻连通与"整片铺图"的分组，
+   *   那是另一件事，不该混在"调位置"里悄悄做。
+   *
+   * `center` 由调用方给（`main.ts` 从当前视口算），编辑器不认识视口 —— 保持这一层可单测。
+   */
+  moveSelectionTo(center: Point): boolean {
+    const selection = this.selection
+    if (selection === null) return false
+    const spec = SELECTION_KINDS[selection.kind]
+    if (spec.position === 'point') return this.setSelectionPosition(center.x, center.y)
+    if (spec.position !== 'shape') return false
+    // 这一处必须按 kind 分派：路径与区域存在**两个不同的数组**里，这是存储差异不是能力差异
+    if (selection.kind !== 'path' && selection.kind !== 'region') return false
+    const document_ = this.options.getDocument()
+    if (!document_) return false
+    const shape =
+      selection.kind === 'path'
+        ? document_.paths.find((item) => item.id === selection.id)
+        : document_.regions.find((item) => item.id === selection.id)
+    if (shape === undefined || shape.pts.length === 0) return false
+    const box = shapeBounds(shape.pts.map(([x, y]) => ({ x, y })))
+    const dx = center.x - (box.minX + box.maxX) / 2
+    const dy = center.y - (box.minY + box.maxY) / 2
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false
+    // 已经在中心：不产生空历史
+    if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return false
+    this.commit([{ kind: 'translateObject', target: selection.kind, id: selection.id, dx, dy }], '移到视口中心')
+    return true
+  }
+
+  getPathLink(id: string): string {    return this.options.getDocument()?.paths.find((path) => path.id === id)?.link ?? ''
   }
 
   setPathLink(id: string, link: string): boolean {

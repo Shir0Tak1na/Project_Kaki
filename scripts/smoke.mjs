@@ -8932,6 +8932,241 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   plugin.onunload()
 }
 
+// ================================================== 场景 39：侧栏就地编辑（A2）
+console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三组默认收起）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const file = await store.createMap({ name: 'Edit', folder: 'Maps', canvasPath })
+
+  const seeded = await store.load(file)
+  seeded.document.terrain[cellKey(6, 0)] = { t: 'forest' }
+  seeded.document.markers.push({ id: 'mk-1', label: '港口', p: [0, 0], icon: 'town' })
+  seeded.document.paths.push({ id: 'pa-1', type: 'river', pts: [[-800, 600], [-400, 600], [0, 600]], width: 8, color: '#2288ff' })
+  // 本机没有定义的类型（模拟"别的库/别的版本写下的"）：必须原样保留，同时**允许用户改掉**
+  seeded.document.paths.push({ id: 'pa-unknown', type: 'spaceship-lane', pts: [[-800, -600], [-400, -600]], width: 4, color: '#8888ff' })
+  seeded.document.regions.push({ id: 'rg-1', label: '王国', pts: [[-900, -800], [-300, -800], [-300, -400]], color: '#44cf6e', opacity: 0.2, type: 'realm' })
+  await store.writeNow(file, seeded.document, 'Edit', [canvasPath])
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const editor = layers.getEditor(canvasPath)
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const doc = () => layers.getDocument(canvasPath)
+  const clickWorld = (world) => {
+    const client = canvas._clientFor(world)
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+    flushFrames()
+  }
+
+  plugin.ribbonIcons[0].callback()
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const panel = app.workspace.getLeavesOfType('fictional-cartographer-panel')[0].view
+  const groupEl = (role) => collectByClass(panel.contentEl, 'fc-selection-group').find((el) => el.dataset?.fcGroup === role)
+  const fieldEl = (name) =>
+    [
+      ...collectByClass(panel.contentEl, 'fc-selection-select'),
+      ...collectByClass(panel.contentEl, 'fc-selection-color'),
+      ...collectByClass(panel.contentEl, 'fc-selection-input'),
+      ...collectByClass(panel.contentEl, 'fc-selection-mini'),
+      ...collectByClass(panel.contentEl, 'fc-selection-button'),
+    ].find((el) => el.dataset?.fcField === name)
+  const changeField = (name, value) => {
+    const el = fieldEl(name)
+    el.value = value
+    el.dispatchEvent({ type: 'change' })
+    el.dispatchEvent({ type: 'blur' })
+    flushFrames()
+  }
+  const commitInput = (name, value) => {
+    const el = fieldEl(name)
+    el.value = value
+    fireEvent(el, 'keydown', { key: 'Enter' })
+    flushFrames()
+  }
+
+  // ---- 选中标记：三组默认收起（用户嫌"UI 太多"，首屏只留信息与动作）----
+  clickWorld({ x: 0, y: 0 })
+  check('选中了标记', JSON.stringify(editor.getSelection()) === JSON.stringify({ kind: 'marker', id: 'mk-1' }), JSON.stringify(editor.getSelection()))
+  check(
+    '首屏就有类型/位置/外观三组（默认收起，细节按需展开）',
+    collectByClass(panel.contentEl, 'fc-selection-group').map((el) => el.dataset?.fcGroup).join(',') ===
+      'type,position,appearance',
+    JSON.stringify(collectByClass(panel.contentEl, 'fc-selection-group').map((el) => el.dataset?.fcGroup)),
+  )
+  check('类型组存在且默认收起', groupEl('type') !== undefined && groupEl('type').open === false, JSON.stringify(groupEl('type')?.open))
+  check('位置组默认收起', groupEl('position') !== undefined && groupEl('position').open === false, JSON.stringify(groupEl('position')?.open))
+  check('外观组默认收起', groupEl('appearance') !== undefined && groupEl('appearance').open === false, JSON.stringify(groupEl('appearance')?.open))
+
+  // ---- 类型：下拉列出内置与自定义，改完只影响这一个对象 ----
+  const typeSelect = fieldEl('type')
+  check('类型下拉的当前值就是它的图标', typeSelect?.value === 'town', String(typeSelect?.value))
+  check(
+    '类型下拉列出了内置 9 种（不是空下拉）',
+    (typeSelect?.children ?? []).length >= 9,
+    String((typeSelect?.children ?? []).length),
+  )
+  const undoBeforeType = editor.getStatus().undo
+  changeField('type', 'city')
+  check('改类型写进了文档', doc().markers[0]?.icon === 'city', String(doc().markers[0]?.icon))
+  check('改类型没有连带改别的字段（名称与链接不动）', doc().markers[0]?.label === '港口', JSON.stringify(doc().markers[0]))
+  check('改类型进了一条历史', editor.getStatus().undo === undoBeforeType + 1, `${undoBeforeType} → ${editor.getStatus().undo}`)
+  editor.undo()
+  check('撤销把类型退回去了', doc().markers[0]?.icon === 'town', String(doc().markers[0]?.icon))
+  flushFrames()
+
+  // ---- 位置：点对象的坐标可编辑（一次提交 = 一条历史）----
+  clickWorld({ x: 0, y: 0 })
+  const undoBeforeMove = editor.getStatus().undo
+  commitInput('x', '250')
+  commitInput('y', '-75')
+  check(
+    '坐标输入写进了文档',
+    JSON.stringify(doc().markers[0]?.p) === JSON.stringify([250, -75]),
+    JSON.stringify(doc().markers[0]?.p),
+  )
+  check(
+    '两次输入 = 两条历史（每个字段一次提交，不因按键逐字写盘）',
+    editor.getStatus().undo === undoBeforeMove + 2,
+    `${undoBeforeMove} → ${editor.getStatus().undo}`,
+  )
+  editor.undo()
+  editor.undo()
+  check('撤销两次回到原位', JSON.stringify(doc().markers[0]?.p) === JSON.stringify([0, 0]), JSON.stringify(doc().markers[0]?.p))
+  flushFrames()
+
+  // ---- 外观：颜色 / 虚线 / 越界值 ----
+  clickWorld({ x: -400, y: 600 })
+  check('选中了路径（形状命中）', JSON.stringify(editor.getSelection()) === JSON.stringify({ kind: 'path', id: 'pa-1' }), JSON.stringify(editor.getSelection()))
+  changeField('field-color', '#ff00aa')
+  check('改颜色写进了文档', doc().paths.find((item) => item.id === 'pa-1')?.color === '#ff00aa', String(doc().paths.find((item) => item.id === 'pa-1')?.color))
+  commitInput('field-dash', '12,4')
+  check(
+    '虚线按"逗号分隔的数组"写进文档（沿用既有三态语义，不重新发明）',
+    JSON.stringify(doc().paths.find((item) => item.id === 'pa-1')?.dash) === JSON.stringify([12, 4]),
+    JSON.stringify(doc().paths.find((item) => item.id === 'pa-1')?.dash),
+  )
+  const undoBeforeBadWidth = editor.getStatus().undo
+  commitInput('field-width', '99')
+  check(
+    '超出范围的线宽被拒绝，且**不写历史**（静默夹到 40 会让界面与文件不一致）',
+    doc().paths.find((item) => item.id === 'pa-1')?.width === 8 && editor.getStatus().undo === undoBeforeBadWidth,
+    `width=${String(doc().paths.find((item) => item.id === 'pa-1')?.width)} undo=${editor.getStatus().undo}`,
+  )
+  commitInput('field-dash', '')
+  check(
+    '虚线留空 = 删除该字段（回到类型默认，而不是写一个空数组）',
+    doc().paths.find((item) => item.id === 'pa-1')?.dash === undefined,
+    JSON.stringify(doc().paths.find((item) => item.id === 'pa-1')?.dash),
+  )
+
+  // ---- 未知类型：原样保留 + 可改成已知类型；改类型不许连带改它的参数 ----
+  clickWorld({ x: -600, y: -600 })
+  check('选中了那条"未知类型"的路径', JSON.stringify(editor.getSelection()) === JSON.stringify({ kind: 'path', id: 'pa-unknown' }), JSON.stringify(editor.getSelection()))
+  const unknownSelect = fieldEl('type')
+  check(
+    '下拉里补了一条「未知（spaceship-lane）」并保持为当前值（不改写用户数据）',
+    unknownSelect?.value === 'spaceship-lane' &&
+      (unknownSelect?.children ?? []).some((option) => (option.textContent ?? '').includes('未知（spaceship-lane）')),
+    `${String(unknownSelect?.value)} | ${JSON.stringify((unknownSelect?.children ?? []).map((option) => option.textContent))}`,
+  )
+  // ⚠️ 抓的是**快照值**而不是对象引用：拿引用比会在"实现把对象换掉"时照样通过（空转）。
+  // 这条是跑鉴别力验证时抓出来的 —— 那次破坏只让"改颜色"那条红了，说明这里原来白测。
+  const beforeUnknown = (() => {
+    const path = doc().paths.find((item) => item.id === 'pa-unknown')
+    return { color: path?.color, width: path?.width, points: path?.pts.length }
+  })()
+  changeField('type', 'road')
+  const afterUnknown = (() => {
+    const path = doc().paths.find((item) => item.id === 'pa-unknown')
+    return { type: path?.type, color: path?.color, width: path?.width, points: path?.pts.length }
+  })()
+  check('可以把未知类型改成已知类型', afterUnknown.type === 'road', String(afterUnknown.type))
+  check(
+    '改类型没有连带改它的颜色与线宽（那些是对象自己的参数）',
+    afterUnknown.color === beforeUnknown.color && afterUnknown.width === beforeUnknown.width,
+    JSON.stringify({ before: beforeUnknown, after: afterUnknown }),
+  )
+  check('顶点数没变（改类型不动几何）', afterUnknown.points === beforeUnknown.points, JSON.stringify(afterUnknown))
+
+  // ---- 移到视口中心（形状按包围盒中心平移，一条历史，可撤销）----
+  const visible = layers.listStatus()[0].stats?.lastVisibleWorld
+  const centerBefore = doc().regions[0]?.pts.map((point) => [...point])
+  // ⚠️ 必须点在**区域内、且避开那条 y=-600 的路径**：路径的命中优先级高于区域，
+  //    点在两者重叠处会选中路径 —— 这条是写这个场景时抓到的（"居中没生效"其实是选错了对象）。
+  editor.selectAt({ x: -500, y: -700 }, 20)
+  flushFrames()
+  check('选中了区域（不是与它重叠的路径）', editor.getSelection()?.kind === 'region', JSON.stringify(editor.getSelection()))
+  const undoBeforeCenter = editor.getStatus().undo
+  const centerButton = fieldEl('center')
+  check('形状的位置组给出了「移到视口中心」', centerButton !== undefined)
+  centerButton.dispatchEvent({ type: 'click' })
+  flushFrames()
+  const moved = doc().regions[0]
+  const movedMinX = Math.min(...(moved?.pts ?? []).map((point) => point[0]))
+  const movedMaxX = Math.max(...(moved?.pts ?? []).map((point) => point[0]))
+  const movedMinY = Math.min(...(moved?.pts ?? []).map((point) => point[1]))
+  const movedMaxY = Math.max(...(moved?.pts ?? []).map((point) => point[1]))
+  const expectedX = ((visible?.minX ?? 0) + (visible?.maxX ?? 0)) / 2
+  const expectedY = ((visible?.minY ?? 0) + (visible?.maxY ?? 0)) / 2
+  check(
+    '区域被移到视口中心（按包围盒中心对齐，误差 < 1e-6）',
+    Math.abs((movedMinX + movedMaxX) / 2 - expectedX) < 1e-6 && Math.abs((movedMinY + movedMaxY) / 2 - expectedY) < 1e-6,
+    JSON.stringify({ got: [(movedMinX + movedMaxX) / 2, (movedMinY + movedMaxY) / 2], want: [expectedX, expectedY] }),
+  )
+  check('居中进了一条历史', editor.getStatus().undo === undoBeforeCenter + 1, `${undoBeforeCenter} → ${editor.getStatus().undo}`)
+  editor.undo()
+  check(
+    '撤销把区域放回原位（顶点一个不差）',
+    JSON.stringify(doc().regions[0]?.pts) === JSON.stringify(centerBefore),
+    JSON.stringify(doc().regions[0]?.pts),
+  )
+  flushFrames()
+
+  // ---- 覆盖色：设了能清掉（清 = 删字段，不是写 null）----
+  clickWorld({ x: 0, y: 0 })
+  changeField('field-c', '#123456')
+  check('覆盖色写进了文档', doc().markers[0]?.c === '#123456', String(doc().markers[0]?.c))
+  const clearButton = fieldEl('clear-c')
+  check('有覆盖色时「清除」可用', clearButton?.disabled === false, String(clearButton?.disabled))
+  clearButton.dispatchEvent({ type: 'click' })
+  flushFrames()
+  check(
+    '清除 = 删掉该字段（不是写一个 null 进去）',
+    'c' in (doc().markers[0] ?? {}) === false,
+    JSON.stringify(doc().markers[0]),
+  )
+
+  // ---- 地块：能改地形种类，但没有名称/链接，位置只读 ----
+  clickWorld({ x: 0, y: 0 })
+  const grid = { kind: 'hex', orientation: 'pointy', size: 40, origin: [0, 0] }
+  editor.selectAt(axialToWorld(grid, 6, 0), 20)
+  flushFrames()
+  check(
+    '地块的类型组在（能改地形种类）',
+    groupEl('type') !== undefined && fieldEl('type')?.value === 'forest',
+    String(fieldEl('type')?.value),
+  )
+  check('地块没有名称栏与链接栏（动作表里只有删除）', fieldEl('name') === undefined && fieldEl('link') === undefined)
+  check(
+    '地块的位置是只读文字（不能搬地形）',
+    (collectByClass(panel.contentEl, 'fc-selection-readonly')[0]?.textContent ?? '').includes('不能搬动'),
+    String(collectByClass(panel.contentEl, 'fc-selection-readonly')[0]?.textContent),
+  )
+  changeField('type', 'mountain')
+  check('改地形种类写进了文档', doc().terrain[cellKey(6, 0)]?.t === 'mountain', String(doc().terrain[cellKey(6, 0)]?.t))
+
+  plugin.onunload()
+}
+
 // ---------------------------------------------- 文档基线自检（防止基线漂移）
   /**
    * 文档里写着"本次冒烟有多少条断言"，这里让它自己对一次账。

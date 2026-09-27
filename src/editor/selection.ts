@@ -41,13 +41,43 @@
  * 否则会出现"右键能删掉、左键选不中"这种两套命中互相打架的状态。
  */
 
-import { cellKey, worldToAxial, type GridSpec, type Point } from '../core/hex.ts'
+import { cellKey, parseCellKey, worldToAxial, type GridSpec, type Point } from '../core/hex.ts'
 import type { MapDocument } from '../data/mapDocument.ts'
 
 export type SelectionKind = 'marker' | 'label' | 'path' | 'region' | 'cell'
 
 /** 检查器能提供的动作（实现分别在 main.ts / MapEditor，且都走既有撤销与落盘路径） */
 export type SelectionActionId = 'rename' | 'link' | 'delete'
+
+/**
+ * 「类型」下拉的候选从哪里来。面板不认识任何目录，它只知道**来源名**，
+ * 真正的候选清单由 `main.ts` 按这个名字去查对应的目录（内置 + 自定义）。
+ */
+export type SelectionTypeSource = 'terrain' | 'marker' | 'path' | 'region'
+
+/** 「位置」这一组怎么表达：点对象可编辑坐标，形状只能整体移动，地块只读 */
+export type SelectionPosition = 'point' | 'cell' | 'shape' | 'none'
+
+/** 位置当前值（面板据此渲染，不在面板里算几何） */
+export type SelectionPositionValue =
+  | { kind: 'point'; x: number; y: number }
+  | { kind: 'cell'; q: number; r: number }
+  | { kind: 'shape'; points: number }
+  | null
+
+/** 一个可编辑的"外观"字段（对象自己的参数，存在地图文件里） */
+export interface SelectionFieldSpec {
+  /** 文件里的键名（`color` / `width` / `dash` / `opacity` / `borderColor` / `borderWidth` / `borderDash` / `c`） */
+  field: string
+  label: string
+  control: 'color' | 'number' | 'dash'
+  /** 数字控件的范围（世界单位或 0–1），仅 `control: 'number'` 有意义 */
+  min?: number
+  max?: number
+}
+
+/** 字段当前值（`null` = 文件里没有这个键） */
+export type SelectionFieldValue = string | number | number[] | null
 
 /** 选中的对象。`id` 就是地图文件里的标识（地块是 `cellKey` 生成的格键，形如 `"2_0"`） */
 export interface MapSelection {
@@ -95,6 +125,27 @@ export interface SelectionKindSpec {
   data: (document: MapDocument, id: string, labels: SelectionLabelResolvers) => SelectionData | null
   /** 这种对象支持哪些动作（检查器据此渲染按钮） */
   actions: readonly SelectionActionId[]
+  /**
+   * 「类型」写在文件里的哪个键（`marker.icon` / `cell.t` / `path.type` / `region.type`）。
+   * 没有这一列 = 这类对象没有类型可改（例如文字标注没有类型）。
+   */
+  typeField?: string
+  /** 类型的候选来源（面板拿它向 `main.ts` 要候选清单） */
+  typeSource?: SelectionTypeSource
+  /** 「位置」这一组怎么表达 */
+  position: SelectionPosition
+  /**
+   * 这类对象**存在哪里**：`collection` = 文档里某个对象数组（标记/名称/路径/区域）；
+   * `grid` = `document.terrain` 这个以格键为键的映射（地块）。
+   *
+   * 为什么要显式写出来：读写路径不一样（数组靠 `find`，映射靠键），
+   * 而"能不能改名称/链接"这类**能力**判断必须只来自 `actions` ——
+   * 有了这一列，编辑器里就不需要 `kind === 'cell'` 这种散落的判断
+   * （那种判断是"加新对象种类要改五处"的根源）。
+   */
+  storage: 'collection' | 'grid'
+  /** 「外观」这一组有哪些可编辑字段（按顺序渲染） */
+  fields: readonly SelectionFieldSpec[]
 }
 
 /**
@@ -144,6 +195,11 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
       }
     },
     actions: ['rename', 'link', 'delete'],
+    typeField: 'icon',
+    typeSource: 'marker',
+    position: 'point',
+    storage: 'collection',
+    fields: [{ field: 'c', label: '覆盖色', control: 'color' }],
   },
   label: {
     label: '名称',
@@ -159,6 +215,10 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
       }
     },
     actions: ['rename', 'link', 'delete'],
+    // 文字标注没有类型（它显示的就是文字本身）；位置与标记同构（同为点对象），外观暂无字段
+    position: 'point',
+    storage: 'collection',
+    fields: [],
   },
   path: {
     label: '路径',
@@ -178,6 +238,16 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
       }
     },
     actions: ['rename', 'link', 'delete'],
+    typeField: 'type',
+    typeSource: 'path',
+    position: 'shape',
+    storage: 'collection',
+    fields: [
+      { field: 'color', label: '颜色', control: 'color' },
+      // 与 `pathTypeCatalog` 的线宽范围一致（1–40）：两处不一致会让"设置里能填、这里填不了"
+      { field: 'width', label: '线宽', control: 'number', min: 1, max: 40 },
+      { field: 'dash', label: '虚线', control: 'dash' },
+    ],
   },
   region: {
     label: '区域',
@@ -201,6 +271,17 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
       }
     },
     actions: ['rename', 'link', 'delete'],
+    typeField: 'type',
+    typeSource: 'region',
+    position: 'shape',
+    storage: 'collection',
+    fields: [
+      { field: 'color', label: '填充色', control: 'color' },
+      { field: 'opacity', label: '不透明度', control: 'number', min: 0, max: 1 },
+      { field: 'borderColor', label: '边框色', control: 'color' },
+      { field: 'borderWidth', label: '边框宽', control: 'number', min: 0, max: 40 },
+      { field: 'borderDash', label: '边框虚线', control: 'dash' },
+    ],
   },
   cell: {
     label: '地块',
@@ -215,7 +296,7 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
       const cell = document.terrain[id]
       if (cell === undefined) return null
       return {
-        // 地块没有名字：检查器那一栏显示地形种类，且不可编辑（改地形种类属于后续增量）
+        // 地块没有名字：检查器那一栏显示地形种类，且不可编辑
         name: labels.terrain(cell.t),
         link: '',
         detail: `格 ${id} · 地形 ${labels.terrain(cell.t)}`,
@@ -223,6 +304,11 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
     },
     // 地块没有名字也没有链接：动作表里就只有删除
     actions: ['delete'],
+    typeField: 't',
+    typeSource: 'terrain',
+    position: 'cell',
+    storage: 'grid',
+    fields: [{ field: 'c', label: '覆盖色', control: 'color' }],
   },
 }
 
@@ -273,13 +359,99 @@ export interface SelectionInfo {
   canRename: boolean
   canLink: boolean
   canDelete: boolean
+  /** 类型：写得进文件里的键名（null = 这类对象没有类型） */
+  typeField: string | null
+  /** 类型候选从哪个目录来（null = 没有类型下拉） */
+  typeSource: SelectionTypeSource | null
+  /** 当前类型值（可能是本机没有定义的 ID —— 面板要显示成「未知（ID）」并允许改掉） */
+  typeValue: string | null
+  /** 位置这一组怎么表达 */
+  position: SelectionPosition
+  /** 位置当前值 */
+  positionValue: SelectionPositionValue
+  /** 外观这一组有哪些字段 */
+  fields: readonly SelectionFieldSpec[]
+  /** 外观字段的当前值（`null` = 文件里没有这个键） */
+  fieldValues: Record<string, SelectionFieldValue>
+}
+
+/** 取某个对象的原始记录（**含这一版不认识的字段**），用来读写"对象自己的参数" */
+export function objectRecordOf(
+  document: MapDocument,
+  kind: SelectionKind,
+  id: string,
+): Record<string, unknown> | null {
+  switch (kind) {
+    case 'marker':
+      return (document.markers.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+    case 'label':
+      return (document.labels.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+    case 'path':
+      return (document.paths.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+    case 'region':
+      return (document.regions.find((item) => item.id === id) as unknown as Record<string, unknown>) ?? null
+    case 'cell':
+      return (document.terrain[id] as unknown as Record<string, unknown>) ?? null
+  }
+}
+
+/** 把原始记录上的字段值取出来给面板用（只认三种形状：字符串 / 数字 / 数字数组） */
+export function readObjectFieldValue(record: Record<string, unknown>, field: string): SelectionFieldValue {
+  const raw = record[field]
+  if (typeof raw === 'string') return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+  if (Array.isArray(raw) && raw.every((item) => typeof item === 'number' && Number.isFinite(item))) {
+    return raw as number[]
+  }
+  return null
+}
+
+/**
+ * 两个字段值是否相同（决定"这次编辑算不算一次改动"）。
+ *
+ * 数组要按内容比：`[1,2] !== [1,2]` —— 用 `===` 会让"重新提交同样的虚线"每次都记一条历史。
+ * 这条也保证面板重复提交同一个值不会污染撤销栈。
+ */
+export function sameObjectFieldValue(a: SelectionFieldValue, b: SelectionFieldValue): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false
+    return a.length === b.length && a.every((item, index) => item === b[index])
+  }
+  return a === b
+}
+
+/** 位置当前值（几何计算留在这里，面板只负责画） */
+function readPositionValue(
+  kind: SelectionKind,
+  position: SelectionPosition,
+  record: Record<string, unknown>,
+  id: string,
+): SelectionPositionValue {
+  if (position === 'point') {
+    const p = record.p
+    if (!Array.isArray(p) || p.length < 2) return null
+    const [x, y] = p as unknown[]
+    if (typeof x !== 'number' || typeof y !== 'number') return null
+    return { kind: 'point', x, y }
+  }
+  if (position === 'cell') {
+    const axial = parseCellKey(id)
+    return axial === null ? null : { kind: 'cell', q: axial.q, r: axial.r }
+  }
+  if (position === 'shape') {
+    const pts = record.pts
+    return { kind: 'shape', points: Array.isArray(pts) ? pts.length : 0 }
+  }
+  void kind
+  return null
 }
 
 /**
  * 把一份文档 + 一个选中项，变成检查器要显示的那一条。
  *
  * 三个 `canXxx` 是从 `actions` **派生**的（不是第二份状态）：面板渲染动作、单测断言能力，
- * 读的都是同一张表里那一行。
+ * 读的都是同一张表里那一行。类型 / 位置 / 外观三组同样全部从表里读 ——
+ * **面板里不该出现任何 `kind === 'cell'` 这种判断**（那会让"加新对象种类"变成改五处）。
  */
 export function describeSelection(
   document: MapDocument,
@@ -290,7 +462,13 @@ export function describeSelection(
   const spec = SELECTION_KINDS[selection.kind]
   const data = spec.data(document, selection.id, labels)
   if (data === null) return null
+  const record = objectRecordOf(document, selection.kind, selection.id)
+  if (record === null) return null
   const actions = spec.actions
+  const typeField = spec.typeField ?? null
+  const typeRaw = typeField === null ? null : record[typeField]
+  const fieldValues: Record<string, SelectionFieldValue> = {}
+  for (const field of spec.fields) fieldValues[field.field] = readObjectFieldValue(record, field.field)
   return {
     kind: selection.kind,
     kindLabel: spec.label,
@@ -302,7 +480,41 @@ export function describeSelection(
     canRename: actions.includes('rename'),
     canLink: actions.includes('link'),
     canDelete: actions.includes('delete'),
+    typeField,
+    typeSource: spec.typeSource ?? null,
+    typeValue: typeof typeRaw === 'string' ? typeRaw : null,
+    position: spec.position,
+    positionValue: readPositionValue(selection.kind, spec.position, record, selection.id),
+    fields: spec.fields,
+    fieldValues,
   }
+}
+
+/**
+ * 存在「对象数组」里的那几类（地块存在 `terrain` 映射里，读写方式不同）。
+ *
+ * **由表里的 `storage` 列派生**，不是第二份真相：编辑器里需要把选中项窄化成
+ * "能当作对象数组里的对象处理"时用它，于是就不必写 `kind === 'cell'` 这种散落判断。
+ */
+export const COLLECTION_KINDS: readonly SelectionKind[] = (Object.keys(SELECTION_KINDS) as SelectionKind[]).filter(
+  (kind) => SELECTION_KINDS[kind].storage === 'collection',
+)
+
+/** 是不是"存在对象数组里"的那几类（类型窄化用；依据同上，来自表） */
+export function isCollectionKind(kind: SelectionKind): kind is Exclude<SelectionKind, 'cell'> {
+  return COLLECTION_KINDS.includes(kind)
+}
+
+/** 字段值 → 输入框里显示的文本（面板只负责显示；解析与范围检查在编辑器那一层做） */
+export function formatSelectionFieldValue(field: SelectionFieldSpec, value: SelectionFieldValue): string {
+  if (value === null) return ''
+  if (Array.isArray(value)) return value.join(',')
+  return String(value)
+}
+
+/** 某类对象支持某个动作吗（能力判断的**唯一来源**；需要的地方都读这里，不要自己写 kind 判断） */
+export function selectionSupports(kind: SelectionKind, action: SelectionActionId): boolean {
+  return SELECTION_KINDS[kind].actions.includes(action)
 }
 
 /** 检查器顶部那条引导（用户反馈"功能引导不清晰"的最小修复） */

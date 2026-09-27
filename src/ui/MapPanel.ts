@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 地图面板：右侧边栏里的一个视图，把常用动作变成按钮。
  *
  * 为什么需要它：常用命令原本只能走 `Ctrl+P` 再搜一次，用起来很累。
@@ -19,7 +19,12 @@
  */
 
 import { ItemView, setIcon, type WorkspaceLeaf } from 'obsidian'
-import { SELECTION_EMPTY_HINT, type SelectionActionId, type SelectionInfo } from '../editor/selection.ts'
+import {
+  formatSelectionFieldValue,
+  SELECTION_EMPTY_HINT,
+  type SelectionActionId,
+  type SelectionInfo,
+} from '../editor/selection.ts'
 import {
   LAYER_HINTS,
   LAYER_KEYS,
@@ -67,6 +72,26 @@ export interface MapPanelDeps {
   onPickSelectionNote: () => void
   /** 删除当前选中项（走既有删除实现，可撤销） */
   onDeleteSelection: () => void
+  /**
+   * 「类型」下拉的候选清单（内置 + 自定义，由 `main.ts` 按 `SelectionInfo.typeSource` 去查目录）。
+   *
+   * 面板不认识任何目录：它只知道"给我当前选中项该有的候选项"。当前值不在候选里时
+   * （本机没有这个定义），面板会自己补一条「未知（ID）」——用户因此**有办法改掉它**，
+   * 而不是看着一个改不动、也看不懂的值。
+   */
+  getSelectionTypeOptions: () => ReadonlyArray<{ value: string; label: string }>
+  /** 改类型（值就是候选里的 `value`） */
+  onSetSelectionType: (value: string) => void
+  /**
+   * 改当前选中项的某个字段。**传原始文本**，解析与范围检查都在外面（编辑器那一层）做：
+   * 面板不认识"虚线"该怎么解析，也不该认识 —— 否则同一套规则会出现两份。
+   * 空串 = 清除该字段（`null`，例如"清除覆盖色"）。
+   */
+  onSetSelectionField: (field: string, rawValue: string) => void
+  /** 给点对象（标记 / 名称）设坐标；面板已经把两个输入框解析成数字 */
+  onSetSelectionPosition: (x: number, y: number) => void
+  /** 把当前选中项整体移到视口中心（形状按包围盒中心平移） */
+  onMoveSelectionToViewportCenter: () => void
   /**
    * 六个图层当前的可见性。
    *
@@ -320,6 +345,162 @@ export class MapPanelView extends ItemView {
    *   （它来自 `selection.ts` 的 `SELECTION_KINDS`）。**加新对象种类时这里一行都不用改** ——
    *   这是那个"长期开放"要求里最容易退化成 if/else 的地方。
    */
+  /**
+   * 「类型 / 位置 / 外观」三组就地编辑（A2）。
+   *
+   * 用户的话是："在侧边栏中显示对象的信息，**方便调整位置，类型等等信息**……尽可能利用侧边栏"，
+   * 同时反复强调"UI 有点多、功能引导不清晰"。所以这一节的做法是：
+   *
+   * - **默认收起**（`<details>`），面板首屏仍然只有"是什么 + 能干什么"；
+   * - 三组**都从表里读**：有没有类型下拉看 `typeSource`，位置怎么表达看 `position`，
+   *   外观有哪些字段看 `fields` —— 面板里**没有任何 `kind === 'xxx'` 判断**；
+   * - 控件的写入全部交回 `deps`（解析、范围检查、历史与落盘都在编辑器那一层）。
+   */
+  private renderSelectionGroups(block: HTMLElement, info: SelectionInfo): void {
+    if (info.typeField !== null && info.typeSource !== null) {
+      const group = this.openGroup(block, '类型', 'type')
+      const select = group.createEl('select', { cls: 'fc-selection-select dropdown' })
+      select.dataset.fcField = 'type'
+      const options = [...this.deps.getSelectionTypeOptions()]
+      const current = info.typeValue ?? ''
+      // 当前值不在候选里（本机没有这个定义）：补一条「未知（ID）」，否则下拉会显示成第一项，
+      // 用户以为类型被改掉了。**保留原值**（§5.11：不认识的东西属于用户的数据）。
+      if (current.length > 0 && !options.some((option) => option.value === current)) {
+        options.unshift({ value: current, label: `未知（${current}）` })
+      }
+      for (const option of options) {
+        const optionEl = select.createEl('option', { text: option.label })
+        optionEl.value = option.value
+      }
+      select.value = current
+      select.addEventListener('change', () => {
+        this.lastSignature = null
+        this.deps.onSetSelectionType(select.value)
+        this.requestRender()
+      })
+      group.createEl('div', { cls: 'fc-selection-hintline', text: '类型：决定它长什么样（改这一个对象，不影响别的）' })
+    }
+
+    if (info.position !== 'none' && info.positionValue !== null) {
+      const group = this.openGroup(block, '位置', 'position')
+      const value = info.positionValue
+      if (value.kind === 'point') {
+        const row = group.createEl('div', { cls: 'fc-selection-row' })
+        const commit = (): void => {
+          const x = Number(xInput.value)
+          const y = Number(yInput.value)
+          if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            // 输入不是数字：把框子改回当前值，**不做任何写入**（静默夹取会让界面与文件不一致）
+            xInput.value = String(value.x)
+            yInput.value = String(value.y)
+            return
+          }
+          this.lastSignature = null
+          this.deps.onSetSelectionPosition(x, y)
+          this.requestRender()
+        }
+        const xInput = row.createEl('input', { cls: 'fc-selection-input fc-selection-number' })
+        xInput.type = 'number'
+        xInput.value = String(value.x)
+        xInput.dataset.fcField = 'x'
+        const yInput = row.createEl('input', { cls: 'fc-selection-input fc-selection-number' })
+        yInput.type = 'number'
+        yInput.value = String(value.y)
+        yInput.dataset.fcField = 'y'
+        for (const input of [xInput, yInput]) {
+          input.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            commit()
+          })
+          input.addEventListener('blur', commit)
+        }
+        group.createEl('div', { cls: 'fc-selection-hintline', text: '坐标：世界单位，回车或点别处后生效（可撤销）' })
+      } else if (value.kind === 'cell') {
+        group.createEl('div', { cls: 'fc-selection-readonly', text: `格 ${value.q}, ${value.r}（地块不能搬动）` })
+      } else {
+        group.createEl('div', { cls: 'fc-selection-readonly', text: `${value.points} 个顶点` })
+      }
+
+      // 点对象用坐标表达位置，形状与地块用"整体移动"更合理：只有形状给这个按钮
+      if (value.kind === 'shape' || value.kind === 'point') {
+        const row = group.createEl('div', { cls: 'fc-selection-buttons' })
+        const button = row.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
+        button.dataset.fcField = 'center'
+        button.createEl('span', { cls: 'fc-panel-button-label', text: '移到视口中心' })
+        button.addEventListener('click', () => {
+          this.lastSignature = null
+          this.deps.onMoveSelectionToViewportCenter()
+          this.requestRender()
+        })
+      }
+    }
+
+    if (info.fields.length > 0) {
+      const group = this.openGroup(block, '外观', 'appearance')
+      const values = info.fieldValues
+      for (const field of info.fields) {
+        const row = group.createEl('div', { cls: 'fc-selection-row' })
+        row.createEl('span', { cls: 'fc-selection-field-label', text: field.label })
+        const current = values[field.field] ?? null
+        if (field.control === 'color') {
+          const picker = row.createEl('input', { cls: 'fc-selection-color' })
+          picker.type = 'color'
+          picker.value = typeof current === 'string' && current.length > 0 ? current : '#888888'
+          picker.dataset.fcField = `field-${field.field}`
+          picker.addEventListener('change', () => {
+            this.lastSignature = null
+            this.deps.onSetSelectionField(field.field, picker.value)
+            this.requestRender()
+          })
+          const clear = row.createEl('button', { cls: 'fc-selection-mini' })
+          clear.dataset.fcField = `clear-${field.field}`
+          clear.setText('清除')
+          clear.disabled = current === null
+          clear.addEventListener('click', () => {
+            this.lastSignature = null
+            this.deps.onSetSelectionField(field.field, '')
+            this.requestRender()
+          })
+          continue
+        }
+        const input = row.createEl('input', { cls: 'fc-selection-input' })
+        input.type = field.control === 'number' ? 'number' : 'text'
+        if (field.min !== undefined) input.min = String(field.min)
+        if (field.max !== undefined) input.max = String(field.max)
+        input.value = formatSelectionFieldValue(field, current)
+        input.placeholder = field.control === 'dash' ? '例如 12,4；留空 = 清除这一项' : ''
+        input.dataset.fcField = `field-${field.field}`
+        const commit = (): void => {
+          if (input.value === formatSelectionFieldValue(field, current)) return
+          this.lastSignature = null
+          this.deps.onSetSelectionField(field.field, input.value)
+          this.requestRender()
+        }
+        input.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return
+          event.preventDefault()
+          commit()
+        })
+        input.addEventListener('blur', commit)
+      }
+      group.createEl('div', {
+        cls: 'fc-selection-hintline',
+        text: '外观：存在地图文件里，只影响这一个对象（改设置里的默认值不会动它）',
+      })
+    }
+  }
+
+  /** 建一个默认收起的组（`<details>`）：首屏只留"是什么 + 能干什么" */
+  private openGroup(parent: HTMLElement, title: string, role: string): HTMLElement {
+    const details = parent.createEl('details', { cls: 'fc-selection-group' })
+    details.dataset.fcGroup = role
+    // 显式设成收起：假 DOM 里没有 `open` 属性时，断言"默认收起"才有意义
+    details.open = false
+    details.createEl('summary', { cls: 'fc-selection-group-title', text: title })
+    return details
+  }
+
   private renderSelection(root: HTMLElement, selection: SelectionInfo | null): void {
     const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-selection' })
     block.createEl('div', { cls: 'fc-panel-group-title', text: '选中的对象' })
@@ -339,6 +520,9 @@ export class MapPanelView extends ItemView {
     for (const action of selection.actions) {
       SELECTION_ACTION_RENDERERS[action]({ block, info: selection, deps: this.deps })
     }
+
+    // 三组就地编辑放在动作之后、且**默认收起**：首屏仍然是"是什么 + 能干什么"
+    this.renderSelectionGroups(block, selection)
   }
 
   /**
