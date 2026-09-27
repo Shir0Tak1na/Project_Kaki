@@ -1,4 +1,6 @@
-# Phase 1 实施记录
+﻿# Phase 1 实施记录
+
+> **历史文档（已归档）**：本文记录的是当时的实施过程与实测数据，**不是当前状态的说明**。当前的能力、约束与扩展点请见 `docs/EXTENSION-POINTS.md`、`docs/ENGINEERING-NOTES.md` 与 `docs/HANDOFF.md`。
 
 > 记录 Phase 1 实施过程中**做过的决定**与**实测到的数字**。
 > 与设计文档 [TECHNICAL-DESIGN-v2.md](./TECHNICAL-DESIGN-v2.md) 冲突时以本文为准（本文更新）。

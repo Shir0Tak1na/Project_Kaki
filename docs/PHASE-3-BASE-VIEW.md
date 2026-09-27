@@ -1,4 +1,6 @@
-# Project Kaki：Phase 3 实施记录（Base 自定义视图）
+﻿# Project Kaki：Phase 3 实施记录（Base 自定义视图）
+
+> **历史文档（已归档）**：本文记录的是当时的实施过程与实测数据，**不是当前状态的说明**。当前的能力、约束与扩展点请见 `docs/EXTENSION-POINTS.md`、`docs/ENGINEERING-NOTES.md` 与 `docs/HANDOFF.md`。
 
 > 目标：把地图数据与笔记**双向**连起来 —— 地图上的东西能在 Base 里被列出、筛选、点击跳转；
 > 笔记只要写了坐标，就能出现在地图上。

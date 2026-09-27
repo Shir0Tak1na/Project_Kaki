@@ -1,4 +1,6 @@
-# Phase 0 实测结果（Obsidian 1.13.7）
+﻿# Phase 0 实测结果（Obsidian 1.13.7）
+
+> **历史文档（已归档）**：本文记录的是当时的实施过程与实测数据，**不是当前状态的说明**。当前的能力、约束与扩展点请见 `docs/EXTENSION-POINTS.md`、`docs/ENGINEERING-NOTES.md` 与 `docs/HANDOFF.md`。
 
 > 本文档记录真实环境下的探针结果，并列出**由数据驱动的设计修订**。
 > 设计文档 [TECHNICAL-DESIGN-v2.md](./TECHNICAL-DESIGN-v2.md) 中与本文冲突之处，以本文为准。

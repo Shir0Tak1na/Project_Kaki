@@ -1,4 +1,6 @@
-# Project Kaki 技术方案 v2（修订版）
+﻿# Project Kaki 技术方案 v2（修订版）
+
+> **历史文档（已归档）**：本文记录的是当时的实施过程与实测数据，**不是当前状态的说明**。当前的能力、约束与扩展点请见 `docs/EXTENSION-POINTS.md`、`docs/ENGINEERING-NOTES.md` 与 `docs/HANDOFF.md`。
 
 > 项目名为 Project Kaki（译名 Project 垣）。插件 ID 为 `project-kaki`；
 > 但地图文档类型 `fictional-cartographer-map` 与 Base 视图 ID `fictional-map` 是写在用户文件里的
