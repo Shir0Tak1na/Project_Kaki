@@ -516,12 +516,13 @@ export class CartographerSettingTab extends PluginSettingTab {
       .setDesc(
         atLimit
           ? `已达上限（${MAX_CUSTOM_TERRAINS} 个）`
-          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+          : `ID 可以留空 —— 留空就按显示名自动生成（「My Forest」→ custom:my-forest；纯中文名得到 custom:类别+序号 这样的短 ID），` +
+              `省得为了记规则去查文档。要手填的话规则是：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
               `前缀 ${CUSTOM_TERRAIN_PREFIX} 会自动补上，避免与内置 9 种重名。`,
       )
       .addText((text) =>
         text
-          .setPlaceholder('ID（例如 swamp2）')
+          .setPlaceholder('ID（留空 = 自动生成，例如 swamp2）')
           .setValue('')
           .onChange((value) => {
             pending.id = value
@@ -544,7 +545,8 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
       .addButton((button) =>
         button.setButtonText('新增').onClick(() => {
-          const problem = terrainIdProblem(pending.id)
+          // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
+          const problem = pending.id.trim().length === 0 ? null : terrainIdProblem(pending.id)
           if (problem !== null) {
             this.setNoteText(problem)
             return
@@ -751,13 +753,14 @@ export class CartographerSettingTab extends PluginSettingTab {
       .setDesc(
         atLimit
           ? `已达上限（${MAX_CUSTOM_MARKERS} 个）`
-          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+          : `ID 可以留空 —— 留空就按显示名自动生成（「My Forest」→ custom:my-forest；纯中文名得到 custom:类别+序号 这样的短 ID），` +
+              `省得为了记规则去查文档。要手填的话规则是：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
               `前缀 ${CUSTOM_MARKER_PREFIX} 会自动补上，避免与内置 9 种重名。` +
               '建好之后可以在上面切模式、选字形或图片。',
       )
       .addText((text) =>
         text
-          .setPlaceholder('ID（例如 lighthouse）')
+          .setPlaceholder('ID（留空 = 自动生成，例如 lighthouse）')
           .setValue('')
           .onChange((value) => {
             pending.id = value
@@ -775,7 +778,8 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
       .addButton((button) =>
         button.setButtonText('新增').onClick(() => {
-          const problem = markerIdProblem(pending.id)
+          // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
+          const problem = pending.id.trim().length === 0 ? null : markerIdProblem(pending.id)
           if (problem !== null) {
             this.setMarkerNoteText(problem)
             return
@@ -900,13 +904,14 @@ export class CartographerSettingTab extends PluginSettingTab {
       .setDesc(
         atLimit
           ? `已达上限（${MAX_CUSTOM_PATH_TYPES} 个）`
-          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+          : `ID 可以留空 —— 留空就按显示名自动生成（「My Forest」→ custom:my-forest；纯中文名得到 custom:类别+序号 这样的短 ID），` +
+              `省得为了记规则去查文档。要手填的话规则是：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
               `前缀 ${CUSTOM_PATH_TYPE_PREFIX} 会自动补上，避免与内置 4 种重名。` +
               '建好之后同样可以改颜色、线宽、端点与连接。',
       )
       .addText((text) =>
         text
-          .setPlaceholder('ID（例如 highway）')
+          .setPlaceholder('ID（留空 = 自动生成，例如 highway）')
           .setValue('')
           .onChange((value) => {
             pending.id = value
@@ -945,7 +950,8 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
       .addButton((button) =>
         button.setButtonText('新增').onClick(() => {
-          const problem = pathTypeIdProblem(pending.id)
+          // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
+          const problem = pending.id.trim().length === 0 ? null : pathTypeIdProblem(pending.id)
           if (problem !== null) {
             this.setPathTypeNoteText(problem)
             return
@@ -1105,13 +1111,14 @@ export class CartographerSettingTab extends PluginSettingTab {
       .setDesc(
         atLimit
           ? `已达上限（${MAX_CUSTOM_REGION_TYPES} 个）`
-          : `ID 规则：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
+          : `ID 可以留空 —— 留空就按显示名自动生成（「My Forest」→ custom:my-forest；纯中文名得到 custom:类别+序号 这样的短 ID），` +
+              `省得为了记规则去查文档。要手填的话规则是：小写字母开头，2–32 位，可用数字、下划线、连字符；` +
               `前缀 ${CUSTOM_REGION_TYPE_PREFIX} 会自动补上，避免与内置 6 种重名。` +
               '建好之后同样可以改颜色、不透明度与边框。',
       )
       .addText((text) =>
         text
-          .setPlaceholder('ID（例如 march）')
+          .setPlaceholder('ID（留空 = 自动生成，例如 march）')
           .setValue('')
           .onChange((value) => {
             pending.id = value
@@ -1158,7 +1165,8 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
       .addButton((button) =>
         button.setButtonText('新增').onClick(() => {
-          const problem = regionTypeIdProblem(pending.id)
+          // ID 留空不报错：插件会按显示名自动生成（见 addCustom* 里的 suggestCustomId）
+          const problem = pending.id.trim().length === 0 ? null : regionTypeIdProblem(pending.id)
           if (problem !== null) {
             this.setRegionTypeNoteText(problem)
             return

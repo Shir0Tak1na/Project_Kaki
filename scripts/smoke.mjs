@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 运行时冒烟测试：用桩替身模拟 Obsidian，把编译产物 main.js 真正加载并执行一遍。
  *
  * 桩环境**复刻 Phase 0 在 Obsidian 1.13.7 上实测到的真实结构**（见 docs/PHASE-0-RESULTS.md）：
@@ -8510,6 +8510,54 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     '工具条触发按钮显示「未知（custom:march）」而不是空着',
     collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent === '未知（custom:march）',
     String(collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent),
+  )
+
+  // ------------------------- ID 留空 = 自动生成（用户实测：手打 ID 是没必要的负担）
+  /**
+   * 用户的反馈是"主要是需要自己手动输入各种 id、文件地址，输错也不知道怎么改"。
+   * 这条链路要验的是：**一个字都不填也能建出来**，而且生成出来的 ID 可读、不撞车。
+   */
+  openSettings()
+  const autoForm = settingNamed('新增自定义区域类型')
+  check(
+    '新增区的说明里写明「ID 可以留空、留空就自动生成」',
+    (autoForm?.info.desc ?? '').includes('可以留空') && (autoForm?.info.desc ?? '').includes('自动生成'),
+    autoForm?.info.desc,
+  )
+  check(
+    'ID 输入框的占位提示写着「留空 = 自动生成」',
+    (autoForm?.texts ?? []).some((text) => (text.placeholder ?? '').includes('留空 = 自动生成')),
+    JSON.stringify((autoForm?.texts ?? []).map((text) => text.placeholder)),
+  )
+  const autoLabel = (autoForm?.texts ?? []).find((text) => (text.placeholder ?? '').includes('显示名'))
+  await autoLabel.type('后花园')
+  await autoForm.button.click()
+  const autoAdded = plugin.getSettings().regionTypes.filter((entry) => entry.label === '后花园')
+  check(
+    'ID 留空也能建出来，且 ID 是可读的短 ID custom:region1（不再要求用户手打）',
+    autoAdded.length === 1 && autoAdded[0].id === 'custom:region1',
+    JSON.stringify(autoAdded),
+  )
+  check('留空创建不留下"ID 不能为空"这类报错', !regionNote().includes('ID'), regionNote())
+
+  openSettings()
+  const autoForm2 = settingNamed('新增自定义区域类型')
+  await (autoForm2?.texts ?? []).find((text) => (text.placeholder ?? '').includes('显示名')).type('后花园')
+  await autoForm2.button.click()
+  check(
+    '同一个显示名再建一次：自动换到 custom:region2（绝不撞车）',
+    plugin.getSettings().regionTypes.filter((entry) => entry.label === '后花园').map((entry) => entry.id).join(',') === 'custom:region1,custom:region2',
+    JSON.stringify(plugin.getSettings().regionTypes.filter((entry) => entry.label === '后花园').map((entry) => entry.id)),
+  )
+
+  openSettings()
+  const autoForm3 = settingNamed('新增自定义区域类型')
+  await (autoForm3?.texts ?? []).find((text) => (text.placeholder ?? '').includes('显示名')).type('My Forest')
+  await autoForm3.button.click()
+  check(
+    'ASCII 显示名生成可读 ID custom:my-forest',
+    plugin.getSettings().regionTypes.some((entry) => entry.id === 'custom:my-forest' && entry.label === 'My Forest'),
+    JSON.stringify(plugin.getSettings().regionTypes.map((entry) => [entry.id, entry.label])),
   )
 
   // ---------------------------------------------------------- 上限：明确提示，不静默失败

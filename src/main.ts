@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Project Kaki —— 插件入口。
  *
  * 当前阶段：Phase 0（探针）已完成；Phase 1 进行中，已具备
@@ -86,7 +86,13 @@ import {
   validateCustomTerrainInput,
   type CustomTerrain,
 } from './render/terrainCatalog.ts'
+import { isBlankCustomId, suggestCustomId } from './render/customDefinitionId.ts'
+import { CUSTOM_MARKER_PREFIX } from './render/markerCatalog.ts'
+import { CUSTOM_PATH_TYPE_PREFIX } from './render/pathTypeCatalog.ts'
+import { CUSTOM_REGION_TYPE_PREFIX } from './render/regionTypeCatalog.ts'
+import { CUSTOM_TERRAIN_PREFIX } from './render/terrainCatalog.ts'
 import { MAX_CUSTOM_MARKERS, validateCustomMarkerInput, type CustomMarker } from './render/markerCatalog.ts'
+
 import {
   buildResourceBundle,
   bundleFileName,
@@ -837,7 +843,18 @@ export default class ProjectKakiPlugin extends Plugin {
     mode?: unknown
     imageLayout?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
-    const result = validateCustomTerrainInput(input)
+    // ID 留空 = 自动生成：手打 ID 是没必要的负担，显示名才是人看的（用户实测反馈）
+    const result = validateCustomTerrainInput({
+      ...input,
+      id: isBlankCustomId(input.id)
+        ? suggestCustomId(
+            typeof input.label === 'string' ? input.label : '',
+            this.pluginSettings.customTerrains.map((item) => item.id),
+            CUSTOM_TERRAIN_PREFIX,
+            'terrain',
+          )
+        : input.id,
+    })
     if (!result.ok) return result
     if (this.pluginSettings.customTerrains.some((terrain) => terrain.id === result.terrain.id)) {
       return { ok: false, problem: `已经有一个地形用了 ID ${result.terrain.id}` }
@@ -963,7 +980,18 @@ export default class ProjectKakiPlugin extends Plugin {
     cap?: unknown
     join?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
-    const result = validateCustomPathTypeInput(input)
+    // ID 留空 = 自动生成（同 addCustomTerrain）
+    const result = validateCustomPathTypeInput({
+      ...input,
+      id: isBlankCustomId(input.id)
+        ? suggestCustomId(
+            typeof input.label === 'string' ? input.label : '',
+            customPathTypeEntries(this.pluginSettings.pathTypes).map((item) => item.id),
+            CUSTOM_PATH_TYPE_PREFIX,
+            'path',
+          )
+        : input.id,
+    })
     if (!result.ok) return result
     if (this.pluginSettings.pathTypes.some((entry) => entry.id === result.entry.id)) {
       return { ok: false, problem: `已经有一个路径类型用了 ID ${result.entry.id}` }
@@ -1011,7 +1039,18 @@ export default class ProjectKakiPlugin extends Plugin {
     imagePath?: unknown
     mode?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
-    const result = validateCustomMarkerInput(input)
+    // ID 留空 = 自动生成（同 addCustomTerrain）
+    const result = validateCustomMarkerInput({
+      ...input,
+      id: isBlankCustomId(input.id)
+        ? suggestCustomId(
+            typeof input.label === 'string' ? input.label : '',
+            this.pluginSettings.customMarkers.map((item) => item.id),
+            CUSTOM_MARKER_PREFIX,
+            'marker',
+          )
+        : input.id,
+    })
     if (!result.ok) return result
     if (this.pluginSettings.customMarkers.some((marker) => marker.id === result.marker.id)) {
       return { ok: false, problem: `已经有一个标记用了 ID ${result.marker.id}` }
@@ -1154,7 +1193,18 @@ export default class ProjectKakiPlugin extends Plugin {
     borderWidth?: unknown
     borderDash?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
-    const result = validateCustomRegionTypeInput(input)
+    // ID 留空 = 自动生成（同 addCustomTerrain）
+    const result = validateCustomRegionTypeInput({
+      ...input,
+      id: isBlankCustomId(input.id)
+        ? suggestCustomId(
+            typeof input.label === 'string' ? input.label : '',
+            customRegionTypeEntries(this.pluginSettings.regionTypes).map((item) => item.id),
+            CUSTOM_REGION_TYPE_PREFIX,
+            'region',
+          )
+        : input.id,
+    })
     if (!result.ok) return result
     if (this.pluginSettings.regionTypes.some((entry) => entry.id === result.entry.id)) {
       return { ok: false, problem: `已经有一个区域类型用了 ID ${result.entry.id}` }
