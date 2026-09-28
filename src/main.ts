@@ -83,10 +83,13 @@ import {
 import { legendLines } from './render/legend.ts'
 import {
   normalizeOverlayStyles,
+  numericDefaultRows,
   overlayField,
+  OVERLAY_FIELDS,
   type FieldId,
   type OverlayStyle,
 } from './render/overlayFields.ts'
+import { describeDataDefaults, unknownDefaultKeys } from './render/dataDefaults.ts'
 import {
   emptyBundleListHint,
   emptyImageListHint,
@@ -158,6 +161,7 @@ import {
   ElevationCalibrationModal,
   type ElevationModalFactory,
 } from './ui/ElevationCalibrationModal.ts'
+import { DataDefaultsModal, type DataDefaultsModalFactory } from './ui/DataDefaultsModal.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
 export type PromptModalFactory = (
@@ -263,6 +267,9 @@ export default class ProjectKakiPlugin extends Plugin {
    */
   private elevationModalFactory: ElevationModalFactory = (app, options) =>
     new ElevationCalibrationModal(app, options)
+  /** 每格默认值对话框工厂（同上：仅自动化测试注入，默认是真实对话框） */
+  private dataDefaultsModalFactory: DataDefaultsModalFactory = (app, options) =>
+    new DataDefaultsModal(app, options)
   /**
    * 设置页实例：导入之后要让已经打开的设置页也跟着刷新（否则用户会看到一份过时的列表）。
    *
@@ -402,6 +409,21 @@ export default class ProjectKakiPlugin extends Plugin {
           return calibration === null ? '当前地图未标定（相对值读数不可用）' : formatCalibration(calibration)
         },
         run: () => this.openElevationCalibrationModal(),
+      },
+      {
+        // 每格默认值：也是"地图级的事实"（没量过值的格用哪个数兜底）→ 归 `map` 组、写进地图文件。
+        // 它**只影响渲染**：文件里的格一个字节都不改，所以改完立刻全图生效（§B）。
+        id: 'set-data-defaults',
+        name: '设置数据层默认值…',
+        icon: 'thermometer',
+        group: 'map',
+        available: hasLayer,
+        describe: () => {
+          const document_ = this.layers?.getActiveDocument() ?? null
+          if (!document_) return '需要先启用地图层'
+          return describeDataDefaults(document_.dataDefaults ?? null, this.defaultRowEntries())
+        },
+        run: () => this.openDataDefaultsModal(),
       },
       {
         id: 'toggle-edit-mode',
@@ -1745,6 +1767,55 @@ export default class ProjectKakiPlugin extends Plugin {
     }).open()
   }
 
+  /* --------------------------------------------------------- 每格默认值（§B） */
+
+  /**
+   * 「设置数据层默认值…」对话框里要渲染的行 / 命令面板描述里要用的条目 —— **从字段表派生**。
+   *
+   * 派生而不是写死"温度 + 深度"：以后加一个数值字段，弹窗与描述都自动多一项（纪律 §4.7）。
+   * 分类字段（例如 §D 的生物群系）会被 `numericDefaultRows()` 里的 `numeric` 筛掉。
+   */
+  private defaultRowEntries(): Array<{ key: string; label: string; unit: string }> {
+    return numericDefaultRows().map((row) => {
+      const spec = OVERLAY_FIELDS.find((candidate) => candidate.cellKey === row.key)
+      return { key: row.key, label: spec?.label ?? row.key, unit: spec?.unit ?? '' }
+    })
+  }
+
+  /**
+   * 打开「设置数据层默认值…」对话框，把结果写进**地图文件**的 `dataDefaults` 段（可撤销）。
+   *
+   * 与「设置海拔标定…」同一套路（三条边界也一样）：走编辑器的 `setDataDefaults` →
+   * 一次提交 = 一条历史；回调里**重新取一次编辑器**（对话框是异步的）；
+   * 文档里没有这一段时传 `null` 进去（回显"不兜底"），而不是编一个 0 出来。
+   */
+  openDataDefaultsModal(): void {
+    const editor = this.layers?.getActiveEditor() ?? null
+    const document_ = this.layers?.getActiveDocument() ?? null
+    if (!editor || !document_) {
+      new Notice('需要先启用一张 Canvas 的地图层，才能设置它的数据层默认值。', NOTICE_MAX_MS)
+      return
+    }
+    const current = document_.dataDefaults ?? null
+    this.dataDefaultsModalFactory(this.app, {
+      current,
+      rows: numericDefaultRows(),
+      // 文件里有、而字段表里没有的键：**原样保留**（保存不会把它抹掉），但要让用户看见
+      unknownKeys: unknownDefaultKeys(current, OVERLAY_FIELDS.map((spec) => spec.cellKey)),
+      onSubmit: (defaults) => {
+        // 对话框是异步的：期间视图可能已关闭（编辑器被移除），必须重新取一次
+        const target = this.layers?.getActiveEditor() ?? null
+        if (!target) return
+        if (target.setDataDefaults(defaults)) {
+          new Notice(
+            defaults === null ? '已清除数据层默认值（没量过值的格回到空白）' : '已设置数据层默认值（Ctrl/Cmd+Z 可撤销）',
+            4000,
+          )
+        }
+      },
+    }).open()
+  }
+
   /** 同上：替换「删除定义」确认框（测试里用替身直接驱动"有引用才弹"这条分流） */
   setDeleteModalFactory(factory: ConfirmDeleteModalFactory): void {
     this.deleteModalFactory = factory
@@ -1998,6 +2069,11 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 替换海拔标定对话框（自动化测试用；不改动则为真实对话框） */
   setElevationModalFactory(factory: ElevationModalFactory): void {
     this.elevationModalFactory = factory
+  }
+
+  /** 替换每格默认值对话框（同上） */
+  setDataDefaultsModalFactory(factory: DataDefaultsModalFactory): void {
+    this.dataDefaultsModalFactory = factory
   }
 
   /**

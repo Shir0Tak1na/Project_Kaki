@@ -930,6 +930,13 @@ class FakeSetting {
       },
       setValue(value) {
         this.value = value
+        /**
+         * 真实 `TextComponent.setValue` 会**同时**写进 `inputEl.value`，而插件里确实有地方
+         * 直接读 DOM（「设置海拔标定」与「设置数据层默认值」对话框都是先拿 `inputEl` 再读 `.value`）。
+         * 桩只写自己那个 `value` 的话，这条读取路径在冒烟里永远看到空串 ——
+         * 表现是"填了值却没生效"，看起来像实现坏了，其实是桩少了一半行为（§5.13 那类）。
+         */
+        this.inputEl.value = String(value ?? '')
         return this
       },
       onChange(handler) {
@@ -939,6 +946,7 @@ class FakeSetting {
       /** 模拟用户在输入框里打字后失焦（触发 onChange） */
       async type(value) {
         this.value = value
+        this.inputEl.value = String(value ?? '')
         await this.handler?.(value)
         return this
       },
@@ -10658,6 +10666,163 @@ console.log('\n场景 45：导出（SVG / PNG）带上数据层叠加层 —— 
   await tick(20)
   const offAgain = await exportedSvg()
   check('再关掉温度层，导出里的温度段跟着消失', offAgain.includes('data-fc-overlay="temperature"') === false)
+
+  plugin.onunload()
+}
+
+// ================================================== 场景 46：数据层每格默认值（§B）
+console.log('\n场景 46：每格默认值 —— 兜底只影响渲染、真值优先、清空即删键')
+{
+  // 用户可见目标（原话）："如果有地方没有温度和深度的话就没有渲染，我认为每个格子初始应该自带一个值，
+  // 这个定义值就放在定义里面。" —— 于是本场盯：兜底格有颜色、格上不写数值、文件里的格不动、
+  // 改完立刻生效、清空后文件里连键都不留（§B.5）。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  const file = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const document_ = layers.getDocument(canvasPath)
+  const editor = layers.getEditor(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const textOf = (frameCtx) => frameCtx.texts.map((item) => item.text)
+  /** 打开对话框并把它建出来的那些 Setting 收回来（真实对话框，不是替身） */
+  const openDefaultsModal = () => {
+    FakeSetting.created.length = 0
+    runCommand(plugin, 'set-data-defaults')
+    return {
+      rows: FakeSetting.created.filter((setting) => /（℃）|（m）/.test(String(setting.info.name ?? ''))),
+      buttonOf: (label) =>
+        FakeSetting.created
+          .flatMap((setting) => setting.buttons ?? [])
+          .find((button) => button.text === label),
+      noteOf: () =>
+        FakeSetting.created
+          .flatMap((setting) => collectByClass(setting.containerEl, 'fc-settings-note'))
+          .find((el) => el.dataset?.fcDataDefault === 'note'),
+    }
+  }
+
+  // 三格：① 地形 + 真温度 ② 只有真温度、没有地形 ③ 只有地形、没有温度（这格该被兜底）
+  document_.terrain['0_0'] = { t: 'forest', temp: 15 }
+  document_.terrain['1_0'] = { temp: -40 }
+  document_.terrain['2_0'] = { t: 'plains' }
+
+  await plugin.setLayerVisible('temperature', true)
+  await tick(20)
+  const before = frame()
+  check(
+    '没有默认值时只有 2 格画出温度（这就是用户报的"有地方没有渲染"）',
+    stats().lastOverlayDrawn === 2 && textOf(before).includes('30') === false,
+    String(stats().lastOverlayDrawn),
+  )
+
+  // ---- 命令打开**真实**对话框：行由字段表派生 ----
+  const modal = openDefaultsModal()
+  check(
+    '对话框的行由字段表派生（温度 ℃ / 深度 m），一行都不是手写的',
+    modal.rows.map((setting) => setting.info.name).join('|') === '温度（℃）|深度 / 海拔（m）',
+    modal.rows.map((setting) => setting.info.name).join('|'),
+  )
+  const tempInput = modal.rows[0]?.text
+  check(
+    '输入框带稳定标记 fcDataDefault=<cellKey>',
+    tempInput?.inputEl?.dataset?.fcDataDefault === 'temp',
+    String(tempInput?.inputEl?.dataset?.fcDataDefault),
+  )
+  check('对话框里有「保存」与「清空全部」', modal.buttonOf('保存') !== undefined && modal.buttonOf('清空全部') !== undefined)
+  check(
+    '说明里写明"只影响渲染、不改地图文件"',
+    modal.rows[0]?.info.desc?.includes('留空 = 这一层不兜底') === true,
+    String(modal.rows[0]?.info.desc),
+  )
+
+  // ---- 非法值：保存禁用 + 原因在旁（不悄悄当成 0）----
+  await tempInput.type('abc')
+  check(
+    '填了非数字：保存被禁用，原因写在旁边',
+    modal.buttonOf('保存').buttonEl.disabled === true && /必须是一个数字/.test(modal.noteOf()?.textContent ?? ''),
+    `${modal.buttonOf('保存').buttonEl.disabled} / ${modal.noteOf()?.textContent ?? ''}`,
+  )
+  await tempInput.type('30')
+  check('改成合法值后保存又可用了', modal.buttonOf('保存').buttonEl.disabled === false)
+
+  // ---- 保存：写进地图文件那一段，且一次提交 = 一条历史 ----
+  const undoBefore = editor.getStatus().undo
+  await modal.buttonOf('保存').click()
+  await tick(20)
+  check('默认值写进了地图文件的那一段', JSON.stringify(document_.dataDefaults) === '{"temp":30}', JSON.stringify(document_.dataDefaults))
+  check('一次提交 = 一条历史（Ctrl+Z 能回去）', editor.getStatus().undo === undoBefore + 1, String(editor.getStatus().undo))
+
+  // ---- 兜底只影响渲染：那格有颜色了，但格上仍然没有 temp ----
+  const fallbackFrame = frame()
+  check('兜底格也画出来了（"画过的地方整片都有颜色"）', stats().lastOverlayDrawn === 3, String(stats().lastOverlayDrawn))
+  check(
+    '兜底格用的是**默认值在色带里的颜色**（30 ℃ → 橙 #f59e0b）',
+    fallbackFrame.fills.some((fill) => fill.fillStyle === '#f59e0b' && Math.abs(fill.alpha - 0.5) < 1e-9),
+    JSON.stringify([...new Set(fallbackFrame.fills.map((fill) => fill.fillStyle))]),
+  )
+  check('文件里的格一个字节都没改（格上仍然没有 temp 这个键）', 'temp' in document_.terrain['2_0'] === false)
+  check('兜底格也不写数值（它只是这张图的基线，不是量出来的数据）', textOf(fallbackFrame).includes('30') === false, JSON.stringify(textOf(fallbackFrame)))
+
+  // ---- 开"每格写数值"：只有真值格有字 ----
+  await plugin.setOverlayStyle('temperature', { showValues: true })
+  await tick(20)
+  const labelled = frame()
+  check(
+    '开"每格写数值"后：真值格有字（15 / -40），兜底格仍然没有',
+    textOf(labelled).filter((text) => text === '15').length === 1 &&
+      textOf(labelled).includes('-40') &&
+      textOf(labelled).includes('30') === false,
+    JSON.stringify(textOf(labelled)),
+  )
+  await plugin.setOverlayStyle('temperature', { showValues: false })
+  await tick(20)
+
+  // ---- 落盘：文件里真有这一段 ----
+  await store.writeNow(file, document_, 'World', [canvasPath])
+  const saved = app.vault.files.get(file.path) ?? ''
+  check('落盘后文件里有 dataDefaults（键按字典序）', saved.includes('"dataDefaults": {"temp":30}'), saved.slice(0, 240))
+
+  // ---- 撤销 / 重做：整段对调（与海拔标定同一条路）----
+  editor.undo()
+  await tick(20)
+  check('撤销后文档里没有这一段了（回到"不兜底"）', document_.dataDefaults === undefined)
+  frame()
+  check('撤销后那格又回到不画', stats().lastOverlayDrawn === 2, String(stats().lastOverlayDrawn))
+  check('重做能把整段装回来', editor.redo() === true && JSON.stringify(document_.dataDefaults) === '{"temp":30}')
+
+  // ---- 「清空全部」：删掉整段，文件里不留空对象（§B.5）----
+  const clearing = openDefaultsModal()
+  check('对话框回显了当前的默认值（30）', clearing.rows[0]?.text?.value === '30', String(clearing.rows[0]?.text?.value))
+  await clearing.buttonOf('清空全部').click()
+  await tick(20)
+  check('清空后文档里没有这一段', document_.dataDefaults === undefined)
+  await store.writeNow(file, document_, 'World', [canvasPath])
+  const afterClear = app.vault.files.get(file.path) ?? ''
+  check(
+    '清空后文件里连键都不留（不是 `"dataDefaults": {}`）',
+    afterClear.includes('dataDefaults') === false,
+    afterClear.slice(0, 240),
+  )
+  frame()
+  check('清空后那格又回到不画', stats().lastOverlayDrawn === 2, String(stats().lastOverlayDrawn))
 
   plugin.onunload()
 }

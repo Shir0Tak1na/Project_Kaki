@@ -96,6 +96,14 @@ export interface FieldSample {
   r: number
   /** 该格的值。**调用方只传有值的格**；NaN / Infinity 会被当作没有数据跳过 */
   value: number
+  /**
+   * 这个值是**兜底来的**（格上没有真值，用的是地图级的每格默认值，见 `dataDefaults.ts`）。
+   *
+   * 为什么样本要带这个标志：逐格模式下**兜底格照画但不写数值**（§B.3）——
+   * 满屏都是"15"会让人以为"这格真的量过 15"，而它只是这张图的基线。
+   * 连续场模式下这个标志不改变任何东西（兜底值就是插值的输入之一），所以不必分两套路径。
+   */
+  fallback?: boolean
 }
 
 export interface FieldPlanInput {
@@ -789,8 +797,11 @@ export function buildFieldPlan(input: FieldPlanInput): FieldPlan {
       color: style.color,
       opacity,
     })
-    // 越界格**总是**写数值：颜色只能表达"比上限还高"，表达不了"高多少"（数据层的口径）
-    const shouldLabel = input.showValues === true || (input.labelOutOfRange === true && style.outOfRange !== null)
+    // 越界格**总是**写数值：颜色只能表达"比上限还高"，表达不了"高多少"（数据层的口径）。
+    // 兜底格例外：它是"这张图的基线"，不是量出来的数据，所以即使越界也不写字（满屏 15 会误导，§B.3）。
+    const shouldLabel =
+      sample.fallback !== true &&
+      (input.showValues === true || (input.labelOutOfRange === true && style.outOfRange !== null))
     if (shouldLabel) {
       const center = axialToWorld(input.grid, sample.q, sample.r)
       primitives.push({

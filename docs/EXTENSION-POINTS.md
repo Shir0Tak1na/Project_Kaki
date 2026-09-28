@@ -79,9 +79,13 @@ isDataLayer / order / draw?`）。`LAYER_KEYS`、`DEFAULT_LAYER_VISIBILITY`、�
 
 **落位时要动哪几处**（**实测：加一个数据层 = 两行 + 三处小配置**）：
 1. **`LAYER_TABLE` 加一行** —— 元数据 8 行 + 绘制钩子（约 11 行）；
-2. **`OVERLAY_FIELDS` 加一行**（`overlayFields.ts`）—— 读哪个格键、名字、单位、出厂色带（约 10 行）；
+2. **`OVERLAY_FIELDS` 加一行**（`overlayFields.ts`）—— 读哪个格键、名字、单位、出厂色带，
+   外加**必须回答**的 `numeric`：这个字段的值是不是一个数（温度 / 深度是；生物群系那种**分类 ID** 不是）。
+   它决定"哪些字段有每格默认值（§B）与加减乘除笔刷（§E）"，
+   刻意写成**必填**：漏写会被 tsc 拦住，而不是悄悄多出一个"数值默认值"入口。
    两处都是"纯配置"，`LAYER_KEYS` / 出厂默认 / 面板开关 / 设置页 / 绘制次序**都不用碰**
    （温度层已按这条路走过一遍，见 `ENGINEERING-NOTES.md` §5.45）；
+   若这个字段还要"每格默认值"，**一行都不用改**：对话框的行由 `numericDefaultRows()` 从字段表派生；
 3. 若这一层还要产出**渲染计划**（连续场 / 等值线这类）—— 现在的答案是**不用动 `renderPlan`**：
    数据层的几何走 `overlayPlan.ts` 的图元清单（画布与导出共用），
    与"分层画什么"的 `renderPlan` 是两条互不干扰的路（2026-09-28 第三轮收口，见 §5.51）；
@@ -142,6 +146,9 @@ isDataLayer / order / draw?`）。`LAYER_KEYS`、`DEFAULT_LAYER_VISIBILITY`、�
   并且有一条**体积上限**：内联 data URL 超过 `OVERLAY_RASTER_MAX_CHARS`（128 KiB）时，
   这一层**整层退回逐格多边形**（换一种显示方式重新问一次 `buildOverlayPlan`，没有第二份几何），
   走哪条路由 `buildMapPreviewSvgWithReport` 的 `overlays` 带出来、写进导出提示。
+- ✅ **每格默认值**（§B，2026-09-28）：地图文件顶层 `dataDefaults`（键 = 字段的 `cellKey`），
+  **兜底只影响渲染**（真值优先、文件里的格不动、清空即删键）。加字段时**不用改这里**，
+  但要在字段表那一行回答 `numeric`（见 §3.2 第 2 条）。
 - **还没做的**：生物群系与自动推导（`climateModel` 的签名窗口见 §3.3）、
   等值线标注的**避让**（每层最多 3 个、不避让地标文字；沿线旋转与真断线已实现，见 §5.55）、
   导出侧"要不要写逐格数值"的界面开关（目前只有一个 API 开关，默认关）。

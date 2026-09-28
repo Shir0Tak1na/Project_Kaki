@@ -32,6 +32,7 @@ import { cellsAlongSegment } from './brushPath.ts'
 import { History, applyOp, opsFromPrevious, opsFromPreviousOf, type MapOp } from './history.ts'
 import type { ElevationCalibration } from '../render/elevationUnits.ts'
 import { sameCalibration } from '../render/elevationUnits.ts'
+import { sameDataDefaults, type DataDefaults } from '../render/dataDefaults.ts'
 import {
   describeSelection,
   hitTestSelection,
@@ -550,6 +551,25 @@ export class MapEditor {
     const to = calibration === null ? null : { ...calibration }
     if (sameCalibration(from, to)) return false
     this.commit([{ kind: 'setElevation', from, to }], to === null ? '清除海拔标定' : '设置海拔标定')
+    return true
+  }
+
+  /**
+   * 写回地图级的**每格默认值**（`document.dataDefaults` 那一段）。
+   *
+   * 与 `setElevationCalibration` 同一个形状、同一个理由：它不是"某个带 id 对象的字段"，
+   * 而是与 `grid` 同级的顶层段。`null` = 清空这一段（回到"不兜底"，老地图的形状）。
+   * 一次提交 = **一条**历史，Ctrl+Z 一次回到改之前。
+   *
+   * ⚠️ 语义上它**只影响渲染**：文件里的格一个字节都不改（真值优先，见 `dataDefaults.ts`）。
+   */
+  setDataDefaults(defaults: DataDefaults | null): boolean {
+    const document_ = this.options.getDocument()
+    if (!document_) return false
+    const from = document_.dataDefaults ?? null
+    const to = defaults === null ? null : { ...defaults }
+    if (sameDataDefaults(from, to)) return false
+    this.commit([{ kind: 'setDataDefaults', from, to }], to === null ? '清除数据层默认值' : '设置数据层默认值')
     return true
   }
 

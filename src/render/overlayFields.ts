@@ -123,6 +123,15 @@ export interface OverlayFieldSpec {
   layerId: LayerKey
   /** 一格上挂这个值的键名（写进地图文件的那一个） */
   cellKey: 'temp' | 'depth'
+  /**
+   * 这个字段的值是不是**一个数**。
+   *
+   * 为什么要有这一位（而不是"默认都是数"）："每格默认值"（§B）与"加减乘除笔刷"（§E）
+   * 只对数值字段成立 —— 生物群系（§D）的值是一个**分类 ID**，没有"平均值"也没有"乘 2"。
+   * 于是弹窗与笔刷遍历字段表时按这一位筛行，**不必在各处各写一份"哪几个字段是数值"的清单**。
+   * 刻意写成**必填**（没有缺省）：加字段的人必须正面回答"它是数值还是分类"，漏写会被 tsc 拦住。
+   */
+  numeric: boolean
   /** 给人看的名字（设置页、图例） */
   label: string
   /** 单位后缀（图例与数值文字用；空串表示无量纲） */
@@ -171,6 +180,7 @@ const TEMPERATURE_FIELD: OverlayFieldSpec = {
   id: 'temperature',
   layerId: 'temperature',
   cellKey: 'temp',
+  numeric: true,
   label: '温度',
   unit: '℃',
   read: (cell) => readFinite(cell?.temp),
@@ -188,6 +198,7 @@ const DEPTH_FIELD: OverlayFieldSpec = {
   id: 'depth',
   layerId: 'depth',
   cellKey: 'depth',
+  numeric: true,
   label: '深度 / 海拔',
   unit: 'm',
   units: DEPTH_UNITS,
@@ -241,6 +252,36 @@ export function formatFieldReading(
 }
 
 export type OverlayStyles = Record<FieldId, OverlayStyle>
+
+/** 「每格默认值」弹窗里的一行（**从字段表派生**，见 `numericDefaultRows`） */
+export interface NumericDefaultRow {
+  /** 字段的 `cellKey`（写进 `dataDefaults` 的那个键） */
+  key: string
+  /** 行标题：显示名 + **权威单位**（`深度 / 海拔（m）`）——不做展示单位换算，见弹窗顶部注释 */
+  title: string
+  /** 这一行的说明 */
+  desc: string
+}
+
+/**
+ * 「每格默认值」弹窗要渲染的行：**只取数值字段**，按字段表顺序。
+ *
+ * 为什么放在这里（而不是写在弹窗里）：行是"字段表的投影"，而字段表的家是这里 ——
+ * 于是加一个数值字段时弹窗自动多一行、一行都不用改（纪律 §4.7）。
+ * 分类字段（`numeric: false`，例如 §D 的生物群系）**没有数值默认值**，会被这一句筛掉。
+ */
+export function numericDefaultRows(): NumericDefaultRow[] {
+  const rows: NumericDefaultRow[] = []
+  for (const spec of OVERLAY_FIELDS) {
+    if (!spec.numeric) continue
+    rows.push({
+      key: spec.cellKey,
+      title: `${spec.label}（${spec.unit}）`,
+      desc: `没量过这个值的格用它上色；留空 = 这一层不兜底（0 是合法值，与"不设"不同）`,
+    })
+  }
+  return rows
+}
 
 const FIELD_BY_ID = new Map<string, OverlayFieldSpec>(OVERLAY_FIELDS.map((spec) => [spec.id, spec]))
 

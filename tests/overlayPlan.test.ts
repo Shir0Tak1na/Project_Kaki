@@ -165,6 +165,64 @@ test('数据层的取数不看地形计划：只有值、没有地形的格也�
   assert.equal(document.terrain['1_0']?.t, undefined, '前提：这一格真的没有地形')
 })
 
+test('每格默认值（§B）：真值优先、兜底格照画但不写数值、空白区不画', () => {
+  const document = makeDocument()
+  // '2_0' 有真值 60；'1_0' 有真值 -200；'0_0' 有真值 15；'3_0' 只有地形、没有温度
+  document.dataDefaults = { temp: 12 }
+
+  const samples = collectOverlaySamples(document, temperature)
+  const byKey = new Map(samples.map((sample) => [`${sample.q}_${sample.r}`, sample]))
+  assert.equal(byKey.get('3_0')?.value, 12, '没有温度的格用默认值兜底')
+  assert.equal(byKey.get('3_0')?.fallback, true, '兜底样本要打标志（逐格模式下据此不写数值）')
+  assert.equal(byKey.get('0_0')?.value, 15, '真值优先：有 15 就不用 12')
+  assert.equal(byKey.get('0_0')?.fallback, undefined, '真值不是兜底')
+  assert.equal(samples.length, 4, '文件里存在的 4 格都有值了（空白区本来就不在文件里）')
+
+  // 逐格模式：兜底格照画色块，但**不写数值**（满屏 12 会让人以为"这格量过"）
+  const cellPlan = buildOverlayPlan({ document, spec: temperature, style: CELL_STYLE, labels: true })
+  assert.equal(cellPlan.stats.drawn, 4, '兜底格也画色块（"画过的地方整片都有颜色"）')
+  // 这一档没开"每格写数值"，所以只有**越界**的两格写（-200 / 60 都在色带之外，越界恒写是老口径）
+  assert.equal(cellPlan.stats.labels, 2, '越界的两格照旧写数值')
+  const withValues: OverlayStyle = { ...CELL_STYLE, showValues: true }
+  const labelled = buildOverlayPlan({ document, spec: temperature, style: withValues, labels: true })
+  assert.equal(labelled.stats.labels, 3, '只有 3 格是真值 → 只写 3 个数值')
+  const labelledTexts = labelled.plan.primitives.filter((primitive) => primitive.kind === 'text')
+  assert.equal(
+    labelledTexts.some((primitive) => primitive.kind === 'text' && primitive.text === '12'),
+    false,
+    '兜底值不许写成数值文字',
+  )
+
+  // 越界兜底也**不写字**：颜色能表达"超过上限"，但兜底数不是量出来的数据（§B.3）。
+  // 这里用一张"只有地形、没有温度"的图，免得真值的越界格混进来把计数搅乱
+  const terrainOnly = makeDocument()
+  terrainOnly.terrain = { '0_0': { t: 'plains' } }
+  terrainOnly.dataDefaults = { temp: 400 }
+  const outOfRange = buildOverlayPlan({ document: terrainOnly, spec: temperature, style: CELL_STYLE, labels: true })
+  assert.equal(outOfRange.stats.drawn, 1, '前提：这一格被兜底画出来了')
+  assert.equal(outOfRange.stats.outOfRange, 1, '前提：400 ℃ 走得是 over 纯色')
+  assert.equal(outOfRange.stats.labels, 0, '越界格照写数值的老口径**不适用于兜底格**')
+
+  // 没有这一段（老地图）：'3_0' 不出现，一切照旧
+  const withoutDefaults = makeDocument()
+  assert.equal(collectOverlaySamples(withoutDefaults, temperature).length, 3)
+})
+
+test('每格默认值：改默认值立刻生效（样本值进哈希 → 缓存重算），文件里的格不动', () => {
+  const document = makeDocument()
+  const cache = createOverlayFieldCache()
+  document.dataDefaults = { temp: 12 }
+  const first = buildOverlayPlan({ document, spec: temperature, style: FIELD_STYLE, cache })
+  const keyWith12 = cache.key
+  document.dataDefaults = { temp: 30 }
+  const second = buildOverlayPlan({ document, spec: temperature, style: FIELD_STYLE, cache })
+  assert.equal(cache.builds, 2, '默认值变了 → 必须重算')
+  assert.notEqual(cache.key, keyWith12)
+  assert.notEqual(second.plan, first.plan)
+  // 关键：格上仍然没有 temp 这个键（默认值只影响渲染，不写进数据）
+  assert.equal('temp' in document.terrain['3_0']!, false)
+})
+
 test('导出颜色面的体积上限：正常走内联栅格并报出体积；超上限**整层退回逐格多边形**', () => {
   const document = makeDocument()
   const layers = withLayerVisibility(DEFAULT_LAYER_VISIBILITY, 'temperature', true)

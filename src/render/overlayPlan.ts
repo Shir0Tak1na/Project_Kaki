@@ -17,6 +17,7 @@ import { parseCellKey } from '../core/hex.ts'
 import type { BBox } from '../core/viewport.ts'
 import type { MapDocument } from '../data/mapDocument.ts'
 import { colorForValue } from './colorRamp.ts'
+import { defaultFor } from './dataDefaults.ts'
 import { DEFAULT_ELEVATION_CALIBRATION } from './elevationUnits.ts'
 import {
   buildFieldPlan,
@@ -86,6 +87,11 @@ export interface OverlayPlanResult {
  * 只有 `spec.read` 给出的**有限数**才算数据（没有值 / 坏值都不进样本）——
  * 与"缺数据不许用 0 冒充"是同一条口径，且这里是**唯一的**采集点：
  * 画布与导出都从这里取，不会出现"画布算上了某格、导出没算"这类分歧。
+ *
+ * **兜底**（§B）：格上没有真值时，用地图文件 `dataDefaults` 里这个字段的默认值补一个样本，
+ * 并打上 `fallback: true`（逐格模式下它不写数值，见 `fieldPlan`）。
+ * 于是"画过地形的整片区域都会有颜色"，而**文件里的格一个字节都不改**。
+ * 文件里没有的格（空白区）仍然不画 —— 地图是稀疏的，"铺满范围"是另一件事（本轮不做）。
  */
 export function collectOverlaySamples(
   document: MapDocument,
@@ -96,12 +102,17 @@ export function collectOverlaySamples(
   const grid = document.grid
   for (const [key, cell] of Object.entries(document.terrain)) {
     const value = spec.read(cell)
-    if (value === undefined) continue
+    const fallback = value === undefined ? defaultFor(document.dataDefaults, spec.cellKey) : undefined
+    if (value === undefined && fallback === undefined) continue
     const axial = parseCellKey(key)
     if (axial === null) continue
     // 视口裁剪只对逐格模式有用（连续场的样本是插值的输入，不能先裁）
     if (bounds !== undefined && !cellIntersectsBBox(grid, axial.q, axial.r, bounds)) continue
-    samples.push({ q: axial.q, r: axial.r, value })
+    samples.push(
+      value !== undefined
+        ? { q: axial.q, r: axial.r, value }
+        : { q: axial.q, r: axial.r, value: fallback!, fallback: true },
+    )
   }
   return samples
 }

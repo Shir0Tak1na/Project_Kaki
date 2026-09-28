@@ -12,6 +12,7 @@ import { cellKey } from '../core/hex.ts'
 import { cellsEqual } from '../data/mapDocument.ts'
 import type { MapDocument, MapLabel, MapMarker, MapPath, MapRegion, TerrainCell } from '../data/mapDocument.ts'
 import type { ElevationCalibration } from '../render/elevationUnits.ts'
+import type { DataDefaults } from '../render/dataDefaults.ts'
 
 /** 改一格地形：next 为 null 表示删除（画回空白） */
 export interface SetTerrainOp {
@@ -153,6 +154,7 @@ export type MapOp =
   | SetCellFieldOp
   | TranslateObjectOp
   | SetElevationOp
+  | SetDataDefaultsOp
 
 /**
  * 改对象上的**一个字段**（类型 / 颜色 / 线宽 / 虚线 / 不透明度 / 位置…）。
@@ -224,6 +226,19 @@ export interface SetElevationOp {
   from: ElevationCalibration | null
   /** 改之后的标定；`null` = 删掉这一段（回到"未标定"） */
   to: ElevationCalibration | null
+}
+
+/**
+ * 改地图级的**每格默认值**（`document.dataDefaults` 那一段）。
+ *
+ * 与 `SetElevationOp` 同一个形状、同一个理由：它是与 `grid` 同级的顶层段，
+ * 不是"数组里某个带 id 的对象"。`from` / `to` 都是**整段**（`null` = 没有这一段），
+ * 于是"清空默认值"与"从一组改成另一组"走同一条路径，撤销一次回到原样。
+ */
+export interface SetDataDefaultsOp {
+  kind: 'setDataDefaults'
+  from: DataDefaults | null
+  to: DataDefaults | null
 }
 
 /**
@@ -367,6 +382,13 @@ export function applyOp(document: MapDocument, op: MapOp): void {
       else document.elevation = { ...op.to }
       return
     }
+    case 'setDataDefaults': {
+      // 与标定同一条：`to === null` = 删掉这一段（回到"不兜底"）。
+      // 注意**不写空对象** —— 归一化保证整段要么有值、要么不存在（见 `dataDefaults.ts`）
+      if (op.to === null) delete document.dataDefaults
+      else document.dataDefaults = { ...op.to }
+      return
+    }
   }
 }
 
@@ -414,6 +436,9 @@ export function invertOp(op: MapOp): MapOp {
     case 'setElevation':
       // 整段对调：改回原标定、或重新删掉这一段
       return { kind: 'setElevation', from: op.to, to: op.from }
+    case 'setDataDefaults':
+      // 同一个形状：整段对调（`from` / `to` 里为 `null` 的那一端就是"删掉这一段"）
+      return { kind: 'setDataDefaults', from: op.to, to: op.from }
   }
 }
 

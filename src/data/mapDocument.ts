@@ -12,6 +12,7 @@
 import { parseCellKey, type GridSpec } from '../core/hex.ts'
 import type { GeometryMode } from '../core/hexEdges.ts'
 import { normalizeElevationCalibration, type ElevationCalibration } from '../render/elevationUnits.ts'
+import { normalizeDataDefaults, type DataDefaults } from '../render/dataDefaults.ts'
 
 /** 当前插件支持的文档版本 */
 export const MAP_DOCUMENT_VERSION = 1
@@ -281,6 +282,16 @@ export interface MapDocument {
    * 未标定时相对值拒绝计算（见 `elevationUnits.ts`），而不是拿编造的尺度凑数。
    */
   elevation?: ElevationCalibration
+  /**
+   * **每格默认值**（与 `elevation` 同级，也是"这个世界的事实"）：键 = 字段的 `cellKey`
+   * （`temp` / `depth`），值在字段的权威单位下（℃ / 米）。
+   *
+   * 语义是"**兜底只影响渲染**"：格上有真值就用真值，没有才用这里；**文件里的格一个字节都不改**，
+   * 所以改默认值立刻全图生效（见 `render/dataDefaults.ts` 与施工文件 §B）。
+   * 缺省 = 不兜底 —— 老地图因此逐字节不变；全表为空时**必须没有这个键**
+   * （序列化时也不写空对象，§B.5）。
+   */
+  dataDefaults?: DataDefaults
   /** 键为 `"q_r"` 的稀疏地形表 */
   terrain: Record<string, TerrainCell>
   paths: MapPath[]
@@ -346,6 +357,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   'version',
   'grid',
   'elevation',
+  'dataDefaults',
   'terrain',
   'paths',
   'regions',
@@ -837,6 +849,32 @@ export function parseMapDocument(input: unknown): ParseResult {
     if (isRecord(input.elevation)) document.elevation = normalizeElevationCalibration(input.elevation)
     else issues.push({ level: 'warning', path: 'elevation', message: 'elevation 不是对象，已忽略（按未标定处理）' })
   }
+  // 每格默认值：同样"只有文件里真的有这一段才带上"。空表 = 没有这一段（文件里不留 `{}`）。
+  // 键只认文档已知的格键（`KNOWN_CELL_KEYS`）：写错的键**原样保留**（§5.11）但要说一声，
+  // 否则用户改完没效果却不知道为什么。注意这条网只拦"拼错的键"，
+  // 拦不住"把结构键当数据键"（`t` 之类）—— 那一层由弹窗按字段表把关。
+  if (input.dataDefaults !== undefined) {
+    if (!isRecord(input.dataDefaults)) {
+      issues.push({ level: 'warning', path: 'dataDefaults', message: 'dataDefaults 不是对象，已忽略（按不兜底处理）' })
+    } else {
+      const defaults = normalizeDataDefaults(input.dataDefaults)
+      if (defaults === null) {
+        issues.push({ level: 'warning', path: 'dataDefaults', message: 'dataDefaults 里没有可用的数值（只认有限数），已忽略' })
+      } else {
+        document.dataDefaults = defaults
+        const unknownKeys = Object.keys(defaults)
+          .filter((key) => !KNOWN_CELL_KEYS.has(key))
+          .sort()
+        if (unknownKeys.length > 0) {
+          issues.push({
+            level: 'warning',
+            path: 'dataDefaults',
+            message: `不认识的默认值键已原样保留：${unknownKeys.join('、')}`,
+          })
+        }
+      }
+    }
+  }
   if (settings !== undefined) document.settings = settings
   if (Object.keys(extra).length > 0) document.extra = extra
 
@@ -952,6 +990,15 @@ export function serializeMapDocument(document: MapDocument, indent = 2): string 
   push('grid', JSON.stringify(document.grid))
   // 海拔标定紧跟 grid：它也是"这张地图级别的事实"，且老地图没有这一段 → 一个字节都不多写
   if (document.elevation) push('elevation', JSON.stringify(document.elevation))
+  // 每格默认值紧随其后：也是"这张地图级别的事实"。**空表不写键**（§B.5）——
+  // 即便内存里是 `{}`（例如清空后忘了删字段），文件里也不该出现 `"dataDefaults": {}`。
+  // 键按字典序写：让 Git diff 稳定（与地形那一段同一条理由）。
+  if (document.dataDefaults && Object.keys(document.dataDefaults).length > 0) {
+    const sorted = Object.keys(document.dataDefaults).sort()
+    const ordered: Record<string, number> = {}
+    for (const key of sorted) ordered[key] = document.dataDefaults[key]!
+    push('dataDefaults', JSON.stringify(ordered))
+  }
   push('terrain', serializeTerrain(document.terrain, indent))
   push('paths', serializeArray(document.paths, indent))
   push('regions', serializeArray(document.regions, indent))

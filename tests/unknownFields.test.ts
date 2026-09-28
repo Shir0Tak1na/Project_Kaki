@@ -18,6 +18,51 @@ function parseWithCells(cells: Record<string, unknown>) {
   return parseMapDocument(JSON.parse(JSON.stringify(input)))
 }
 
+test('每格默认值（dataDefaults）：解析进正式字段、写回仍在、且**不会被当成未知顶层段**', () => {
+  // 施工文件 §B.5 点名的第一处：漏了 `KNOWN_TOP_LEVEL_KEYS` 就会被塞进 `extra` ——
+  // 那样它会被当成"本插件不认识的段落"原样写回，而插件自己读不到它（表现是"设了默认值没效果"）。
+  const base = createEmptyMapDocument({})
+  const result = parseMapDocument({ ...base, dataDefaults: { temp: 15, depth: 0 } })
+  assert.equal(result.ok, true)
+  const document_ = result.document!
+  assert.deepEqual(document_.dataDefaults, { temp: 15, depth: 0 })
+  assert.equal(document_.extra, undefined, '不能进 extra')
+  assert.deepEqual(result.issues, [], '正常的默认值不该告警')
+  // 写回：值还在，且键按字典序（Git diff 稳定）
+  const text = serializeMapDocument(document_)
+  assert.match(text, /"dataDefaults": \{"depth":0,"temp":15\}/)
+})
+
+test('每格默认值：空表 = 没有这一段（清空后文件里不留 `{}`），老地图逐字节不变', () => {
+  const base = createEmptyMapDocument({})
+  // ① 文件里写着 `{}` → 解析成"没有这一段"
+  const emptyInput = parseMapDocument({ ...base, dataDefaults: {} })
+  assert.equal(emptyInput.document!.dataDefaults, undefined)
+  assert.equal(serializeMapDocument(emptyInput.document!).includes('dataDefaults'), false)
+  // ② 内存里是 `{}`（例如清空后忘了删字段）→ 序列化也**不写**这个键
+  const withEmptyObject = { ...createEmptyMapDocument({}), dataDefaults: {} }
+  assert.equal(serializeMapDocument(withEmptyObject).includes('dataDefaults'), false)
+  // ③ 压根没有这一段的老地图：前后都不出现这个词
+  const legacy = createEmptyMapDocument({})
+  const text = serializeMapDocument(legacy)
+  assert.equal(text.includes('dataDefaults'), false)
+  assert.equal(parseMapDocument(JSON.parse(text)).issues.length, 0)
+})
+
+test('每格默认值：坏值丢掉、不认识的键保留并告警（未知值属于用户的数据）', () => {
+  const base = createEmptyMapDocument({})
+  const result = parseMapDocument({
+    ...base,
+    dataDefaults: { temp: 15, depth: 'not a number', humdity: 3 },
+  })
+  const document_ = result.document!
+  assert.deepEqual(document_.dataDefaults, { temp: 15, humdity: 3 }, '坏值丢掉、拼错的键原样保留')
+  const warning = result.issues.find((issue) => issue.path === 'dataDefaults')
+  assert.equal(warning?.level, 'warning')
+  assert.match(warning?.message ?? '', /humdity/, '告警要点出是哪个键')
+  assert.equal(serializeMapDocument(document_).includes('humdity'), true, '写回时它还在')
+})
+
 test('格上的未知字段被原样保留（值、嵌套对象、数组都一样）', () => {
   // 注意：`temp` / `depth` 从这一版起是**正式字段**（见文件末尾那几节），
   // 所以"未知字段"这条测试改用真正没被认识的名字（湿度 / 气候）
