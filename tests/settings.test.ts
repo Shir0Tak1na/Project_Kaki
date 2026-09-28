@@ -130,12 +130,14 @@ test('自定义地形：数量上限生效（图集位图宽度所限）', () =>
   assert.equal(settings.customTerrains[0]!.id, 'custom:terrain-0', '保留的是靠前的那些（顺序可预期）')
 })
 
-test('图层迁移：旧 showGrid:false 必须变成"隐藏网格"，其余层照常显示', () => {
+test('图层迁移：旧 showGrid:false 必须变成"隐藏网格"，其余层保持出厂默认', () => {
   const settings = normalizeSettings({ showGrid: false })
   assert.equal(settings.layers.grid, false)
+  // 其余层与**出厂默认**一致（不是"一律显示"：数据层温度出厂就是隐藏的，
+  // 写死成 true 会让"新加一层默认关"这件事每次都被测试挡住）
   for (const key of LAYER_KEYS) {
     if (key === 'grid') continue
-    assert.equal(settings.layers[key], true, key)
+    assert.equal(settings.layers[key], DEFAULT_LAYER_VISIBILITY[key], key)
   }
   // 已经是新结构时，旧字段不许再覆盖它（否则老文件里残留的 showGrid 会一直压着用户的设置）
   assert.equal(normalizeSettings({ showGrid: false, layers: { grid: true } }).layers.grid, true)

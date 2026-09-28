@@ -23,6 +23,7 @@ import {
   type LayerKey,
   type LayerVisibility,
 } from './layerVisibility.ts'
+import { DEFAULT_OVERLAY_STYLES, type OverlayStyles } from './overlayFields.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
 import type { CustomMarker } from './markerCatalog.ts'
 import { defaultStylePalette, type StylePalette } from './stylePalette.ts'
@@ -110,6 +111,13 @@ export interface MapLayerManagerDeps {
    * 否则要让用户重开画布才生效。
    */
   getLayers?: () => LayerVisibility
+  /**
+   * 数据层（温度 / 深度…）的渲染参数（色带 / 不透明度）。
+   *
+   * 与 `getLayers` 同样是"每帧现读"的函数：色带是可随时调的旋钮，
+   * 传值会让"改完设置画布不变"变成一类要靠重开画布才能绕过的怪现象。
+   */
+  getOverlayStyles?: () => OverlayStyles
   /** 图例是否显示（来自插件设置；默认关着，图例不该默认占画布） */
   getShowLegend?: () => boolean
   /**
@@ -213,6 +221,17 @@ export class MapLayerManager {
   getActiveEditor(): MapEditor | null {
     const canvasPath = activeCanvasHandle(this.deps.app)?.file?.path
     return canvasPath ? this.getEditor(canvasPath) : null
+  }
+
+  /**
+   * 活动画布当前持有的地图文档（`null` = 没启用 / 没绑定）。
+   *
+   * 「设置海拔标定…」这类**地图级元数据**的命令要读它来做回显（当前最深 / 最高是多少）。
+   * 与 `getDocument(canvasPath)` 的差别只是"哪一张画布"：这里取活动的那一张。
+   */
+  getActiveDocument(): MapDocument | null {
+    const canvasPath = activeCanvasHandle(this.deps.app)?.file?.path
+    return canvasPath ? this.getDocument(canvasPath) : null
   }
 
   /**
@@ -426,6 +445,8 @@ export class MapLayerManager {
       getLabelScale: () => this.deps.getLabelScale?.() ?? 1,
       // 图层可见性（含 grid 与 labels）：六个层唯一的入口，每帧现读
       getLayers: () => this.layersVisibility(),
+      // 数据层的色带 / 不透明度：同样每帧现读（改设置下一帧就是新颜色）
+      getOverlayStyles: () => this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
       // 名称字体族：来自插件设置（空串 = 跟随主题）
       getLabelFontFamily: () => this.deps.getStylePalette?.().fontFamily ?? '',
       // 自定义地形：目录与图片加载都从这里注入（渲染层不认识 vault）
@@ -823,6 +844,9 @@ export class MapLayerManager {
       resolveRegion: (color, type) => ({
         label: type.length > 0 ? regionTypeLabelOf(type, regionTypes) : regionLabelForColor(color, regionTypes),
       }),
+      // 数据层的色带：与画布**同一个来源**（每帧现读那一个 getter），
+      // 否则会出现"画布上是新色带、图例里还是旧的"这种两套配色的老毛病
+      overlayStyles: this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
     }
   }
 

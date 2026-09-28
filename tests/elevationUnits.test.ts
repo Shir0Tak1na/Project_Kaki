@@ -15,13 +15,17 @@ import {
   DEFAULT_ELEVATION_CALIBRATION,
   describeUnitProblem,
   formatCalibration,
+  formatDepthReading,
   formatElevation,
   fromDisplay,
   fromMeters,
   isCalibrated,
   metersFromRelative,
   normalizeElevationCalibration,
+  parseCalibrationInput,
+  previewCalibrationTable,
   relativeOf,
+  sameCalibration,
   toDisplay,
   toMeters,
   type ElevationCalibration,
@@ -118,4 +122,59 @@ test('formatCalibration：说得清"还差哪个"', () => {
   assert.equal(formatCalibration(DEFAULT_ELEVATION_CALIBRATION), '未标定（还差最深深度）')
   assert.equal(formatCalibration({ unit: 'm', maxDepth: 8000, maxHeight: null }), '未标定（还差最高高度）')
   assert.equal(formatCalibration(WORLD), '最深 8000 m · 最高 3000 m')
+})
+
+test('formatDepthReading：短读数（画布格上 / 图例刻度用），带符号、不带措辞', () => {
+  assert.equal(formatDepthReading(3000, 'm', WORLD), '3000')
+  assert.equal(formatDepthReading(-1200, 'm', WORLD), '-1200', '负值是海拔，读数是带符号的数（措辞归 formatElevation）')
+  assert.equal(formatDepthReading(3200, 'km', WORLD), '3.2')
+  assert.equal(formatDepthReading(0, 'km', WORLD), '0')
+  assert.equal(formatDepthReading(3000, 'rel', WORLD), '0.45')
+  assert.equal(formatDepthReading(3000, 'rel', DEFAULT_ELEVATION_CALIBRATION), '未标定')
+  assert.equal(formatDepthReading(Number.NaN, 'm', WORLD), '—')
+})
+
+test('sameCalibration：null 与"全未填"不是一回事，但它只管"有没有变化"', () => {
+  assert.equal(sameCalibration(null, null), true)
+  assert.equal(sameCalibration(null, DEFAULT_ELEVATION_CALIBRATION), false, 'null = 文件里没有这一段')
+  assert.equal(
+    sameCalibration(DEFAULT_ELEVATION_CALIBRATION, { unit: 'm', maxDepth: null, maxHeight: null }),
+    true,
+    '字段等价即等价（写回时是否落盘由调用方决定，见 MapEditor.setElevationCalibration）',
+  )
+  assert.equal(sameCalibration(WORLD, { ...WORLD }), true)
+  assert.equal(sameCalibration(WORLD, { unit: 'm', maxDepth: 8000, maxHeight: 3001 }), false)
+  assert.equal(sameCalibration(WORLD, { unit: 'km', maxDepth: 8000, maxHeight: 3000 }), false, '单位也是内容')
+})
+
+test('parseCalibrationInput：留空 = 不填；非数字 / 负数拒绝并说明原因（不悄悄当 0）', () => {
+  assert.deepEqual(parseCalibrationInput('', '最深深度'), { ok: true, value: null })
+  assert.deepEqual(parseCalibrationInput('  8000 ', '最深深度'), { ok: true, value: 8000 })
+  assert.deepEqual(parseCalibrationInput('0', '最深深度'), { ok: true, value: 0 }, '0 是合法值（只有水下）')
+  const notNumber = parseCalibrationInput('很深', '最深深度')
+  assert.equal(notNumber.ok, false)
+  assert.match(notNumber.ok ? '' : notNumber.problem, /最深深度/)
+  const negative = parseCalibrationInput('-100', '最高高度')
+  assert.equal(negative.ok, false)
+  assert.match(negative.ok ? '' : negative.problem, /正数/)
+})
+
+test('previewCalibrationTable：三行锚点、三列单位；未标定时给一句可操作的话', () => {
+  const table = previewCalibrationTable(WORLD)
+  const lines = table.split('\n')
+  assert.equal(lines.length, 4)
+  assert.match(lines[0]!, /米/)
+  assert.match(lines[0]!, /千米/)
+  assert.match(lines[0]!, /相对值/)
+  // 最深点那一行：8000 m / 8 km / 0.00；最高点那一行：-3000 m / -3 km / 1
+  assert.match(lines[1]!, /^最深点/)
+  assert.match(lines[1]!, /8000/)
+  assert.match(lines[1]!, /相对值[\s\S]*0$|0$/)
+  assert.match(lines[3]!, /^最高点/)
+  assert.match(lines[3]!, /-3000/)
+  assert.match(lines[3]!, /1$/)
+  // 海平面落在 8000/11000 ≈ 0.73（不强行对称到 0.5）
+  assert.match(lines[2]!, /0\.73/)
+  assert.notEqual(table, previewCalibrationTable(DEFAULT_ELEVATION_CALIBRATION))
+  assert.match(previewCalibrationTable(DEFAULT_ELEVATION_CALIBRATION), /还差一端/)
 })

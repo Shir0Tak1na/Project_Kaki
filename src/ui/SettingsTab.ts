@@ -37,8 +37,29 @@ import {
   resolveRegionType,
 } from '../render/regionTypeCatalog.ts'
 import { LAYER_TABLE, isLayerVisible } from '../render/layerVisibility.ts'
+import {
+  OVERLAY_FIELDS,
+  OVERLAY_OPACITY_MAX,
+  OVERLAY_OPACITY_MIN,
+  OVERLAY_OPACITY_STEP,
+  overlayUnitOf,
+  overlayUnitTitle,
+  type OverlayFieldSpec,
+} from '../render/overlayFields.ts'
+import type { DepthDisplayUnit } from '../render/elevationUnits.ts'
+import type { RampSpec } from '../render/colorRamp.ts'
 import { createCollapsibleGroup } from './collapsible.ts'
 import { QUICK_START_SETTINGS } from './quickStart.ts'
+
+/**
+ * 这一层的色带是否还是出厂值（只用来决定「恢复出厂色带」那行的说明怎么写）。
+ *
+ * 用规范串比较：色带的形状就是"可序列化的数据"，比逐字段比更不容易漏字段。
+ * 只关心锚点与两端，**不关心**透明度 / 画数值（那两个各有各的开关）。
+ */
+function rampEqualsDefault(ramp: RampSpec, spec: OverlayFieldSpec): boolean {
+  return JSON.stringify(ramp) === JSON.stringify(spec.defaultStyle().ramp)
+}
 
 /**
  * 数据模型在 `settingsModel.ts`（纯函数、不 import obsidian，因此可单测）。
@@ -237,7 +258,28 @@ export class CartographerSettingTab extends PluginSettingTab {
         }),
       )
 
-    // ---- 3. 新对象默认值（路径类型参数 / 区域类型参数 / 字体 / 恢复出厂）：默认收起 ----
+    // ---- 3. 数据层（温度 / 深度…）：默认收起 ----
+    //
+    // **开关不在这里**：它和别的图层一起在「图层」一组与侧栏面板顶部（表驱动，加一层只加一行）。
+    // 这一组只管"怎么看"：色带、越界两端、不透明度、要不要在每个格上写数值。
+    const dataGroup = createCollapsibleGroup(containerEl, {
+      title: '数据层',
+      role: 'data',
+      cls: 'fc-settings-group',
+      titleCls: 'fc-settings-group-title',
+    })
+    dataGroup.createEl('div', {
+      cls: 'fc-settings-note',
+      text:
+        '数据层的值（温度、深度…）存在地图文件的格上；这里只决定怎么把它画出来。' +
+        '每一层的开关在「图层」一组里（侧栏面板顶部也有同一组）。' +
+        '改了色带下一帧就是新颜色，不用重开画布。',
+    })
+    for (const spec of OVERLAY_FIELDS) {
+      this.renderOverlayField(dataGroup, spec)
+    }
+
+    // ---- 4. 新对象默认值（路径类型参数 / 区域类型参数 / 字体 / 恢复出厂）：默认收起 ----
     const defaults = createCollapsibleGroup(containerEl, {
       title: '新对象默认值',
       role: 'defaults',
@@ -298,7 +340,7 @@ export class CartographerSettingTab extends PluginSettingTab {
       '新增 / 删除 / 改 ID 定义请到「地图定义…」：侧栏面板 →「地图定义」→「管理地图定义…」' +
       '（自定义地形、标记、路径类型、区域类型都在那里增删改）。'
 
-    // ---- 4. 地图面板 ----
+    // ---- 5. 地图面板 ----
     new Setting(containerEl)
       .setName('地图面板')
       .setDesc('常用命令都在右侧边栏的「地图面板」里，不必每次翻命令面板。')
@@ -348,6 +390,137 @@ export class CartographerSettingTab extends PluginSettingTab {
     show.addEventListener('click', () => {
       void this.plugin.setQuickStartHidden('settings', false).then(() => this.rerenderKeepingScroll())
     })
+  }
+
+  /**
+   * 一个**数据层**的参数：不透明度 + 色带锚点 + 越界两端 + 数值文字 + 恢复出厂色带。
+   *
+   * 为什么锚点做成"逐行可改"而不是"只有上下限两个输入"：需求里的两种填法（填上下限 /
+   * 5 个体感分类）**是同一份数据**，只是锚点数量不同 —— 逐行编辑同时覆盖两种，
+   * 不需要第二套实现（见 `colorRamp.ts` 的模块注释）。
+   *
+   * ⚠️ 每次编辑都从 `getSettings()` **现读**当前色带，而不是用渲染这一页时的快照：
+   * 连续改两个锚点时，用旧快照会把前一次的改动覆盖掉（"改了 A 再改 B，A 变回去了"）。
+   */
+  private renderOverlayField(containerEl: HTMLElement, spec: OverlayFieldSpec): void {
+    const style = this.plugin.getSettings().overlays[spec.id]
+    const stops = style.ramp.stops
+    const lowest = stops[0]
+    const highest = stops[stops.length - 1]
+
+    containerEl.createEl('h3', { text: `${spec.label}（${spec.units ? overlayUnitTitle(spec, style) : spec.unit || '无量纲'}）` })
+
+    /** 现读当前色带 —— 见上面那条"不要用快照"的说明 */
+    const liveRamp = (): RampSpec => this.plugin.getSettings().overlays[spec.id].ramp
+
+    // 有展示单位的字段（深度）：米 / 千米 / 相对值是**读法**，所以它是设置项、不进地图文件。
+    // 相对值需要地图已标定，这里只说明去哪儿设置 —— 设置页拿不到"当前是哪张地图"。
+    if (spec.units) {
+      const units = spec.units
+      new Setting(containerEl)
+        .setName(`${spec.label}的展示单位`)
+        .setDesc(
+          '只换"怎么读"，一格都没改地图文件：米 / 千米直接换算；相对值（0–1）需要这张地图先设置' +
+            '海拔标定（侧栏面板或命令面板里的「设置海拔标定…」）。色带锚点始终按文件里的米填写。',
+        )
+        .addDropdown((dropdown) => {
+          for (const unit of units.options) dropdown.addOption(unit, units.titleOf(unit))
+          dropdown.setValue(overlayUnitOf(spec, style) ?? units.defaultUnit)
+          dropdown.onChange((value) => {
+            void this.plugin
+              .setOverlayStyle(spec.id, { unit: value as DepthDisplayUnit })
+              .then(() => this.rerenderKeepingScroll())
+          })
+        })
+    }
+
+    new Setting(containerEl)
+      .setName(`${spec.label}层的不透明度`)
+      .setDesc('色块压在地形之上：调低一点可以同时看清地形与颜色。这一层的开关在「图层」一组里。')
+      .addSlider((slider) =>
+        slider
+          .setLimits(OVERLAY_OPACITY_MIN, OVERLAY_OPACITY_MAX, OVERLAY_OPACITY_STEP)
+          .setValue(style.opacity)
+          .setDynamicTooltip()
+          .onChange((value) => {
+            void this.plugin.setOverlayStyle(spec.id, { opacity: value })
+          }),
+      )
+
+    const setStop = (index: number, patch: { value?: number; color?: string }): void => {
+      const ramp = liveRamp()
+      const nextStops = ramp.stops.map((stop, position) => (position === index ? { ...stop, ...patch } : stop))
+      void this.plugin.setOverlayStyle(spec.id, { ramp: { ...ramp, stops: nextStops } })
+    }
+
+    stops.forEach((stop, index) => {
+      const isLowest = index === 0
+      const isHighest = index === stops.length - 1
+      const hint = isLowest
+        ? `色带的最低端。比 ${stop.value} 更低的值用下面的「低于下限」颜色画。`
+        : isHighest
+          ? `色带的最高端。比 ${stop.value} 更高的值用下面的「高于上限」颜色画。`
+          : '中间锚点：它与左右邻居之间按 Oklab 插值，锚点越密渐变越"分段"。'
+      new Setting(containerEl)
+        .setName(`${spec.label}色带锚点 ${index + 1}${isLowest ? '（最低）' : isHighest ? '（最高）' : ''}`)
+        .setDesc(hint)
+        .addText((text) =>
+          text.setValue(String(stop.value)).onChange((value) => {
+            const parsed = Number(value.trim())
+            // 非数字不写：与设置页其它数字输入同一口径（拒绝而不是悄悄夹到边界）
+            if (value.trim().length > 0 && Number.isFinite(parsed)) setStop(index, { value: parsed })
+          }),
+        )
+        .addColorPicker((picker) =>
+          picker.setValue(stop.color).onChange((value) => setStop(index, { color: value })),
+        )
+    })
+
+    new Setting(containerEl)
+      .setName(`低于下限（< ${lowest?.value ?? 0}${spec.unit}）的颜色`)
+      .setDesc(
+        '越界是合法数据（-60 ℃ 就是一个温度），不会被丢掉、也不会被截断成端点色 —— ' +
+          '用纯色画更醒目，并在格上写出数值（出厂纯蓝底白字）。',
+      )
+      .addColorPicker((picker) =>
+        picker.setValue(style.ramp.under.color).onChange((value) => {
+          const ramp = liveRamp()
+          void this.plugin.setOverlayStyle(spec.id, { ramp: { ...ramp, under: { ...ramp.under, color: value } } })
+        }),
+      )
+
+    new Setting(containerEl)
+      .setName(`高于上限（> ${highest?.value ?? 0}${spec.unit}）的颜色`)
+      .setDesc('同上，另一端（出厂纯红底白字）。')
+      .addColorPicker((picker) =>
+        picker.setValue(style.ramp.over.color).onChange((value) => {
+          const ramp = liveRamp()
+          void this.plugin.setOverlayStyle(spec.id, { ramp: { ...ramp, over: { ...ramp.over, color: value } } })
+        }),
+      )
+
+    new Setting(containerEl)
+      .setName('在每个格上写出数值')
+      .setDesc('默认关：密铺时数字比颜色吵。打开后所有格都写出数值；越界格（纯蓝 / 纯红）总是写数值，因为它到底是多少只能靠读。')
+      .addToggle((toggle) =>
+        toggle.setValue(style.showValues).onChange((value) => {
+          void this.plugin.setOverlayStyle(spec.id, { showValues: value }).then(() => this.rerenderKeepingScroll())
+        }),
+      )
+
+    const changed = !rampEqualsDefault(style.ramp, spec)
+    new Setting(containerEl)
+      .setName('恢复出厂色带')
+      .setDesc(
+        changed
+          ? '把这一层的锚点与越界颜色恢复成出厂值（不透明度与"画数值"开关不动）。'
+          : '当前就是出厂色带。',
+      )
+      .addButton((button) =>
+        button.setButtonText('恢复默认').onClick(() => {
+          void this.plugin.resetOverlayRamp(spec.id).then(() => this.rerenderKeepingScroll())
+        }),
+      )
   }
 
   /**

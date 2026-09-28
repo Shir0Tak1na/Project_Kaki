@@ -60,6 +60,20 @@ export function normalizeElevationCalibration(raw: unknown): ElevationCalibratio
 }
 
 /**
+ * 两份标定是否等价（`null` = 没有这一段）。
+ *
+ * 用途与 `cellsEqual` / `sameObjectFieldValue` 同一口径：**判断"这次改动算不算一次变化"**。
+ * 等价时不该产生历史条目 —— 否则用户点两次"保存"就会在撤销栈里多出一条空条目。
+ */
+export function sameCalibration(
+  a: ElevationCalibration | null,
+  b: ElevationCalibration | null,
+): boolean {
+  if (a === null || b === null) return a === b
+  return a.unit === b.unit && a.maxDepth === b.maxDepth && a.maxHeight === b.maxHeight
+}
+
+/**
  * 是否标定到"能算相对值"的程度。
  *
  * 要求两端之和大于 0：两个都是 0 等于没有量程，相对值无定义（会除零）。
@@ -174,6 +188,30 @@ export function formatElevation(
 }
 
 /**
+ * 短读数（**不带单位后缀、不带"海拔/深度"措辞**）：给密铺在格上的数值文字与图例刻度用。
+ *
+ * 与 `formatElevation` 的分工是刻意的：那一句是"给人读的完整描述"（`海拔 1200 m`），
+ * 用在一格一个字的画布上会糊成一片；这里只给数字，单位由**图例标题**统一说明。
+ *
+ * - `m` → `3000` / `-1200`；`km` → `3` / `-1.2`；`rel` → `0.33`；
+ * - `rel` 未标定 → `未标定`（调用方应当另外说明原因，见 `describeUnitProblem`）。
+ */
+export function formatDepthReading(
+  meters: number,
+  unit: DepthDisplayUnit,
+  calibration: ElevationCalibration,
+): string {
+  if (!Number.isFinite(meters)) return '—'
+  if (unit === 'rel') {
+    const relative = relativeOf(meters, calibration)
+    return relative === null ? '未标定' : trimNumber(relative, RELATIVE_DECIMALS)
+  }
+  const reading = unit === 'km' ? meters / 1000 : meters
+  // 权威值按"米取整"的约定量化（见设计草案 §2.1），所以米这一档不显示小数
+  return trimNumber(reading, unit === 'km' ? 2 : 0)
+}
+
+/**
  * 这个展示单位现在能不能用；不能用就给出**可操作**的原因（而不是一个空数字）。
  *
  * 只在 `rel` 未标定时返回一句提示，其余情况返回 `null`。
@@ -195,4 +233,58 @@ export function formatCalibration(calibration: ElevationCalibration): string {
     calibration.maxHeight!,
     2,
   )} ${unitLabel}`
+}
+
+/* ------------------------------------------------------------------ 输入解析 / 预览 */
+
+/** 输入框里的一格读数：留空 = 未填；负数 / 非数字 = 非法 */
+export type ParsedCalibrationInput = { ok: true; value: number | null } | { ok: false; problem: string }
+
+/**
+ * 解析标定弹窗里的一个数字输入。
+ *
+ * 三条口径与设置页其它数字输入一致：
+ * - **留空 = 不填**（不是 0 —— "最深就是海平面"与"不知道"是两件事）；
+ * - 非数字**拒绝并说明原因**，不悄悄当成 0；
+ * - 负数拒绝：`maxDepth` / `maxHeight` 是"有多深 / 有多高"，负号只会让用户看不懂自己填了什么。
+ */
+export function parseCalibrationInput(raw: string, label: string): ParsedCalibrationInput {
+  const text = raw.trim()
+  if (text.length === 0) return { ok: true, value: null }
+  const value = Number(text)
+  if (!Number.isFinite(value)) return { ok: false, problem: `${label}必须是一个数字（留空 = 不填）` }
+  if (value < 0) return { ok: false, problem: `${label}要填正数（它表示"有多深 / 有多高"）` }
+  return { ok: true, value }
+}
+
+/**
+ * 换算预览表：三个锚点（最深点 / 海平面 / 最高点）在三种展示单位下分别读作什么。
+ *
+ * 用 `formatDepthReading` 而不是自己拼字符串：那就是画布与图例用的**同一个**格式化函数，
+ * 于是"预览里看到 0.73、画布上却是别的数字"这种两处口径的问题不会出现。
+ */
+export function previewCalibrationTable(calibration: ElevationCalibration): string {
+  if (!isCalibrated(calibration)) {
+    return '还差一端：最深深度与最高高度都填上（且不全为 0），相对值才有定义。\n米 / 千米的读数不受影响。'
+  }
+  const rows: Array<[string, number]> = [
+    ['最深点', calibration.maxDepth!],
+    ['海平面', 0],
+    ['最高点', -calibration.maxHeight!],
+  ]
+  const header = padColumn('', 8) + padColumn('米', 12) + padColumn('千米', 12) + '相对值'
+  const lines = rows.map(([label, meters]) => {
+    const m = formatDepthReading(meters, 'm', calibration)
+    const km = formatDepthReading(meters, 'km', calibration)
+    const rel = formatDepthReading(meters, 'rel', calibration)
+    return padColumn(label, 8) + padColumn(m, 12) + padColumn(km, 12) + rel
+  })
+  return [header, ...lines].join('\n')
+}
+
+/** 按显示宽度补空格（全角字符算两列，避免表格错位） */
+function padColumn(text: string, width: number): string {
+  let display = 0
+  for (const char of text) display += char.charCodeAt(0) > 0x2e80 ? 2 : 1
+  return text + ' '.repeat(Math.max(0, width - display))
 }

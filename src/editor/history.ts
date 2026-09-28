@@ -11,6 +11,7 @@
 import { cellKey } from '../core/hex.ts'
 import { cellsEqual } from '../data/mapDocument.ts'
 import type { MapDocument, MapLabel, MapMarker, MapPath, MapRegion, TerrainCell } from '../data/mapDocument.ts'
+import type { ElevationCalibration } from '../render/elevationUnits.ts'
 
 /** 改一格地形：next 为 null 表示删除（画回空白） */
 export interface SetTerrainOp {
@@ -151,6 +152,7 @@ export type MapOp =
   | SetObjectFieldOp
   | SetCellFieldOp
   | TranslateObjectOp
+  | SetElevationOp
 
 /**
  * 改对象上的**一个字段**（类型 / 颜色 / 线宽 / 虚线 / 不透明度 / 位置…）。
@@ -206,6 +208,22 @@ export interface TranslateObjectOp {
   id: string
   dx: number
   dy: number
+}
+
+/**
+ * 改地图级的**海拔标定**（`document.elevation` 那一段）。
+ *
+ * 为什么单独一个 op、而复用 `setObjectField`：它不是"数组里某个带 id 的对象"，
+ * 而是与 `grid` 同级的顶层段（见 `mapDocument.ts`）。`from` / `to` 都是**整段**，
+ * 于是"清空标定"（`to: null`）与"从标定改成另一组值"是同一条路径，
+ * 撤销一次就回到原样 —— 与"地图级元数据一次改一处"的形状一致。
+ */
+export interface SetElevationOp {
+  kind: 'setElevation'
+  /** 改之前的标定；`null` = 当时还没有这一段 */
+  from: ElevationCalibration | null
+  /** 改之后的标定；`null` = 删掉这一段（回到"未标定"） */
+  to: ElevationCalibration | null
 }
 
 /**
@@ -343,6 +361,12 @@ export function applyOp(document: MapDocument, op: MapOp): void {
       shape.pts = shape.pts.map((point) => [point[0] + op.dx, point[1] + op.dy] as [number, number])
       return
     }
+    case 'setElevation': {
+      // 整段替换 / 整段删除：`to === null` = 把这一段去掉（回到"未标定"，老地图的形状）
+      if (op.to === null) delete document.elevation
+      else document.elevation = { ...op.to }
+      return
+    }
   }
 }
 
@@ -387,6 +411,9 @@ export function invertOp(op: MapOp): MapOp {
     case 'translateObject':
       // 逆操作就是把位移取反（刚体变换的逆还是刚体变换）
       return { ...op, dx: -op.dx, dy: -op.dy }
+    case 'setElevation':
+      // 整段对调：改回原标定、或重新删掉这一段
+      return { kind: 'setElevation', from: op.to, to: op.from }
   }
 }
 

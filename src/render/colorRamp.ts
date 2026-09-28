@@ -77,6 +77,28 @@ export function defaultTemperatureRamp(): RampSpec {
   }
 }
 
+/**
+ * 深度 / 海拔色带的出厂值：**高处浅米 → 海平面浅蓝 → 深海深蓝**。
+ *
+ * 数值轴与 `depth` 同口径（0 = 海平面，正 = 向下），所以锚点是**降序的语义、升序的值**：
+ * `-4000`（高海拔）在左、`4000`（深海）在右。
+ *
+ * 越界两端刻意**不用**温度那套纯蓝/纯红：那是温度的体感语言（冷 / 热）。
+ * 这里的越界是"比最高峰还高"与"比最深海沟还深"，所以用纯白 / 近黑蓝 —— 方向一眼可辨。
+ */
+export function defaultDepthRamp(): RampSpec {
+  return {
+    stops: [
+      { value: -4000, color: '#f2ead9' },
+      { value: 0, color: '#7dd3fc' },
+      { value: 4000, color: '#1e3a8a' },
+    ],
+    under: { color: '#ffffff', textColor: '#111827' },
+    over: { color: '#0b1f4b', textColor: '#ffffff' },
+    interpolate: DEFAULT_INTERPOLATE,
+  }
+}
+
 /* ------------------------------------------------------------------ 颜色解析 */
 
 /**
@@ -254,8 +276,10 @@ export function normalizeRampSpec(raw: unknown, fallback: RampSpec = defaultTemp
   const space = source.interpolate === 'rgb' || source.interpolate === 'oklab' ? source.interpolate : fallback.interpolate
   return {
     stops,
-    under: normalizeRangeStyle(source.under, DEFAULT_UNDER),
-    over: normalizeRangeStyle(source.over, DEFAULT_OVER),
+    // 越界两端的回退是**这一条色带自己的出厂值**（不是温度那对纯蓝/纯红）：
+    // 深度色带坏掉时应当回到深度的白 / 近黑蓝，而不是变成"极低温"的观感
+    under: normalizeRangeStyle(source.under, fallback.under),
+    over: normalizeRangeStyle(source.over, fallback.over),
     interpolate: space,
   }
 }

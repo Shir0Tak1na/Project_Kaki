@@ -18,7 +18,7 @@
  * 默认**隐藏**：图例是"要看的时候才看"的东西，不该默认占着画布。
  */
 
-import type { LegendEntry } from '../render/legend.ts'
+import { rampGradientCss, type LegendEntry } from '../render/legend.ts'
 
 export interface MapLegendOptions {
   /** 隐藏/显示状态由外部持有（设置或工具条按钮），这里只问 */
@@ -63,7 +63,20 @@ export class MapLegend {
    * 签名包含顺序：条目顺序是确定的（内置在前），顺序真的变了说明地图内容变了，那时重建才对。
    */
   refresh(entries: readonly LegendEntry[]): void {
-    const signature = entries.map((entry) => `${entry.kind}|${entry.label}|${entry.color}|${entry.count}`).join(';')
+    // 签名要覆盖**画出来的每一样东西**：色带条目里"改一个锚点颜色"不会改 label/count，
+    // 漏进签名就会表现为"设置里改了色带，右下角图例还是旧的"（§5.9 的老毛病）。
+    const signature = entries
+      .map((entry) =>
+        [
+          entry.kind,
+          entry.label,
+          entry.color,
+          entry.count,
+          entry.ramp ? JSON.stringify(entry.ramp) : '',
+          entry.outOfRange ? `${entry.outOfRange.under}/${entry.outOfRange.over}` : '',
+        ].join('|'),
+      )
+      .join(';')
     if (signature === this.lastSignature) return
     this.lastSignature = signature
     this.listEl.empty()
@@ -74,6 +87,10 @@ export class MapLegend {
     }
 
     for (const entry of entries) {
+      if (entry.kind === 'ramp') {
+        this.renderRampRow(entry)
+        continue
+      }
       const row = this.listEl.createEl('div', { cls: 'fc-legend-row' })
       // 用 dataset 而不是 setAttribute：假 DOM 如实复刻了 dataset
       row.dataset.kind = entry.kind
@@ -88,6 +105,42 @@ export class MapLegend {
 
       row.createEl('span', { cls: 'fc-legend-label', text: entry.label })
       row.createEl('span', { cls: 'fc-legend-count', text: `${entry.count}` })
+    }
+  }
+
+  /**
+   * 色带条目：标题 + 一条渐变 + 两端的刻度，越界那两项**只在真的有越界格时**出现。
+   *
+   * 为什么单独一套 DOM 而不是硬塞进普通行：普通行是一个色块 + 名字 + 次数，
+   * 而色带要表达的是"**一段连续的值域**" —— 挤成一个小方块会让人以为它也是一种分类。
+   */
+  private renderRampRow(entry: LegendEntry): void {
+    const ramp = entry.ramp
+    if (!ramp) return
+    const row = this.listEl.createEl('div', { cls: 'fc-legend-row is-ramp' })
+    row.dataset.kind = 'ramp'
+    row.createEl('span', { cls: 'fc-legend-label', text: entry.label })
+    row.createEl('span', { cls: 'fc-legend-count', text: `${entry.count}` })
+
+    const bar = row.createEl('span', { cls: 'fc-legend-ramp' })
+    bar.style.backgroundImage = rampGradientCss(ramp)
+    // 刻度用**已经格式化好的**文字（深度的 m / km / 相对值由字段自己换算，见 legend.ts）
+    bar.createEl('span', { cls: 'fc-legend-ramp-scale', text: ramp.minLabel })
+    bar.createEl('span', { cls: 'fc-legend-ramp-scale is-end', text: ramp.maxLabel })
+
+    const outOfRange = entry.outOfRange
+    if (!outOfRange) return
+    if (outOfRange.under > 0) {
+      const item = row.createEl('span', { cls: 'fc-legend-ramp-out' })
+      const swatch = item.createEl('span', { cls: 'fc-legend-swatch' })
+      swatch.style.backgroundColor = ramp.underColor
+      item.createEl('span', { cls: 'fc-legend-out-text', text: `< ${ramp.minLabel} · ${outOfRange.under} 格` })
+    }
+    if (outOfRange.over > 0) {
+      const item = row.createEl('span', { cls: 'fc-legend-ramp-out' })
+      const swatch = item.createEl('span', { cls: 'fc-legend-swatch' })
+      swatch.style.backgroundColor = ramp.overColor
+      item.createEl('span', { cls: 'fc-legend-out-text', text: `> ${ramp.maxLabel} · ${outOfRange.over} 格` })
     }
   }
 

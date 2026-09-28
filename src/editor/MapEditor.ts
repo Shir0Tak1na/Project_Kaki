@@ -30,6 +30,8 @@ import type {
 } from '../data/mapDocument.ts'
 import { cellsAlongSegment } from './brushPath.ts'
 import { History, applyOp, opsFromPrevious, opsFromPreviousOf, type MapOp } from './history.ts'
+import type { ElevationCalibration } from '../render/elevationUnits.ts'
+import { sameCalibration } from '../render/elevationUnits.ts'
 import {
   describeSelection,
   hitTestSelection,
@@ -492,7 +494,9 @@ export class MapEditor {
    * 两道闸，都是为了"别把垃圾写进用户文件"：
    * - 只允许改**表里声明过**的字段（类型字段 / 位置字段 `p` / `fields` 里列出的外观字段），
    *   面板传错键名就直接拒绝，而不是悄悄新增一个没人认识的键；
-   * - 数字字段必须在声明的范围内。**刻意不做"悄悄夹到边界"**：夹了以后用户看到的输入
+   * - 数字字段必须在**声明的**范围内（只有声明了 `min` / `max` 的类型才有范围 ——
+   *   温度 / 深度这类数据字段刻意没有，见 `selection.ts` 里那段注释）；
+   *   **刻意不做"悄悄夹到边界"**：夹了以后用户看到的输入
    *   与文件里的值会不一致，那是更难查的问题（历史上"输入被静默改写"已经出过一次，§5.33）。
    *
    * `value === null` = 删掉该字段（例如"清除覆盖色"），而不是写一个 null 进去 ——
@@ -509,6 +513,12 @@ export class MapEditor {
     const declared = field === spec.typeField || field === positionField || fieldSpec !== undefined
     if (!declared) return false
     if (fieldSpec !== undefined && fieldSpec.control === 'number' && typeof value === 'number') {
+      // 唯一的硬约束是"**必须是有限数**"：NaN / Infinity 不是数据（它们没法被画出来，
+      // 写进去只会变成别的库认不出的怪值）。
+      // ⚠️ 这里**刻意不**用 `TEMP_RANGE` 那类"物理合理范围"去拦（2026-09-28 用户实机纠正）：
+      // 温度 / 深度没有取值上限，"超出范围"只发生在颜色这一层（色带的 under/over 纯色 + 数值文字）。
+      // 范围判定只对**声明了 min/max 的字段**生效（例如区域不透明度 0–1）——那种是真正的定义域。
+      if (!Number.isFinite(value)) return false
       if (fieldSpec.min !== undefined && value < fieldSpec.min) return false
       if (fieldSpec.max !== undefined && value > fieldSpec.max) return false
     }
@@ -521,6 +531,25 @@ export class MapEditor {
       ? { kind: 'setObjectField', target: selection.kind, id: selection.id, field, from: current, to: value }
       : { kind: 'setCellField', key: selection.id, field, from: current, to: value }
     this.commit([op], `修改${fieldSpec?.label ?? '属性'}`)
+    return true
+  }
+
+  /**
+   * 写回地图级的**海拔标定**（`document.elevation` 那一段）。
+   *
+   * `null` = 清空这一段（回到"未标定"，也就是老地图的形状）。一次提交 = **一条**历史，
+   * 于是 Ctrl+Z 一次就回到原来的标定。
+   *
+   * 为什么不走检查器的 `setSelectionField`：标定不是"某个带 id 对象的一个字段"，
+   * 而是与 `grid` 同级的顶层段（见 `mapDocument.ts`）。
+   */
+  setElevationCalibration(calibration: ElevationCalibration | null): boolean {
+    const document_ = this.options.getDocument()
+    if (!document_) return false
+    const from = document_.elevation ?? null
+    const to = calibration === null ? null : { ...calibration }
+    if (sameCalibration(from, to)) return false
+    this.commit([{ kind: 'setElevation', from, to }], to === null ? '清除海拔标定' : '设置海拔标定')
     return true
   }
 

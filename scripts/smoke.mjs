@@ -407,11 +407,12 @@ function makeRecordingContext() {
     },
     fillText(text, x, y) {
       calls.fillText += 1
-      texts.push({ kind: 'fill', text, x: tx + x, y: ty + y, angle, font: context.font })
+      // 文字色也要记：越界格要求"纯蓝底**白字**"，不记颜色就断言不出来（与 fill 同一个理由）
+      texts.push({ kind: 'fill', text, x: tx + x, y: ty + y, angle, font: context.font, fillStyle: context.fillStyle })
     },
     strokeText(text, x, y) {
       calls.strokeText += 1
-      texts.push({ kind: 'stroke', text, x: tx + x, y: ty + y, angle, font: context.font })
+      texts.push({ kind: 'stroke', text, x: tx + x, y: ty + y, angle, font: context.font, fillStyle: context.fillStyle })
     },
     measureText(text) {
       // 按当前字号估算宽度：CJK 约 1 em、西文约 0.55 em。
@@ -5292,9 +5293,22 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   await plugin.setLayerVisible('labels', true)
   // 网格在前面的设置页步骤里被关掉了：这里显式恢复，才能断言"全部显示"这句话
   await plugin.setLayerVisible('grid', true)
+  // 温度 / 深度两条数据层出厂默认都是**关**的（数据层不该在用户没要求时改变现有画面）：
+  // 所以只想看"全部显示"那句话，就得连它们一起打开 —— 隐藏清单里会如实写着它们。
+  await plugin.setLayerVisible('temperature', true)
+  await plugin.setLayerVisible('depth', true)
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check('全部显示时状态命令这么说', layerCapture.text().includes('图层：全部显示'), layerCapture.text().slice(0, 200))
+  await plugin.setLayerVisible('temperature', false)
+  await plugin.setLayerVisible('depth', false)
+  runCommand(plugin, 'map-status')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  check(
+    '数据层默认关着这件事在状态命令里可查（"地图怎么没有颜色"有一个可读答案）',
+    layerCapture.text().includes('已隐藏 温度 / 深度'),
+    layerCapture.text().slice(0, 200),
+  )
   layerCapture.restore()
 
   // ---- 重开地图层：新建的工具条必须与设置一致 ----
@@ -5563,18 +5577,28 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
   check('面板已打开', panel !== undefined)
   const toggleEls = () => collectByClass(panel.contentEl, 'fc-layer-toggle')
   const toggleFor = (key) => toggleEls().find((element) => element.dataset.layer === key)
-  check('面板里有六个图层开关', toggleEls().length === 6, String(toggleEls().length))
+  check('面板里有八个图层开关（六层 + 温度、深度两条数据层）', toggleEls().length === 8, String(toggleEls().length))
+  const panelLayerOrder = toggleEls().map((element) => element.dataset.layer).join(',')
   check(
-    '六个开关的 key 与图层登记表一致',
-    toggleEls().map((element) => element.dataset.layer).join(',') === 'terrain,grid,regions,paths,markers,labels',
-    toggleEls().map((element) => element.dataset.layer).join(','),
+    '八个开关的 key 与图层登记表一致（表驱动，顺序就是表里的行序）',
+    panelLayerOrder === 'terrain,temperature,depth,grid,regions,paths,markers,labels',
+    panelLayerOrder,
   )
   check(
     '开关显示的是中文层名',
-    collectByClass(panel.contentEl, 'fc-layer-toggle-label').map((el) => el.textContent).join(',') === '地形,网格,区域,路径,标记,名称',
+    collectByClass(panel.contentEl, 'fc-layer-toggle-label').map((el) => el.textContent).join(',') ===
+      '地形,温度,深度,网格,区域,路径,标记,名称',
     collectByClass(panel.contentEl, 'fc-layer-toggle-label').map((el) => el.textContent).join(','),
   )
-  check('默认六个开关都是"开"', toggleEls().every((element) => element.classList.contains('is-active')))
+  const dataLayerKeys = ['temperature', 'depth']
+  check(
+    '除数据层外默认都是"开"（温度 / 深度出厂是关的：新功能不该改变现有画面）',
+    toggleEls()
+      .filter((element) => !dataLayerKeys.includes(element.dataset.layer))
+      .every((element) => element.classList.contains('is-active')) &&
+      dataLayerKeys.every((key) => toggleFor(key)?.classList.contains('is-active') === false),
+    toggleEls().map((element) => `${element.dataset.layer}:${element.classList.contains('is-active') ? 1 : 0}`).join(' '),
+  )
   check(
     '开关的悬停提示写清了这一层管什么（用具名文案，而不是让人猜）',
     (toggleFor('markers')?.title ?? '').includes('地标标记与文字标注') && (toggleFor('labels')?.title ?? '').includes('名称文字'),
@@ -5664,7 +5688,7 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
     JSON.stringify(layers.listStatus().map((status) => status.attached)),
   )
   check('工具条确实随地图层一起消失了', collectByClass(wrapper, 'fc-toolbar').length === 0)
-  check('而面板还在（所以关掉之后仍有入口 —— 这正是把按钮从工具条拿掉的前提）', collectByClass(panel.contentEl, 'fc-layer-toggle').length === 6)
+  check('而面板还在（所以关掉之后仍有入口 —— 这正是把按钮从工具条拿掉的前提）', collectByClass(panel.contentEl, 'fc-layer-toggle').length === 8)
 
   fireEvent(layerButton(), 'click')
   await new Promise((resolve) => setTimeout(resolve, 80))
@@ -9454,13 +9478,13 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   const undoBeforeOutOfRange = editor.getStatus().undo
   commitInput('field-depth', '99999')
   check(
-    '越界的深度被直接拒绝（不写盘、不记历史 —— 不是悄悄夹到边界）',
-    doc().terrain[cellKey(6, 0)]?.depth === undefined && editor.getStatus().undo === undoBeforeOutOfRange,
+    '超出色带全部锚点的值照样写得进去（数据层没有取值区间：色带两端只决定怎么染色）',
+    doc().terrain[cellKey(6, 0)]?.depth === 99999 && editor.getStatus().undo === undoBeforeOutOfRange + 1,
     JSON.stringify(doc().terrain[cellKey(6, 0)]),
   )
   commitInput('field-depth', '3400')
   check(
-    '范围内的深度写得进去（0 = 海平面，正 = 向下）',
+    '深度可以再改成范围内的值（0 = 海平面，正 = 向下）',
     doc().terrain[cellKey(6, 0)]?.depth === 3400,
     JSON.stringify(doc().terrain[cellKey(6, 0)]),
   )
@@ -9469,9 +9493,9 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   commitInput('field-temp', '-8')
   const editsRow = collectByClass(panel.contentEl, 'fc-selection-edits')[0]
   check(
-    // 3 处 = 本次选中之后依次改了：地形种类（mountain）、深度 3400、温度 -8
+    // 4 处 = 本次选中之后依次改了：地形种类（mountain）、深度 99999、深度 3400、温度 -8
     '改过之后出现「本次选中已改 N 处」',
-    editsRow !== undefined && String(editsRow.textContent).includes('已改 3 处'),
+    editsRow !== undefined && String(editsRow.textContent).includes('已改 4 处'),
     String(editsRow?.textContent),
   )
   const undoEditsButton = fieldEl('undo-selection-edits')
@@ -9841,6 +9865,441 @@ console.log('\n场景 41：重刷地形不得抹掉格上其它键（F1 —— �
     '撤销回森林后温度仍在',
     document_.terrain['0_0']?.temp === -5,
     JSON.stringify(document_.terrain['0_0']),
+  )
+
+  plugin.onunload()
+}
+
+console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 → 色带 → 画布')
+{
+  // 这一场是"温度模板"的端到端：值进格 → 色带算色 → 画布画出色块 → 改设置立刻变 → 关层不画。
+  // 深度与生物群系以后照抄这一套（字段表里加一行 + 图层表里加一行）。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  const file = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const wrapper = canvas.wrapperEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const document_ = layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+
+  // 四格：两个在色带内（正好落在锚点上，颜色可精确断言）、一个低于下限、一个高于上限。
+  // -200 刻意**同时**超出旧的 TEMP_RANGE（-100）：数据层没有取值区间，越界只体现在颜色上。
+  document_.terrain['0_0'] = { t: 'forest', temp: 15 }
+  document_.terrain['1_0'] = { temp: -200 }
+  document_.terrain['0_1'] = { t: 'plains', temp: 0 }
+  document_.terrain['2_0'] = { t: 'water', temp: 60 }
+  check('第 2 格只有温度、没有地形（F2 之后这是合法状态）', document_.terrain['1_0'].t === undefined)
+
+  // ---- 默认隐藏：数据层不该在用户没要求时改变现有画面 ----
+  frame()
+  check(
+    '出厂状态下温度层不在绘制序列里',
+    stats().lastDrawOrder.includes('temperature') === false,
+    stats().lastDrawOrder.join(','),
+  )
+  check('出厂状态下叠加层一格都没画', stats().lastOverlayDrawn === 0, String(stats().lastOverlayDrawn))
+
+  // ---- 打开温度层 ----
+  await plugin.setLayerVisible('temperature', true)
+  await tick(20)
+  const overlayFrame = frame()
+  check(
+    '打开后温度层插在地形与网格之间（叠加层压在矢量对象之下）',
+    stats().lastDrawOrder.join(',') === 'terrain,temperature,grid,regions,labels,paths,markers',
+    stats().lastDrawOrder.join(','),
+  )
+  check('四格都画出了色块', stats().lastOverlayDrawn === 4, String(stats().lastOverlayDrawn))
+  check('其中两格越界（低于下限 / 高于上限）', stats().lastOverlayOutOfRange === 2, String(stats().lastOverlayOutOfRange))
+  check(
+    '地形那一遍只画了有地形的三格（证明叠加层的取数与地形计划是两回事）',
+    stats().lastCellCount === 3,
+    String(stats().lastCellCount),
+  )
+  const overlayFills = () => overlayFrame.fills.filter((fill) => fill.alpha > 0 && fill.alpha < 1)
+  const hasFill = (color) => overlayFills().some((fill) => fill.fillStyle === color)
+  check('色带内的 15℃ 用的是 15 那个锚点的颜色', hasFill('#22c55e'), JSON.stringify(overlayFills().map((f) => f.fillStyle)))
+  check('色带内的 0℃ 用的是 0 那个锚点的颜色', hasFill('#00c8c8'))
+  check('低于下限的 -200℃ 用纯蓝（under）', hasFill('#0000ff'))
+  check('高于上限的 60℃ 用纯红（over）', hasFill('#ff0000'))
+  check(
+    '色块按出厂不透明度 0.5 画（地形要能透出来）',
+    overlayFills().every((fill) => Math.abs(fill.alpha - 0.5) < 1e-9),
+    JSON.stringify(overlayFills().map((f) => f.alpha)),
+  )
+  check(
+    '只有温度没有地形的那一格也上了色（纯蓝那一笔就是它）',
+    overlayFills().some((fill) => fill.fillStyle === '#0000ff'),
+  )
+  // 越界格**总是**写数值（即使"在每个格上写出数值"关着）：颜色只能表达"比上限还高"，
+  // 表达不了"高多少"，而越界恰恰最需要读数。
+  check(
+    '两格越界格写出了数值，且是白字（纯蓝/纯红底白字）',
+    overlayFrame.texts.length === 2 && overlayFrame.texts.every((item) => item.fillStyle === '#ffffff'),
+    JSON.stringify(overlayFrame.texts.map((item) => `${item.text}@${item.fillStyle}`)),
+  )
+  check(
+    '写出的是它们的实际数值（不是被夹到色带端点）',
+    overlayFrame.texts.map((item) => item.text).sort().join(',') === '-200,60',
+    overlayFrame.texts.map((item) => item.text).join(','),
+  )
+  check(
+    '带内的两格没写数值（"在每个格上写出数值"默认是关的）',
+    overlayFrame.texts.some((item) => item.text === '15' || item.text === '0') === false,
+    JSON.stringify(overlayFrame.texts.map((item) => item.text)),
+  )
+
+  // ---- 图例：色带条目（有值格数 / 两端刻度 / 越界两项只在真有越界格时出现）----
+  await plugin.setShowLegend(true)
+  await tick(20)
+  const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
+  const rampRows = () => collectByClass(legendEl(), 'fc-legend-row').filter((row) => row.dataset.kind === 'ramp')
+  check('图例里出现一条色带（不是色块分类）', rampRows().length === 1, String(rampRows().length))
+  check(
+    '色带条目的名字带单位、次数是有值的格数',
+    collectByClass(rampRows()[0], 'fc-legend-label')[0]?.textContent === '温度（℃）' &&
+      collectByClass(rampRows()[0], 'fc-legend-count')[0]?.textContent === '4',
+    `${collectByClass(rampRows()[0], 'fc-legend-label')[0]?.textContent} / ${collectByClass(rampRows()[0], 'fc-legend-count')[0]?.textContent}`,
+  )
+  const rampBar = () => collectByClass(rampRows()[0], 'fc-legend-ramp')[0]
+  check(
+    '渐变条按锚点画（两端就是色带的最低/最高锚点）',
+    (rampBar()?.style.backgroundImage ?? '').includes('#0000ff 0.00%') &&
+      (rampBar()?.style.backgroundImage ?? '').includes('#ff0000 100.00%'),
+    String(rampBar()?.style.backgroundImage),
+  )
+  check(
+    '渐变条两端写着刻度',
+    collectByClass(rampBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / ') === '-30℃ / 45℃',
+    collectByClass(rampBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / '),
+  )
+  const outItems = () => collectByClass(rampRows()[0], 'fc-legend-out-text').map((el) => el.textContent)
+  check(
+    '两端越界各列一条（数出的是真的越界格数）',
+    outItems().join(' | ') === '< -30℃ · 1 格 | > 45℃ · 1 格',
+    outItems().join(' | '),
+  )
+
+  // 改色带 → 图例里的渐变也得跟着变（签名必须覆盖色带，否则会停在旧图上）
+  const legendRamp = plugin.getSettings().overlays.temperature.ramp
+  await plugin.setOverlayStyle('temperature', {
+    ramp: { ...legendRamp, stops: legendRamp.stops.map((stop) => (stop.value === -30 ? { ...stop, color: '#0044ff' } : stop)) },
+  })
+  await tick(20)
+  check('改锚点颜色后图例的渐变跟着变', (rampBar()?.style.backgroundImage ?? '').includes('#0044ff 0.00%'), String(rampBar()?.style.backgroundImage))
+
+  // ---- 改设置：下一帧就是新颜色 / 新不透明度（不需要重开画布）----
+  await plugin.setOverlayStyle('temperature', { opacity: 0.9 })
+  await tick(20)
+  const opacityFrame = frame()
+  check(
+    '改不透明度后下一帧就是 0.9',
+    opacityFrame.fills.filter((fill) => fill.alpha > 0.5).length === 4,
+    JSON.stringify(opacityFrame.fills.map((f) => f.alpha)),
+  )
+  await plugin.setOverlayStyle('temperature', { opacity: 0.5 })
+  const ramp = plugin.getSettings().overlays.temperature.ramp
+  await plugin.setOverlayStyle('temperature', {
+    ramp: {
+      ...ramp,
+      stops: ramp.stops.map((stop) => (stop.value === 15 ? { ...stop, color: '#123456' } : stop)),
+    },
+  })
+  await tick(20)
+  check('改锚点颜色后同一格立刻换色', frame().fills.some((fill) => fill.fillStyle === '#123456'))
+
+  // ---- 关掉这一层：色块消失，但文件里的数据一个字节都不动 ----
+  await plugin.setLayerVisible('temperature', false)
+  await tick(20)
+  frame()
+  check('关掉温度层后一格色块都不画', stats().lastOverlayDrawn === 0, String(stats().lastOverlayDrawn))
+  check('关掉温度层后图例里的色带条目也跟着消失（图例与画布同一份开关）', rampRows().length === 0, String(rampRows().length))
+  check(
+    '关层不改数据：格上的温度仍在',
+    document_.terrain['0_0'].temp === 15 && document_.terrain['1_0'].temp === -200,
+    JSON.stringify(document_.terrain['0_0']),
+  )
+  await store.writeNow(file, document_, 'World', [canvasPath])
+  const saved = app.vault.files.get(file.path) ?? ''
+  check('落盘后温度写在地图文件里（正式字段）', saved.includes('"temp":15'), saved.slice(0, 160))
+
+  // ---- 设置页「数据层」一组：参数都在这里，且能改进去 ----
+  FakeSetting.created.length = 0
+  plugin.settingTabs[0].display()
+  const settingNamed = (fragment) =>
+    FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  check('设置页有「温度层的不透明度」滑块', settingNamed('温度层的不透明度')?.slider !== null)
+  check(
+    '五个色带锚点各自可改值 + 改色',
+    settingNamed('温度色带锚点 1（最低）')?.texts?.length === 1 &&
+      settingNamed('温度色带锚点 1（最低）')?.colorPickers?.length === 1 &&
+      settingNamed('温度色带锚点 5（最高）')?.texts?.length === 1,
+    String(FakeSetting.created.length),
+  )
+  check('越界两端各有颜色选择器（低于下限 / 高于上限）', settingNamed('低于下限')?.colorPicker !== undefined && settingNamed('高于上限')?.colorPicker !== undefined)
+  check('有「在每个格上写出数值」开关', settingNamed('在每个格上写出数值')?.toggle !== undefined)
+  check('有「恢复出厂色带」按钮', settingNamed('恢复出厂色带')?.button?.text === '恢复默认')
+
+  // 连续改两个锚点：两次都要留下（用"渲染时的快照"写就会把前一次覆盖掉）
+  await settingNamed('温度色带锚点 1（最低）').texts[0].type('-20')
+  await settingNamed('温度色带锚点 2').texts[0].type('5')
+  await tick(20)
+  const edited = plugin.getSettings().overlays.temperature.ramp.stops
+  check(
+    '连续改两个锚点，两次改动都在',
+    edited[0].value === -20 && edited[1].value === 5,
+    JSON.stringify(edited.map((stop) => stop.value)),
+  )
+  await settingNamed('温度色带锚点 1（最低）').colorPickers[0].pick('#0044ff')
+  await tick(20)
+  check('改锚点颜色写进设置', plugin.getSettings().overlays.temperature.ramp.stops[0].color === '#0044ff')
+  await settingNamed('低于下限').colorPicker.pick('#00ff88')
+  await tick(20)
+  check('改越界色写进设置', plugin.getSettings().overlays.temperature.ramp.under.color === '#00ff88')
+  await settingNamed('在每个格上写出数值').toggle.handler(true)
+  await tick(20)
+  check('打开"写出数值"写进设置', plugin.getSettings().overlays.temperature.showValues === true)
+  await settingNamed('恢复出厂色带').button.click()
+  await tick(20)
+  const restored = plugin.getSettings().overlays.temperature.ramp
+  check(
+    '恢复出厂色带：锚点与越界色都回出厂值',
+    restored.stops[0].value === -30 && restored.stops[0].color === '#0000ff' && restored.under.color === '#0000ff',
+    JSON.stringify(restored.stops.map((stop) => `${stop.value}:${stop.color}`)),
+  )
+  check('恢复出厂色带不动"写出数值"开关', plugin.getSettings().overlays.temperature.showValues === true)
+
+  // ---- 打开"所有格写数值"之后：四格都写（越界那两格本来就写）----
+  await plugin.setLayerVisible('temperature', true)
+  await tick(20)
+  const allValuesFrame = frame()
+  check(
+    '打开后四格都写出数值',
+    allValuesFrame.texts.length === 4,
+    JSON.stringify(allValuesFrame.texts.map((item) => item.text)),
+  )
+  check(
+    '带内格的数值用该底色上可读的文字色（不是一律白字）',
+    allValuesFrame.texts.filter((item) => item.text === '15' || item.text === '0').every((item) => item.fillStyle !== '#ffffff'),
+    JSON.stringify(allValuesFrame.texts.map((item) => `${item.text}@${item.fillStyle}`)),
+  )
+
+  plugin.onunload()
+}
+
+// ================================================== 场景 43：深度层 —— 色带 / 展示单位 / 标定
+console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 → 地图级海拔标定 → 关层不画')
+{
+  // 深度是"温度模板"的第二份：字段表加一行 + 图层表加一行，就有了完整的一条数据层。
+  // 这一场盯的是深度独有的那几件事：色带是"浅米→浅蓝→深蓝"、越界是白 / 近黑蓝（不是温度的蓝红）、
+  // 数值与图例刻度按**展示单位**换算（米 / 千米 / 相对值）、标定写进地图文件（可撤销）。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  const file = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const wrapper = canvas.wrapperEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const document_ = layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const settingNamed = (fragment) =>
+    FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  /** 标定对话框的替身：拿到 options 就够（真实对话框的敲键由它自己去跑，这里只驱动结果） */
+  let lastElevationOptions = null
+  plugin.setElevationModalFactory((modalApp, options) => {
+    lastElevationOptions = options
+    return { open() {} }
+  })
+
+  // 三格：海平面 / 深海 / 高海拔（负 = 向上）。刻意含 0（海平面是合法值，不是"没有数据"）。
+  document_.terrain['0_0'] = { t: 'water', depth: 0 }
+  document_.terrain['1_0'] = { t: 'water', depth: 5000 }
+  document_.terrain['0_1'] = { t: 'mountain', depth: -1500 }
+
+  // ---- 出厂默认隐藏 ----
+  frame()
+  check('出厂状态下深度层不在绘制序列里', stats().lastDrawOrder.includes('depth') === false, stats().lastDrawOrder.join(','))
+
+  // ---- 打开深度层：色带颜色 + 越界两端 + 深浅次序 ----
+  await plugin.setLayerVisible('depth', true)
+  await tick(20)
+  const overlayFrame = frame()
+  check(
+    '打开后深度层插在网格之前（叠加层压在地形之上、矢量对象之下）；温度关着所以不在序列里',
+    stats().lastDrawOrder.join(',') === 'terrain,depth,grid,regions,labels,paths,markers',
+    stats().lastDrawOrder.join(','),
+  )
+  check('三格都画出了色块', stats().lastOverlayDrawn === 3, String(stats().lastOverlayDrawn))
+  const fills = () => overlayFrame.fills.filter((fill) => fill.alpha > 0 && fill.alpha < 1)
+  const hasFill = (color) => fills().some((fill) => fill.fillStyle === color)
+  check('海平面（0）用浅蓝锚点色', hasFill('#7dd3fc'), JSON.stringify(fills().map((f) => f.fillStyle)))
+  // 5000 超过出厂上限 4000 → 高于上限的近黑蓝；-1500 在带内（-4000..4000），插值结果在浅米一侧
+  check('深于上限（5000 > 4000）用近黑蓝（over）', hasFill('#0b1f4b'))
+  check(
+    '色块按出厂不透明度 0.5 画',
+    fills().every((fill) => Math.abs(fill.alpha - 0.5) < 1e-9),
+    JSON.stringify(fills().map((f) => f.alpha)),
+  )
+
+  // ---- 越界格总是写数值，数值按米（出厂展示单位）读 ----
+  check(
+    '越界格写出了数值（出厂是米读数），用 over 的文字色',
+    overlayFrame.texts.some((item) => item.text === '5000' && item.fillStyle === '#ffffff'),
+    JSON.stringify(overlayFrame.texts.map((item) => `${item.text}@${item.fillStyle}`)),
+  )
+  check(
+    '带内的格默认不写数值（"在每个格上写出数值"默认关）',
+    overlayFrame.texts.some((item) => item.text === '0' || item.text === '-1500') === false,
+    JSON.stringify(overlayFrame.texts.map((item) => item.text)),
+  )
+
+  // ---- 展示单位换 km：数值文字与图例刻度都跟着变（文件一个字节不动）----
+  await plugin.setOverlayStyle('depth', { unit: 'km' })
+  await tick(20)
+  const kmFrame = frame()
+  check(
+    '换成千米后越界格读成 5 km（不是 5000）',
+    kmFrame.texts.some((item) => item.text === '5'),
+    JSON.stringify(kmFrame.texts.map((item) => item.text)),
+  )
+
+  // ---- 图例：单位标题、刻度按展示单位换算 ----
+  await plugin.setShowLegend(true)
+  await tick(20)
+  const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
+  const rampRows = () => collectByClass(legendEl(), 'fc-legend-row').filter((row) => row.dataset.kind === 'ramp')
+  check('图例里出现深度那一条色带（温度层关着，所以只有它）', rampRows().length === 1, String(rampRows().length))
+  const depthRow = () => rampRows().find((row) => (collectByClass(row, 'fc-legend-label')[0]?.textContent ?? '').includes('深度'))
+  check('深度条目的标题跟着展示单位走', (collectByClass(depthRow(), 'fc-legend-label')[0]?.textContent ?? '') === '深度 / 海拔（km）')
+  const depthBar = () => collectByClass(depthRow(), 'fc-legend-ramp')[0]
+  check(
+    '深度条目的刻度按千米换算（-4 km / 4 km）',
+    collectByClass(depthBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / ') === '-4 km / 4 km',
+    collectByClass(depthBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / '),
+  )
+  check(
+    '越界那端带单位（> 4 km · 1 格）',
+    collectByClass(depthRow(), 'fc-legend-out-text').map((el) => el.textContent).join(' | ') === '> 4 km · 1 格',
+    collectByClass(depthRow(), 'fc-legend-out-text').map((el) => el.textContent).join(' | '),
+  )
+
+  // ---- 展示单位换相对值：未标定时读数"未标定"，标定后读数变成 0–1 ----
+  await plugin.setOverlayStyle('depth', { unit: 'rel' })
+  await tick(20)
+  const relUncalibrated = frame()
+  check(
+    '未标定时相对值读数显示"未标定"（不拿编造的尺度凑数）',
+    relUncalibrated.texts.some((item) => item.text === '未标定'),
+    JSON.stringify(relUncalibrated.texts.map((item) => item.text)),
+  )
+  check(
+    '未标定时图例刻度的 min 端也显示"未标定"',
+    collectByClass(depthBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / ') === '未标定 / 未标定',
+    collectByClass(depthBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / '),
+  )
+
+  // ---- 设置海拔标定：写进地图文件、可撤销、读数立刻生效 ----
+  const editor = layers.getEditor(canvasPath)
+  check('命令走的是当前活动画布的那个编辑器', layers.getActiveEditor() === editor)
+  const before = editor.getStatus().undo
+  runCommand(plugin, 'set-elevation-calibration')
+  check('「设置海拔标定…」命令打开了对话框（面板与命令面板同一个入口）', lastElevationOptions !== null)
+  check(
+    '弹窗拿到的当前值是 null（这张图还没标定）',
+    lastElevationOptions?.current === null,
+    JSON.stringify(lastElevationOptions),
+  )
+  lastElevationOptions?.onSubmit({ unit: 'm', maxDepth: 8000, maxHeight: 3000 })
+  await tick(20)
+  check('标定写进了文档（地图文件的那一段）', JSON.stringify(document_.elevation) === '{"unit":"m","maxDepth":8000,"maxHeight":3000}')
+  check('标定记了一条可撤销的历史', editor.getStatus().undo === before + 1, String(editor.getStatus().undo))
+
+  const relCalibrated = frame()
+  check(
+    '标定后相对值读数可算：5000 深 → (8000−5000)/11000 ≈ 0.27',
+    relCalibrated.texts.some((item) => item.text === '0.27'),
+    JSON.stringify(relCalibrated.texts.map((item) => item.text)),
+  )
+  check(
+    '图例刻度也换成相对值（-4000 → 夹到 1；4000 → 0.36）',
+    collectByClass(depthBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / ') === '1 / 0.36',
+    collectByClass(depthBar(), 'fc-legend-ramp-scale').map((el) => el.textContent).join(' / '),
+  )
+
+  // ---- 撤销标定：回到未标定，文件里那段被删掉 ----
+  editor.undo()
+  await tick(20)
+  check('撤销后文档里没有 elevation 段了（回到老地图的形状）', document_.elevation === undefined)
+  check('撤销后相对值读数又回到"未标定"', frame().texts.some((item) => item.text === '未标定'))
+
+  // ---- 落盘：elevation 段写进地图文件，深度值也写进去 ----
+  layers.getEditor(canvasPath).setElevationCalibration({ unit: 'm', maxDepth: 8000, maxHeight: 3000 })
+  await store.writeNow(file, document_, 'World', [canvasPath])
+  const saved = app.vault.files.get(file.path) ?? ''
+  check('落盘后标定写在地图文件里', saved.includes('"elevation": {"unit":"m","maxDepth":8000,"maxHeight":3000}'), saved.slice(0, 200))
+  check('落盘后深度值写在地图文件里（正式字段）', saved.includes('"depth":5000'), saved.slice(0, 200))
+
+  // ---- 关层：色块消失、数据不动 ----
+  await plugin.setLayerVisible('depth', false)
+  await tick(20)
+  frame()
+  check('关掉深度层后一格色块都不画', stats().lastOverlayDrawn === 0, String(stats().lastOverlayDrawn))
+  check('关层不改数据：格上的深度仍在', document_.terrain['1_0']?.depth === 5000, JSON.stringify(document_.terrain['1_0']))
+
+  // ---- 设置页：深度有自己的展示单位下拉（温度没有） ----
+  FakeSetting.created.length = 0
+  plugin.settingTabs[0].display()
+  const depthUnitSetting = settingNamed('深度 / 海拔的展示单位')
+  check('设置页有「深度 / 海拔的展示单位」下拉', depthUnitSetting?.dropdowns?.length === 1, String(depthUnitSetting?.dropdowns?.length))
+  check(
+    '下拉选项是米 / 千米 / 相对值，且当前选中相对值',
+    depthUnitSetting?.dropdowns[0].options.map((option) => option.value).join(',') === 'm,km,rel' &&
+      depthUnitSetting?.dropdowns[0].value === 'rel',
+    JSON.stringify(depthUnitSetting?.dropdowns[0].options),
+  )
+  const temperatureUnitSetting = settingNamed('温度的展示单位')
+  check('温度没有展示单位下拉（它不需要换算）', temperatureUnitSetting === undefined)
+
+  // ---- 越界色回退用的是**深度自己的出厂值**（白 / 近黑蓝），不是温度的纯蓝 / 纯红 ----
+  await plugin.setOverlayStyle('depth', { ramp: { ...plugin.getSettings().overlays.depth.ramp, stops: [] } })
+  await tick(20)
+  check(
+    '深度色带坏掉时回退到深度自己的出厂（over 仍是近黑蓝）',
+    plugin.getSettings().overlays.depth.ramp.over.color === '#0b1f4b',
+    plugin.getSettings().overlays.depth.ramp.over.color,
   )
 
   plugin.onunload()

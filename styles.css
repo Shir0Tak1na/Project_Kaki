@@ -479,6 +479,54 @@
   color: var(--text-faint);
 }
 
+/* ---- 图例里的色带条目（温度 / 深度这类连续值域） ---- */
+
+/*
+ * 色带行要**折行**：普通行是"色块 + 名字 + 次数"一行放得下，
+ * 而色带要放一条渐变 + 两端刻度 + 越界两项 —— 挤在一行会把渐变压成几像素宽。
+ */
+.fc-legend-row.is-ramp {
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.fc-legend-ramp {
+  flex: 1 1 100%;
+  position: relative;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  /* 渐变由脚本按条目写入（linear-gradient，位置按锚点值归一化） */
+}
+
+.fc-legend-ramp-scale {
+  position: absolute;
+  top: 11px;
+  left: 0;
+  font-size: 9px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.fc-legend-ramp-scale.is-end {
+  left: auto;
+  right: 0;
+}
+
+/* 越界那两项：小色块 + 文字，只在真有越界格时出现 */
+.fc-legend-ramp-out {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.fc-legend-out-text {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- 报告面板（地图状态 / 诊断报告） ---- */
 
 /*

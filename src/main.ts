@@ -82,6 +82,12 @@ import {
 } from './render/layerVisibility.ts'
 import { legendLines } from './render/legend.ts'
 import {
+  normalizeOverlayStyles,
+  overlayField,
+  type FieldId,
+  type OverlayStyle,
+} from './render/overlayFields.ts'
+import {
   emptyBundleListHint,
   emptyImageListHint,
   emptyNoteListHint,
@@ -130,6 +136,7 @@ import { CUSTOM_REGION_TYPE_PREFIX } from './render/regionTypeCatalog.ts'
 import { CUSTOM_TERRAIN_PREFIX } from './render/terrainCatalog.ts'
 import { defaultMapNameFromPath } from './data/mapFile.ts'
 import { MAX_CUSTOM_MARKERS, validateCustomMarkerInput, type CustomMarker } from './render/markerCatalog.ts'
+import { formatCalibration } from './render/elevationUnits.ts'
 
 import {
   buildResourceBundle,
@@ -147,6 +154,10 @@ import {
   type ImportBundleOutcome,
 } from './ui/ImportBundleModal.ts'
 import { TextPromptModal, type TextPromptOptions } from './ui/TextPromptModal.ts'
+import {
+  ElevationCalibrationModal,
+  type ElevationModalFactory,
+} from './ui/ElevationCalibrationModal.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
 export type PromptModalFactory = (
@@ -245,6 +256,14 @@ export default class ProjectKakiPlugin extends Plugin {
    */
   private importModalFactory: ImportBundleModalFactory = (app, options) => new ImportBundleModal(app, options)
   /**
+   * 海拔标定对话框工厂（仅自动化测试注入；默认就是真实对话框）。
+   *
+   * 与导出 / 导入对话框同一套路（惰性默认工厂）：冒烟要断言的是"标定写进地图文件之后
+   * 读数与撤销是什么样"，而不是去模拟对话框里的敲键。
+   */
+  private elevationModalFactory: ElevationModalFactory = (app, options) =>
+    new ElevationCalibrationModal(app, options)
+  /**
    * 设置页实例：导入之后要让已经打开的设置页也跟着刷新（否则用户会看到一份过时的列表）。
    *
    * 保留引用是必须的：`addSettingTab` 不返回实例，而 Obsidian 只在用户打开设置时才调 `display()`。
@@ -283,6 +302,8 @@ export default class ProjectKakiPlugin extends Plugin {
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
       // 工具条上的按钮通过下面两个 setter 写回设置。
       getLayers: () => this.pluginSettings.layers,
+      // 数据层样式（色带 / 不透明度）：同样每帧现读 —— 改色带下一帧就是新颜色
+      getOverlayStyles: () => this.pluginSettings.overlays,
       getShowLegend: () => this.pluginSettings.showLegend,
       setLayerVisible: (key, value) => {
         void this.setLayerVisible(key, value)
@@ -367,6 +388,20 @@ export default class ProjectKakiPlugin extends Plugin {
           return `已启用：${status.mapPath ?? '未绑定地图'}`
         },
         run: () => this.toggleMapLayer(),
+      },
+      {
+        // 地图级元数据（当前地图最深多深、最高多高）—— 深度的"相对值"读数靠它锚定。
+        // 归 `map` 组：它作用在**当前地图**上（不是插件设置），与"启用/停用地图层"同类。
+        id: 'set-elevation-calibration',
+        name: '设置海拔标定…',
+        icon: 'mountain',
+        group: 'map',
+        available: hasLayer,
+        describe: () => {
+          const calibration = this.layers?.getActiveDocument()?.elevation ?? null
+          return calibration === null ? '当前地图未标定（相对值读数不可用）' : formatCalibration(calibration)
+        },
+        run: () => this.openElevationCalibrationModal(),
       },
       {
         id: 'toggle-edit-mode',
@@ -1663,6 +1698,38 @@ export default class ProjectKakiPlugin extends Plugin {
     this.definitionModalFactory = factory
   }
 
+  /**
+   * 打开「设置海拔标定…」对话框，把结果写进**地图文件**的 `elevation` 段（可撤销）。
+   *
+   * 三条边界：
+   * - 标定属于**地图**（这个世界的事实），所以走编辑器的 `setElevationCalibration` →
+   *   一次提交 = 一条历史 → Ctrl+Z 一次回到原标定；
+   * - 对话框是异步的，回调里**重新取一次编辑器**（期间视图可能已关闭，与命名对话框同一防线）；
+   * - 文档里没有这一段时传 `null` 进去（回显"未标定"），而不是编一个 0 出来。
+   */
+  openElevationCalibrationModal(): void {
+    const editor = this.layers?.getActiveEditor() ?? null
+    const document_ = this.layers?.getActiveDocument() ?? null
+    if (!editor || !document_) {
+      new Notice('需要先启用一张 Canvas 的地图层，才能设置它的海拔标定。', NOTICE_MAX_MS)
+      return
+    }
+    this.elevationModalFactory(this.app, {
+      current: document_.elevation ?? null,
+      onSubmit: (calibration) => {
+        // 对话框是异步的：期间视图可能已关闭（编辑器被移除），必须重新取一次
+        const target = this.layers?.getActiveEditor() ?? null
+        if (!target) return
+        if (target.setElevationCalibration(calibration)) {
+          new Notice(
+            calibration === null ? '已清除海拔标定（相对值读数不再可用）' : '已设置海拔标定（Ctrl/Cmd+Z 可撤销）',
+            4000,
+          )
+        }
+      },
+    }).open()
+  }
+
   /** 同上：替换「删除定义」确认框（测试里用替身直接驱动"有引用才弹"这条分流） */
   setDeleteModalFactory(factory: ConfirmDeleteModalFactory): void {
     this.deleteModalFactory = factory
@@ -1845,6 +1912,31 @@ export default class ProjectKakiPlugin extends Plugin {
     await this.saveData(this.pluginSettings)
   }
 
+  /**
+   * 写回数据层（温度 / 深度…）的渲染参数：色带 / 越界色 / 不透明度 / 是否画数值。
+   *
+   * 与 `setLayerVisible` 同一套路：**先改内存 → 再落盘**，刷新画布靠"每帧现读"，
+   * 所以这里**不需要**广播（`getOverlayStyles` 下一帧就会拿到新值）。
+   * 面板/设置页自己负责重绘（它们各自知道要保住滚动位置）。
+   */
+  async setOverlayStyle(field: FieldId, patch: Partial<OverlayStyle>): Promise<void> {
+    const current = this.pluginSettings.overlays[field]
+    const next = normalizeOverlayStyles({
+      ...this.pluginSettings.overlays,
+      [field]: { ...current, ...patch },
+    })
+    this.pluginSettings = { ...this.pluginSettings, overlays: next }
+    // 色带变了 → 图例里的渐变条与越界计数也要跟着变（图例只在"设置变了"时刷新，不跟每帧走）
+    this.layers?.setLayers()
+    await this.saveData(this.pluginSettings)
+  }
+
+  /** 把某一层的色带恢复出厂（只动色带，不动透明度与"画数值"开关） */
+  async resetOverlayRamp(field: FieldId): Promise<void> {
+    const fallback = overlayField(field).defaultStyle()
+    await this.setOverlayStyle(field, { ramp: fallback.ramp })
+  }
+
   async setShowLegend(value: boolean): Promise<void> {
     const next = value === true
     if (next === this.pluginSettings.showLegend) return
@@ -1886,6 +1978,11 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 替换命名对话框（自动化测试用；不改动则为真实的输入对话框） */
   setPromptModalFactory(factory: PromptModalFactory): void {
     this.promptModalFactory = factory
+  }
+
+  /** 替换海拔标定对话框（自动化测试用；不改动则为真实对话框） */
+  setElevationModalFactory(factory: ElevationModalFactory): void {
+    this.elevationModalFactory = factory
   }
 
   /**

@@ -56,6 +56,7 @@ import {
   type LayerKey,
   type LayerVisibility,
 } from './layerVisibility.ts'
+import { DEFAULT_OVERLAY_STYLES, overlayField, type OverlayStyles } from './overlayFields.ts'
 import type { MapDraft } from '../editor/MapEditor.ts'
 
 /** 超过这个可见格数就不画网格线（缩小到很远时逐格描边会拖垮帧率） */
@@ -88,6 +89,14 @@ export interface OverlayStats {
    * "真实渲染确实按表走"的证据：关掉某层，它就不该出现在这一串里。
    */
   lastDrawOrder: LayerKey[]
+  /**
+   * 本帧数据层（温度 / 深度…）一共画出了多少格，以及其中多少格走了"越界纯色"。
+   *
+   * 与 `lastGridCells` 同一个理由：**"叠加层没画出来"必须有一个可读的数字**，
+   * 否则用户报"我开了温度层但什么都没变"时，只能靠肉眼看截图猜。
+   */
+  lastOverlayDrawn: number
+  lastOverlayOutOfRange: number
   /**
    * 最近一帧"可见的世界矩形"（导出范围＝「当前视口」时用它）。
    *
@@ -187,6 +196,13 @@ export interface MapOverlayOptions {
    * 同一件事存两份，就必然出现"设置里打开、按钮显示关闭"这种没法解释的状态。
    */
   getLayers?: () => LayerVisibility
+  /**
+   * 数据层（温度 / 深度…）的渲染参数（色带 / 不透明度 / 是否画数值）。
+   *
+   * 与 `getLayers` 同一条口径：**每帧现读**，所以"设置里改了色带"下一帧就是新颜色，
+   * 不需要任何广播或失效通知（少一个"忘了通知"的失效点）。
+   */
+  getOverlayStyles?: () => OverlayStyles
 }
 
 function asElement(value: unknown): HTMLElement | null {
@@ -271,6 +287,8 @@ export class MapOverlay {
     lastMarkerCount: 0,
     lastImageRegionCount: 0,
     lastDrawOrder: [],
+    lastOverlayDrawn: 0,
+    lastOverlayOutOfRange: 0,
     lastVisibleWorld: null,
     markerLayerAttached: false,
     lastRaster: null,
@@ -630,6 +648,11 @@ export class MapOverlay {
     return this.options.getCustomTerrains?.() ?? []
   }
 
+  /** 当前数据层样式（色带 / 不透明度），与 `layers()` 同一条口径：每帧现读 */
+  private overlayStyles(): OverlayStyles {
+    return this.options.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES
+  }
+
   /**
    * 当前图层可见性（每帧现读设置）。
    *
@@ -965,6 +988,9 @@ export class MapOverlay {
     // 所以"关掉区域后 lastRegionCount 是 0"这条既有语义不变，不随重绘次序的重构漂移。
     this.stats.lastRegionCount = plan.regions.length
     this.stats.lastPathCount = plan.paths.length
+    const overlayStyles = this.overlayStyles()
+    let overlayDrawn = 0
+    let overlayOutOfRange = 0
     const drawn: LayerKey[] = []
     for (const spec of LAYERS_BY_DRAW_ORDER) {
       if (!isLayerVisible(layers, spec.id)) {
@@ -974,16 +1000,23 @@ export class MapOverlay {
       }
       drawn.push(spec.id)
       builtinPasses[spec.id]?.()
-      // 新层（温度 / 深度这类数据层）把自己的绘制挂在这里，就同时拿到了正确的叠加位置
-      spec.draw?.({
+      // 数据层：把"画哪个字段 + 用哪套样式"递进钩子（样式每帧现读，改设置下一帧就生效）
+      const outcome = spec.draw?.({
         ctx,
         toRaster: (x, y) => worldToRaster(layer, x, y),
         plan,
         document: document_,
         layers,
+        ...(spec.overlay ? { overlay: { spec: overlayField(spec.overlay), style: overlayStyles[spec.overlay] } } : {}),
       })
+      if (outcome) {
+        overlayDrawn += outcome.drawn
+        overlayOutOfRange += outcome.outOfRange ?? 0
+      }
     }
     this.stats.lastDrawOrder = drawn
+    this.stats.lastOverlayDrawn = overlayDrawn
+    this.stats.lastOverlayOutOfRange = overlayOutOfRange
 
     const draft = this.options.getDraft?.() ?? null
     if (draft) drawDraft(ctx, layer, draft)

@@ -42,7 +42,6 @@
  */
 
 import { cellKey, parseCellKey, worldToAxial, type GridSpec, type Point } from '../core/hex.ts'
-import { DEPTH_RANGE, TEMP_RANGE } from '../data/mapDocument.ts'
 import type { MapDocument } from '../data/mapDocument.ts'
 
 export type SelectionKind = 'marker' | 'label' | 'path' | 'region' | 'cell'
@@ -72,7 +71,7 @@ export interface SelectionFieldSpec {
   field: string
   label: string
   control: 'color' | 'number' | 'dash'
-  /** 数字控件的范围（世界单位或 0–1），仅 `control: 'number'` 有意义 */
+  /** 数字控件的范围（世界单位或 0–1），仅 `control: 'number'` 有意义。**数据层不给范围**（见下面注释） */
   min?: number
   max?: number
   /**
@@ -323,16 +322,20 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
     fields: [
       { field: 'c', label: '覆盖色', control: 'color' },
       // 温度 / 深度：「一格多值」的两个数值字段（覆盖层要用）。
-      // 范围是**物理合理范围**，越界由 `MapEditor.setSelectionField` **直接拒绝**（不悄悄夹到边界，
-      // 夹了以后"输入框里看到的"与"文件里的"会不一致，§5.33 的教训）。
+      //
+      // ⚠️ **这两个字段刻意不声明 `min` / `max`**（2026-09-28 用户实机纠正）：
+      // 以前这里挂了 -100~100 / -12000~12000，于是输入框会**拒绝**超出它们的值 ——
+      // 那不是数据模型的约束，而是我顺手加的"物理合理范围"，与设计不符。
+      // 现在：**任何有限数都是合法数据**，唯一被拒的是 NaN / Infinity（它们不是数据）；
+      // "超出范围"只发生在**颜色**这一层 —— 色带的 stops 之外用 `under` / `over` 的纯色画，
+      // 并在格上写出数值（见 `overlayDraw.ts`）。范围的边界属于色带（用户可调），不属于数据。
+      //
       // 留空 = 删掉该键 = 这一格没有数据 —— 与写一个 0 是两件事（0 ℃ / 海平面都是合法值）。
-      { field: 'temp', label: '温度（℃）', control: 'number', min: TEMP_RANGE.min, max: TEMP_RANGE.max, group: 'data' },
+      { field: 'temp', label: '温度（℃）', control: 'number', group: 'data' },
       {
         field: 'depth',
         label: '深度/海拔（m，0 = 海平面、正 = 向下）',
         control: 'number',
-        min: DEPTH_RANGE.min,
-        max: DEPTH_RANGE.max,
         group: 'data',
       },
     ],

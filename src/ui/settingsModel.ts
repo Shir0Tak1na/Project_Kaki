@@ -22,6 +22,11 @@ import type { RegionTypeEntry } from '../render/regionTypeCatalog.ts'
 import { normalizeRegionTypeEntries, regionColorsFromEntries } from '../render/regionTypeCatalog.ts'
 import type { LayerVisibility } from '../render/layerVisibility.ts'
 import { DEFAULT_LAYER_VISIBILITY, layerVisibilityFromLegacy } from '../render/layerVisibility.ts'
+import {
+  defaultOverlayStyles,
+  normalizeOverlayStyles,
+  type OverlayStyles,
+} from '../render/overlayFields.ts'
 import type { PathColorMap, StylePalette } from '../render/stylePalette.ts'
 import { normalizeFontFamily } from '../render/stylePalette.ts'
 
@@ -92,6 +97,15 @@ export interface CartographerSettings {
    * 等于换个看法就改了用户的地图，还会污染 Git diff。
    */
   layers: LayerVisibility
+  /**
+   * 数据层（温度 / 深度…）的渲染参数：色带、越界色、不透明度、是否画数值。
+   *
+   * 与 `layers` 的分工是**刻意**的：`layers` 管"看不看"，这里管"怎么看"。
+   * 两边都只存一份（§5.12）—— 所以这里**没有** `visible` 字段，
+   * 可见性一律去 `layers` 里读（设计草案 §4.6 曾把 `visible` 写进这一节，那是两处真相，已改）。
+   * 值本身属于地图文件，**不在这里**。
+   */
+  overlays: OverlayStyles
   /** 是否显示画布上的图例（默认关：图例是"要看的时候才看"的东西） */
   showLegend: boolean
   /**
@@ -124,6 +138,8 @@ export const DEFAULT_SETTINGS: CartographerSettings = {
   customTerrains: [],
   customMarkers: [],
   layers: DEFAULT_LAYER_VISIBILITY,
+  // 出厂色带 / 透明度：每次新对象，避免与 DEFAULT_SETTINGS 共用同一份引用
+  overlays: defaultOverlayStyles(),
   showLegend: false,
   hideQuickStartSettings: false,
   hideQuickStartPanel: false,
@@ -190,6 +206,8 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     // `source.showGrid` 只作为**迁移输入**读一次：早期只有这一个开关，
     // 老用户把它关掉过的话必须变成"隐藏网格"，不能因为换代就把他的选择丢掉。
     layers: layerVisibilityFromLegacy({ showGrid: source.showGrid, layers: source.layers }),
+    // 数据层样式：缺项 / 坏值按出厂补齐（色带交给 colorRamp 自己的规范化）
+    overlays: normalizeOverlayStyles(source.overlays),
     showLegend: source.showLegend === true,
     // 引导可见性：与 showLegend / developerMode 同一口径 —— 只有明确写着 true 才算"关掉了"。
     // 反过来的话（垃圾值当"已隐藏"）会让用户与引导失联，而引导正是他唯一能找到入口的地方。

@@ -11,6 +11,7 @@
 
 import { parseCellKey, type GridSpec } from '../core/hex.ts'
 import type { GeometryMode } from '../core/hexEdges.ts'
+import { normalizeElevationCalibration, type ElevationCalibration } from '../render/elevationUnits.ts'
 
 /** 当前插件支持的文档版本 */
 export const MAP_DOCUMENT_VERSION = 1
@@ -162,6 +163,9 @@ export interface TerrainCell {
    *
    * 与 `t` 的关系：一格可以只有温度、没有地形（见 `t` 的说明）。
    * 缺省 = **这一格没有温度数据**，不是 0 ℃ —— 0 是一个合法的温度值。
+   *
+   * **没有取值范围**：任何有限数都是合法数据。色带的上下限只决定"带内怎么插值"，
+   * 带外的值用 `under` / `over` 的纯色画出来（并写出数值）—— 边界属于色带，不属于数据。
    */
   temp?: number
   /**
@@ -268,6 +272,15 @@ export interface MapLabel {
 export interface MapDocument {
   version: number
   grid: GridSpec
+  /**
+   * 地图级**海拔标定**（与 `grid` 同级）：最深深度 / 最高高度（都是正数，单位见 `unit`）。
+   *
+   * 为什么写在地图文件里而不是插件设置：它是**这个世界的事实**（这张海图最深一万米），
+   * 不是"我现在想怎么看"。展示单位（米 / 千米 / 相对值）才是偏好，住在插件设置。
+   * 缺省 = **未标定** —— 老地图没有这一段，因此逐字节不变；
+   * 未标定时相对值拒绝计算（见 `elevationUnits.ts`），而不是拿编造的尺度凑数。
+   */
+  elevation?: ElevationCalibration
   /** 键为 `"q_r"` 的稀疏地形表 */
   terrain: Record<string, TerrainCell>
   paths: MapPath[]
@@ -332,6 +345,7 @@ function readPointList(value: unknown): Array<[number, number]> | null {
 const KNOWN_TOP_LEVEL_KEYS = new Set([
   'version',
   'grid',
+  'elevation',
   'terrain',
   'paths',
   'regions',
@@ -387,9 +401,10 @@ function isStorableTerrainId(value: unknown): value is string {
 /** 格上"我们认识"的键：其余一律进 `extra` 原样保留（见 `TerrainCell.extra`） */
 const KNOWN_CELL_KEYS = new Set(['t', 'f', 'c', 'temp', 'depth', 'extra'])
 
-/** 温度 / 深度的**物理合理范围**（越界多半是打字错误）；注意它与"色带上下限"无关 */
-export const TEMP_RANGE = { min: -100, max: 100 } as const
-export const DEPTH_RANGE = { min: -12000, max: 12000 } as const
+// 这里曾经有 `TEMP_RANGE` / `DEPTH_RANGE`（-100~100 / -12000~12000）—— **已删除**（2026-09-28）。
+// 它们只被侧栏检查器拿去**拒绝**超范围的输入，而那是设计上不存在的限制：
+// 任何有限数都是合法数据，"超出范围"只发生在颜色这一层（色带的 `under` / `over` 纯色 + 数值文字）。
+// 边界归色带（用户可调），不归数据模型 —— 留着它就会有人再按它去校验一次。
 
 function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string, TerrainCell> {
   const out: Record<string, TerrainCell> = {}
@@ -816,6 +831,12 @@ export function parseMapDocument(input: unknown): ParseResult {
     markers: parseArrayField(input.markers, 'markers', issues, parseMarker),
     labels: parseArrayField(input.labels, 'labels', issues, parseLabel),
   }
+  // 海拔标定：**只有文件里真的有这一段才带上**（老地图因此逐字节不变）。
+  // 坏形状（不是对象）给一条 warning 并按未标定处理 —— 标定是"读法"的锚，猜一个只会更糟。
+  if (input.elevation !== undefined) {
+    if (isRecord(input.elevation)) document.elevation = normalizeElevationCalibration(input.elevation)
+    else issues.push({ level: 'warning', path: 'elevation', message: 'elevation 不是对象，已忽略（按未标定处理）' })
+  }
   if (settings !== undefined) document.settings = settings
   if (Object.keys(extra).length > 0) document.extra = extra
 
@@ -929,6 +950,8 @@ export function serializeMapDocument(document: MapDocument, indent = 2): string 
   }
   push('version', JSON.stringify(document.version))
   push('grid', JSON.stringify(document.grid))
+  // 海拔标定紧跟 grid：它也是"这张地图级别的事实"，且老地图没有这一段 → 一个字节都不多写
+  if (document.elevation) push('elevation', JSON.stringify(document.elevation))
   push('terrain', serializeTerrain(document.terrain, indent))
   push('paths', serializeArray(document.paths, indent))
   push('regions', serializeArray(document.regions, indent))

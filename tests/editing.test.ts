@@ -215,6 +215,25 @@ test('路径链接操作可撤销、重做并清除', () => {
   assert.equal(document.paths[0]?.link, 'Routes/NewRiver.md')
 })
 
+test('海拔标定 op：替换 / 删除都可撤销可重做，逆操作整段对调', () => {
+  const document = createEmptyMapDocument({})
+  const history = new History()
+  const set: MapOp = { kind: 'setElevation', from: null, to: { unit: 'm', maxDepth: 8000, maxHeight: 3000 } }
+  applyOp(document, set)
+  history.push({ label: '设置海拔标定', ops: [set] })
+  assert.deepEqual(document.elevation, { unit: 'm', maxDepth: 8000, maxHeight: 3000 })
+  history.undo(document)
+  assert.equal(document.elevation, undefined, '撤销一次回到"没有这一段"（老地图的形状）')
+  history.redo(document)
+  assert.deepEqual(document.elevation, { unit: 'm', maxDepth: 8000, maxHeight: 3000 })
+
+  const clear: MapOp = { kind: 'setElevation', from: { unit: 'm', maxDepth: 8000, maxHeight: 3000 }, to: null }
+  applyOp(document, clear)
+  assert.equal(document.elevation, undefined)
+  applyOp(document, invertOp(clear))
+  assert.deepEqual(document.elevation, { unit: 'm', maxDepth: 8000, maxHeight: 3000 }, '逆操作把整段写回来')
+})
+
 // ---------------------------------------------------------------- 笔迹采样
 
 test('快速划动不漏格：线段附近应被刷到的格全部在结果里', () => {

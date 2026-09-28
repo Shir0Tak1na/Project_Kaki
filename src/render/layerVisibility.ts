@@ -26,7 +26,20 @@
  */
 
 import type { MapDocument } from '../data/mapDocument.ts'
+import { drawOverlayLayer } from './overlayDraw.ts'
+import type { FieldId, OverlayFieldSpec, OverlayStyle } from './overlayFields.ts'
 import type { MapRenderPlan } from './renderPlan.ts'
+
+/**
+ * 绘制钩子的**回报**（可选）。让"这一层这一帧画了多少东西"进入覆盖层统计，
+ * 于是"叠加层没画出来"能被断言抓到，而不是靠肉眼看截图（同 `lastGridCells` 的口径）。
+ */
+export interface LayerDrawOutcome {
+  /** 本帧画出的图元个数（数据层是"格数"） */
+  drawn: number
+  /** 其中走了"越界纯色"的个数（只有色带类图层有这个概念） */
+  outOfRange?: number
+}
 
 /**
  * 画布绘制钩子拿到的材料。
@@ -45,6 +58,13 @@ export interface LayerDrawContext {
   document: MapDocument
   /** 全量图层开关（钩子想联动别的层时现读，不要缓存） */
   layers: LayerVisibility
+  /**
+   * 这一层要画的数据字段与它的渲染样式（色带 / 透明度 / 是否画数值）。
+   *
+   * 只有**声明了 `overlay` 的行**才有值；由绘制层每帧从设置里现读，
+   * 所以"在设置里改了色带 → 下一帧就是新颜色"，不需要任何广播。
+   */
+  overlay?: { spec: OverlayFieldSpec; style: OverlayStyle }
 }
 
 interface LayerSpecShape {
@@ -55,7 +75,9 @@ interface LayerSpecShape {
   readonly defaultVisible: boolean
   readonly isDataLayer: boolean
   readonly order: number
-  readonly draw?: (context: LayerDrawContext) => void
+  /** 这一层画的是哪个**数据字段**（数据层才有；见 `overlayFields.ts`） */
+  readonly overlay?: FieldId
+  readonly draw?: (context: LayerDrawContext) => LayerDrawOutcome | void
 }
 
 /**
@@ -71,6 +93,36 @@ export const LAYER_TABLE = [
     defaultVisible: true,
     isDataLayer: true,
     order: 10,
+  },
+  {
+    id: 'temperature',
+    label: '温度',
+    hint: '格上温度的色带染色（叠加在地形之上、网格之下）',
+    describe:
+      '温度覆盖层：把格上的温度值按色带染色，越界的格用纯蓝 / 纯红。' +
+      '默认隐藏；色带、越界色、不透明度在设置页的「数据层」一组里。' +
+      '它只决定"看不看"，地图文件里的温度不受影响。',
+    defaultVisible: false,
+    isDataLayer: true,
+    // 压在地形之上、网格与矢量对象之下（路径与名称不该被色块糊住）
+    order: 12,
+    overlay: 'temperature',
+    draw: drawOverlayLayer,
+  },
+  {
+    id: 'depth',
+    label: '深度',
+    hint: '格上深度 / 海拔的色带染色（与温度同一种数据层，叠在地形之上）',
+    describe:
+      '深度覆盖层：0 = 海平面、正 = 向下、负 = 向上，按色带染色（出厂是高处浅米 → 海平面浅蓝 → 深海深蓝）。' +
+      '默认隐藏；色带、越界色、不透明度与展示单位（米 / 千米 / 相对值）在设置页的「数据层」一组里。' +
+      '它只决定"看不看"，地图文件里的深度值不受影响。',
+    defaultVisible: false,
+    isDataLayer: true,
+    // 紧挨温度之下、仍在网格与矢量对象之下（两条数据层不该互相遮挡，也不能糊住路径与名称）
+    order: 14,
+    overlay: 'depth',
+    draw: drawOverlayLayer,
   },
   {
     id: 'grid',
@@ -134,7 +186,8 @@ export interface LayerSpec {
   defaultVisible: boolean
   isDataLayer: boolean
   order: number
-  draw?: (context: LayerDrawContext) => void
+  overlay?: FieldId
+  draw?: (context: LayerDrawContext) => LayerDrawOutcome | void
 }
 
 export type LayerVisibility = Record<LayerKey, boolean>

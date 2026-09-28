@@ -300,6 +300,41 @@ test('未知顶层字段必须原样保留（前向兼容）', () => {
 
 // ---------------------------------------------------------------- 序列化
 
+test('海拔标定段：与 grid 同级、坏值按未填收敛、老地图（没有这一段）逐字节不变', () => {
+  // 老地图：没有 elevation → 结果里没有这一项，序列化后也不多写一个字
+  const oldRaw = validRaw()
+  const old = parseMapDocument(oldRaw)
+  assert.equal(old.document!.elevation, undefined, '缺这一段就是"未标定"，不补一个 0')
+  const oldText = serializeMapDocument(old.document!)
+  assert.equal(oldText.includes('"elevation"'), false, '老地图不许被凭空加一段')
+  assert.equal('elevation' in (old.document!.extra ?? {}), false, '它是已知顶层键，不该落进 extra')
+
+  // 有标定：原样保留 + 往返等价
+  const raw = { ...validRaw(), elevation: { unit: 'm', maxDepth: 8000, maxHeight: 3000 } }
+  const parsed = parseMapDocument(raw)
+  assert.deepEqual(parsed.document!.elevation, { unit: 'm', maxDepth: 8000, maxHeight: 3000 })
+  const text = serializeMapDocument(parsed.document!)
+  assert.match(text, /"elevation": \{"unit":"m","maxDepth":8000,"maxHeight":3000\}/, '键序固定，Git diff 才稳定')
+  const again = parseMapDocument(JSON.parse(text)).document!
+  assert.deepEqual(again.elevation, parsed.document!.elevation)
+
+  // 坏值：负数 / 非数字 / 不认识的单位 → 收敛成"未填 / 米"，而不是把整份地图拒掉
+  const messy = parseMapDocument({
+    ...validRaw(),
+    elevation: { unit: 'ft', maxDepth: -5, maxHeight: '3000' },
+  })
+  assert.deepEqual(messy.document!.elevation, { unit: 'm', maxDepth: null, maxHeight: null })
+
+  // 形状不对（不是对象）：告警 + 按未标定处理，其余数据照常可用
+  const wrongShape = parseMapDocument({ ...validRaw(), elevation: 42 })
+  assert.equal(wrongShape.ok, true)
+  assert.equal(wrongShape.document!.elevation, undefined)
+  assert.equal(
+    wrongShape.issues.some((issue) => issue.path === 'elevation' && issue.level === 'warning'),
+    true,
+  )
+})
+
 test('地形按键排序后序列化，保证 Git diff 稳定', () => {
   const doc = createEmptyMapDocument({})
   doc.terrain = {
