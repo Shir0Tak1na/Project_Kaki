@@ -25,7 +25,7 @@ import { buildDiagnosticReport } from './dev/diagnostics.ts'
 import { disposeViewportWatch, getWatchStatus, startViewportWatch, stopViewportWatch } from './dev/viewport-watch.ts'
 import { MapEditor } from './editor/MapEditor.ts'
 import { MapLayerManager } from './render/MapLayerManager.ts'
-import { buildMapExportSvg } from './base/mapPreview.ts'
+import { buildMapExportSvg, describeOverlayExport, type OverlayExportNote } from './base/mapPreview.ts'
 import { lucideIconFragment } from './render/lucideFragment.ts'
 import {
   EXPORT_RANGE_OPTIONS,
@@ -819,6 +819,9 @@ export default class ProjectKakiPlugin extends Plugin {
           getPathTypes: () => this.getPathTypes(),
           // 区域同理：表里、画布上、图例里对同一个区域类型必须说同一个名字
           getRegionTypes: () => this.getRegionTypes(),
+          // 数据层与图层开关：缩略图里也要与画布一致（关掉的层不出现、色带改了就跟着变）
+          getOverlayStyles: () => this.pluginSettings.overlays,
+          getLayers: () => this.pluginSettings.layers,
         }),
       options: () => [
         // 几何数据留在 .map.md 里，靠文件选项指过去 —— 不进 YAML
@@ -947,15 +950,27 @@ export default class ProjectKakiPlugin extends Plugin {
     const exportPath = uniqueExportPath(basePath, extension, (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
     // 现读一次设置：导出必须是"当前地图 + 当前自定义地形/标记"的合成结果。
     // 图标形状只能由 Obsidian 的 `getIcon` 拿到，所以**注入**给纯模块（见 `lucideFragment.ts`）。
+    // 数据层颜色面走了哪条路（内联栅格 / 超上限退回矢量）由 `onOverlayExport` 带回来，
+    // 附在导出提示里 —— 否则"报错的是矢量兜底"这件事用户永远看不见（DATA-LAYER-PLAN §0 D1 a3）。
+    let overlayNotes: readonly OverlayExportNote[] = []
     const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains(), resolved.bounds, {
       customMarkers: this.getCustomMarkers(),
       iconSvgFor: lucideIconFragment,
+      // 数据层（温度 / 深度）与图层开关**都现读设置**：与画布同一条口径
+      // （关掉温度层，导出里就不该有它；色带 / 显示方式也要跟画布一致）
+      overlayStyles: this.pluginSettings.overlays,
+      layers: this.pluginSettings.layers,
+      onOverlayExport: (notes) => {
+        overlayNotes = notes
+      },
     })
+    const overlayReport = describeOverlayExport(overlayNotes)
+    const overlaySuffix = overlayReport === '' ? '' : `\n${overlayReport}`
 
     if (format === 'svg') {
       try {
         const created = await this.app.vault.create(exportPath, svg)
-        new Notice(`已导出地图 SVG：${created.path}\n（${resolved.description}）`, NOTICE_MAX_MS)
+        new Notice(`已导出地图 SVG：${created.path}\n（${resolved.description}）${overlaySuffix}`, NOTICE_MAX_MS)
         void this.app.workspace.openLinkText(created.path, '', false)
         return true
       } catch (error) {
@@ -972,7 +987,7 @@ export default class ProjectKakiPlugin extends Plugin {
         return false
       }
       const created = await this.app.vault.createBinary(exportPath, await result.blob.arrayBuffer())
-      new Notice(`已导出地图 PNG：${created.path}\n（${resolved.description}）`, NOTICE_MAX_MS)
+      new Notice(`已导出地图 PNG：${created.path}\n（${resolved.description}）${overlaySuffix}`, NOTICE_MAX_MS)
       void this.app.workspace.openLinkText(created.path, '', false)
       return true
     } catch (error) {

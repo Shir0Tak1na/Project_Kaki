@@ -12,6 +12,22 @@ import { resolveTerrainStyle, type CustomTerrain } from '../render/terrainCatalo
 import { resolveMarkerStyle, type CustomMarker } from '../render/markerCatalog.ts'
 import { MARKER_ICON_SIZE } from '../render/markerPlacement.ts'
 import { DEFAULT_PATH_CAP, DEFAULT_PATH_JOIN } from '../render/shapeStyle.ts'
+import {
+  DEFAULT_LAYER_VISIBILITY,
+  isLayerVisible,
+  type LayerVisibility,
+} from '../render/layerVisibility.ts'
+import {
+  DEFAULT_OVERLAY_STYLES,
+  OVERLAY_FIELDS,
+  OVERLAY_LABEL_BASELINE_RATIO,
+  OVERLAY_LABEL_FONT,
+  OVERLAY_LABEL_SCALE,
+  type OverlayStyles,
+} from '../render/overlayFields.ts'
+import { buildOverlayPlan } from '../render/overlayPlan.ts'
+import type { FieldPrimitive } from '../render/fieldPlan.ts'
+import { encodeRgbaPngBase64, pngBase64Length } from '../render/pngEncode.ts'
 import type { MapRow } from './mapRows.ts'
 
 export interface MapPreviewOptions {
@@ -49,10 +65,49 @@ export interface MapPreviewOptions {
    * 内联图片会让文件巨大。所以图片模式在这里回退成它的字形（与画布"图片挂了回退字形"同一条链）。
    */
   iconSvgFor?: (iconName: string) => string | null
+  /**
+   * 数据层（温度 / 深度）的样式表（色带 / 不透明度 / 显示方式）。缺省 = 出厂样式。
+   *
+   * 与 `customTerrains` 同一口径：导出必须是"当前设置 + 当前地图"的合成结果。
+   */
+  overlayStyles?: OverlayStyles
+  /**
+   * **内联栅格的体积上限**（内联 data URL 的字符数）。缺省 `OVERLAY_RASTER_MAX_CHARS`（128 KiB）。
+   *
+   * 连续场的颜色面在导出里是一张内联 PNG；超过这个上限就**整层退回逐格多边形**（纯矢量）。
+   * 做成可传的参数而不是写死常量，是为了让那条兜底分支**能被测到**（它按当前分辨率上限
+   * 其实够不着，见 `OVERLAY_RASTER_MAX_CHARS` 的注释）；将来若把它做成设置项，接口也是现成的。
+   */
+  overlayRasterMaxChars?: number
+  /**
+   * 图层可见性。缺省 = 出厂值（**数据层默认隐藏**）。
+   *
+   * 于是"关掉温度层"在导出里同样生效（工单 D 的验收之一）——
+   * 与画布共用同一份开关，不存在"画布上关掉了、导出里还有"。
+   */
+  layers?: LayerVisibility
+  /**
+   * 叠加层是否画出**每格的数值文字**。缺省 `false` —— 导出要能看清地形，密铺的数字会把图糊住。
+   *
+   * 刻意**不给界面开关**（工单 D 的范围）：这一项存在是为了让"导出不写数值"这条口径
+   * **只有一个执法点**（这里），而不是让渲染器偷偷丢掉 text 图元 ——
+   * 后者会让那条断言变成空转（改了 `labels` 也不红），鉴别力实测时真的抓到过。
+   */
+  overlayLabels?: boolean
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
+}
+
+/**
+ * 文本进 SVG 前的转义（`&` 必须最先换，否则会把后面生成的实体再转一次）。
+ *
+ * 收在一处：数据层的数值文字与地图的名称文字走同一个函数 ——
+ * 两处各写一遍，迟早出现"名称转义了、数值没转义"这种只在特殊字符上才发作的缺陷。
+ */
+function escapeSvgText(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
 /** 世界 → SVG 的等比投影（缩略图与导出共用同一份，绝不各算一次） */
@@ -166,7 +221,69 @@ function regionPointsToSvg(region: MapRegion, bounds: { minX: number; minY: numb
   return region.pts.map(([x, y]) => pointToSvgPoint(x, y, bounds, width, height, padding)).join(' ')
 }
 
+/**
+ * 连续场颜色面的**内联体积上限**：内联 data URL 超过它，这一层就退回逐格多边形（纯矢量）。
+ *
+ * 为什么是 128 KiB：`MAX_FIELD_DIMENSION = 256` 允许的最大栅格（256×256）编成
+ * （未压缩的）PNG 约 341 KiB base64 —— 那是"地图一大、导出的 SVG 变成十几 MB"的入口，
+ * 所以给一条硬上限，超了就用矢量兜底（`DATA-LAYER-PLAN-v5.md` §0 D1 a3）。
+ *
+ * ⚠️ **实测：这条兜底按当前参数够不着**（如实记，别当成没写）。`DEFAULT_MAX_FIELD_CELLS = 16384`
+ * 把采样点数压到 ≈128×128（≈86 KiB base64），而 128 KiB 对应 ≈24000 点 —— 也就是说
+ * 分辨率上限已经比体积上限更早生效，兜底分支只在"有人调大采样上限"时才会走到。
+ * 保留它的理由：① 体积上限是**导出策略**，不该依赖另一个模块的常数恰好够小；
+ * ② 它的接口（`overlayRasterMaxChars`）正好是将来"采样上限做成设置"时要用的口子。
+ */
+export const OVERLAY_RASTER_MAX_CHARS = 128 * 1024
+
+/** 数据层颜色面在这一次导出里走了哪条路（"导出报告"要用，也是断言的对象） */
+export type OverlayExportPath = 'raster' | 'vector' | 'cell'
+
+export interface OverlayExportNote {
+  /** 字段的**显示名**（`温度` / `深度 / 海拔`）—— 这一条要进给用户看的导出提示，所以用名字而不是 id */
+  label: string
+  /**
+   * - `raster`：连续场，颜色面内联成 PNG（正常路径）；
+   * - `vector`：连续场，但内联会超上限 → **整层退回逐格多边形**；
+   * - `cell`：这一层本来就是逐格上色（没有颜色面，"哪条路"无从谈起）。
+   */
+  path: OverlayExportPath
+  /** 内联 data URL 的字符数（只有 `raster` 非 0） */
+  inlineChars: number
+}
+
+export interface MapPreviewBuild {
+  svg: string
+  /** 每个可见数据层走了哪条路（按 `OVERLAY_FIELDS` 的顺序） */
+  overlays: OverlayExportNote[]
+}
+
+/**
+ * 导出报告里的那一句人话（"用了哪条路"）。
+ *
+ * 只提**做过选择的**层（连续场），逐格上色的层没有选择可说 —— 报告越长越没人看。
+ * 没有任何连续场时返回空串，调用方据此决定要不要附加这一段。
+ */
+export function describeOverlayExport(notes: readonly OverlayExportNote[]): string {
+  const parts: string[] = []
+  for (const note of notes) {
+    if (note.path === 'raster') parts.push(`${note.label}：内联栅格（${Math.ceil(note.inlineChars / 1024)} KiB）`)
+    else if (note.path === 'vector') {
+      parts.push(`${note.label}：退回矢量（内联会超过 ${Math.round(OVERLAY_RASTER_MAX_CHARS / 1024)} KiB 上限）`)
+    }
+  }
+  return parts.length === 0 ? '' : `数据层导出：${parts.join('；')}`
+}
+
 export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly MapRow[], options: MapPreviewOptions): string {
+  return buildMapPreviewSvgWithReport(document, rows, options).svg
+}
+
+export function buildMapPreviewSvgWithReport(
+  document: MapDocument | null,
+  rows: readonly MapRow[],
+  options: MapPreviewOptions,
+): MapPreviewBuild {
   const widthValue = typeof options.width === 'number' && Number.isFinite(options.width) ? options.width : 200
   const heightValue = typeof options.height === 'number' && Number.isFinite(options.height) ? options.height : 120
   const paddingValue = typeof options.padding === 'number' && Number.isFinite(options.padding) ? options.padding : 12
@@ -181,6 +298,8 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
   // 世界 → SVG 的投影**算一次**：区域的边框宽度与虚线要按它换算（点坐标仍走 pointToSvgPoint）
   const projection = svgProjection(bounds, width, height, padding)
   const content: string[] = []
+  /** 每个可见数据层走了哪条路（导出报告用；也是"退回矢量"这条分支能被测到的唯一出口） */
+  const overlays: OverlayExportNote[] = []
   content.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Map preview">`)
 
   if (document) {
@@ -193,6 +312,124 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
         .map((point) => pointToSvgPoint(point.x, point.y, bounds, width, height, padding))
         .join(' ')
       content.push(`<polygon points="${points}" fill="${terrainFill(cell.t, customTerrains)}" stroke="rgba(17,24,39,0.28)" stroke-width="0.6" />`)
+    }
+
+    // ---- 数据层（温度 / 深度）：紧跟地形、在矢量对象之下（与画布的叠加次序同一条）----
+    //
+    // ⚠️ 几何**只能**来自 `buildOverlayPlan` → `fieldPlan`（画布那边也一样）。
+    // 在这里重写一份逐格循环或插值，就会立刻出现"导出的图与画布不一样"，而且是长期缺陷。
+    // 导出侧刻意**不写数值**（工单 D：导出要能看清地形），所以 `labels: false`。
+    const overlayStyles = options.overlayStyles ?? DEFAULT_OVERLAY_STYLES
+    const layers = options.layers ?? DEFAULT_LAYER_VISIBILITY
+    const rasterBudget =
+      typeof options.overlayRasterMaxChars === 'number' && Number.isFinite(options.overlayRasterMaxChars) && options.overlayRasterMaxChars > 0
+        ? options.overlayRasterMaxChars
+        : OVERLAY_RASTER_MAX_CHARS
+    const overlayLabels = options.overlayLabels === true
+    for (const spec of OVERLAY_FIELDS) {
+      if (!isLayerVisible(layers, spec.layerId)) continue
+      const style = overlayStyles[spec.id]
+      const built = buildOverlayPlan({ document, spec, style, labels: overlayLabels })
+      if (built.plan.primitives.length === 0) continue
+
+      // ---- D1 a3：颜色面的**体积上限**（超了整层退回逐格多边形，纯矢量）----
+      //
+      // 判断在**编码之前**做（`pngBase64Length` 是 `pngEncode` 里与编码器同一条算式的纯函数），
+      // 否则会白编一张几十万字节的图再丢掉。退回时**没有第二份几何实现** ——
+      // 换一种显示方式重新问一次 `buildOverlayPlan`（同一份样本、同一个字段规格、同一套配色）。
+      const raster = built.plan.primitives.find(
+        (primitive): primitive is Extract<FieldPrimitive, { kind: 'raster' }> => primitive.kind === 'raster',
+      )
+      let primitives = built.plan.primitives
+      let path: OverlayExportPath = raster === undefined ? 'cell' : 'raster'
+      let inlineChars = 0
+      if (raster !== undefined) {
+        inlineChars = pngBase64Length(raster.cols, raster.rows)
+        if (inlineChars > rasterBudget) {
+          primitives = buildOverlayPlan({ document, spec, style: { ...style, mode: 'cell' }, labels: overlayLabels }).plan.primitives
+          path = 'vector'
+          inlineChars = 0
+        }
+      }
+      overlays.push({ label: spec.label, path, inlineChars })
+      if (primitives.length === 0) continue
+
+      content.push(`<g data-fc-overlay="${spec.id}" fill="none">`)
+      for (const primitive of primitives) {
+        if (primitive.kind === 'polygon') {
+          const points = primitive.points
+            .map(([x, y]) => pointToSvgPoint(x, y, bounds, width, height, padding))
+            .join(' ')
+          content.push(
+            `<polygon data-fc-primitive="polygon" points="${points}" fill="${primitive.color}" fill-opacity="${primitive.opacity}" />`,
+          )
+          continue
+        }
+        if (primitive.kind === 'polyline') {
+          const points = primitive.points
+            .map(([x, y]) => pointToSvgPoint(x, y, bounds, width, height, padding))
+            .join(' ')
+          // 线宽与虚线都是**世界单位**：乘上同一个比例（与区域边框那条换算同源）
+          const dash =
+            primitive.dash !== undefined && primitive.dash.length > 0
+              ? ` stroke-dasharray="${primitive.dash.map((value) => (value * projection.scale).toFixed(2)).join(' ')}"`
+              : ''
+          content.push(
+            `<polyline data-fc-primitive="polyline" points="${points}" stroke="${primitive.color}"` +
+              ` stroke-width="${Math.max(0.5, primitive.width * projection.scale).toFixed(2)}"` +
+              ` stroke-opacity="${primitive.opacity ?? 1}"${dash} stroke-linecap="round" stroke-linejoin="round" />`,
+          )
+          continue
+        }
+        // **连续场的颜色面**：SVG 里唯一能"原样铺一张连续渐变"的手段就是内联位图。
+        // 编成 PNG 的 base64（`pngEncode.ts`，纯函数）再交给 `<image>` ——
+        // 像素与画布侧是**同一份**（都由 `overlayPlan` 产出），所以两边长得一样。
+        if (primitive.kind === 'raster') {
+          const topLeft = pointToSvgPoint(primitive.x, primitive.y, bounds, width, height, padding)
+          const bottomRight = pointToSvgPoint(
+            primitive.x + primitive.width,
+            primitive.y + primitive.height,
+            bounds,
+            width,
+            height,
+            padding,
+          )
+          const [x0, y0] = topLeft.split(',')
+          const [x1, y1] = bottomRight.split(',')
+          const data = encodeRgbaPngBase64(primitive.pixels, primitive.cols, primitive.rows)
+          content.push(
+            `<image data-fc-primitive="raster" x="${x0}" y="${y0}" width="${(Number(x1) - Number(x0)).toFixed(2)}"` +
+              ` height="${(Number(y1) - Number(y0)).toFixed(2)}" preserveAspectRatio="none" opacity="${primitive.opacity}"` +
+              ` href="data:image/png;base64,${data}" />`,
+          )
+          continue
+        }
+        // 数值文字（逐格模式默认不产出，连续场的**等值线标注**会产出）：
+        // 必须真的画出来而不是静默跳过 —— "关掉逐格数值"只能由那一个 `labels` 开关决定
+        // （鉴别力实测时正是靠着这一点才发现原来那条断言是空转的，见 §5.53）。
+        const point = pointToSvgPoint(primitive.x, primitive.y, bounds, width, height, padding)
+        const [textX, textY] = point.split(',')
+        // 字号与居中口径与画布**同一条式子**（`OVERLAY_LABEL_*`），
+        // 用等宽字体、`dy=0.35em` 把数字真正放到格心 / 线中（用户实机提的"不在正中间"）。
+        const fontSize = Math.max(4, document.grid.size * projection.scale * OVERLAY_LABEL_SCALE).toFixed(2)
+        const labelStyle =
+          ` font-family="${OVERLAY_LABEL_FONT}" font-size="${fontSize}" text-anchor="middle"` +
+          ` dy="${OVERLAY_LABEL_BASELINE_RATIO}em"`
+        // 等值线的数字**沿着线走**（工程图画法）：绕落点旋转。角度由 `fieldPlan.cutPolyline`
+        // 按切线算好（已收进 ±90°，数字不会倒着看），两个后端只是各自照着画 —— 几何只有一份。
+        const rotation =
+          typeof primitive.rotation === 'number' && primitive.rotation !== 0
+            ? ` transform="rotate(${((primitive.rotation * 180) / Math.PI).toFixed(3)} ${textX} ${textY})"`
+            : ''
+        const halo =
+          primitive.halo === true
+            ? ` stroke="#ffffff" stroke-width="${(Number(fontSize) * 0.3).toFixed(2)}" stroke-opacity="0.9" paint-order="stroke"`
+            : ''
+        content.push(
+          `<text data-fc-primitive="text" x="${textX}" y="${textY}"${rotation}${labelStyle}${halo} fill="${primitive.color}">${escapeSvgText(primitive.text)}</text>`,
+        )
+      }
+      content.push('</g>')
     }
 
     for (const region of document.regions) {
@@ -232,7 +469,7 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
     for (const label of document.labels) {
       const point = pointToSvgPoint(label.p[0], label.p[1], bounds, width, height, padding)
       const [x, y] = point.split(',')
-      const escaped = label.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+      const escaped = escapeSvgText(label.text)
       // fill 必须显式给出：SVG 的 fill 默认是黑色，在深色主题的 Base 里等于看不见。
       // 用 currentColor，让内联预览跟随主题（导出成独立文件时 currentColor 退化为黑色，也可读）。
       content.push(
@@ -276,7 +513,7 @@ export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly 
   }
 
   content.push('</svg>')
-  return content.join('')
+  return { svg: content.join(''), overlays }
 }
 
 /**
@@ -304,9 +541,20 @@ export function buildMapExportSvg(
   extras: {
     customMarkers?: readonly CustomMarker[]
     iconSvgFor?: (iconName: string) => string | null
+    /** 数据层样式（色带 / 不透明度 / 显示方式）；缺省 = 出厂 */
+    overlayStyles?: OverlayStyles
+    /** 图层可见性；缺省 = 出厂（数据层默认隐藏 → 导出里不出现叠加层） */
+    layers?: LayerVisibility
+    /**
+     * 拿到"每个数据层走了哪条路"（内联栅格 / 退回矢量）。
+     *
+     * 做成**回调**而不是改返回值：本函数的位置参数与返回类型是既有调用点与断言依赖的，
+     * 而"导出报告"只有 `main.ts` 一处要用 —— 为一个消费者改签名，代价与风险都不对等。
+     */
+    onOverlayExport?: (notes: readonly OverlayExportNote[]) => void
   } = {},
 ): string {
-  return buildMapPreviewSvg(document, [], {
+  const built = buildMapPreviewSvgWithReport(document, [], {
     width,
     height,
     padding: 32,
@@ -314,5 +562,9 @@ export function buildMapExportSvg(
     ...(bounds ? { bounds } : {}),
     ...(extras.customMarkers ? { customMarkers: extras.customMarkers } : {}),
     ...(extras.iconSvgFor ? { iconSvgFor: extras.iconSvgFor } : {}),
+    ...(extras.overlayStyles ? { overlayStyles: extras.overlayStyles } : {}),
+    ...(extras.layers ? { layers: extras.layers } : {}),
   })
+  extras.onOverlayExport?.(built.overlays)
+  return built.svg
 }

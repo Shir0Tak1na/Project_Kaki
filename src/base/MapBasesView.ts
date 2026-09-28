@@ -30,6 +30,8 @@ import type { CustomMarker } from '../render/markerCatalog.ts'
 import { lucideIconFragment } from '../render/lucideFragment.ts'
 import { pathTypeLabelOf, type PathTypeEntry } from '../render/pathTypeCatalog.ts'
 import { regionTypeLabelOf, type RegionTypeEntry } from '../render/regionTypeCatalog.ts'
+import type { OverlayStyles } from '../render/overlayFields.ts'
+import type { LayerVisibility } from '../render/layerVisibility.ts'
 import { parseNoteMapProps } from './noteCoordinates.ts'
 import {
   BASES_VIEW_TYPE,
@@ -59,6 +61,14 @@ export interface BasesViewDeps {
    * 而自定义标记的字形名只有目录知道（与画布走同一份 `resolveMarkerStyle`）。
    */
   getCustomMarkers?: () => readonly CustomMarker[]
+  /**
+   * 数据层（温度 / 深度）的样式（色带 / 不透明度 / 显示方式）与图层开关。
+   *
+   * 缩略图与画布、导出必须是"当前设置 + 当前地图"的同一份合成结果：
+   * 关掉温度层后缩略图里也不该有它，改了色带也不该还是旧色（传函数 = 每次现读）。
+   */
+  getOverlayStyles?: () => OverlayStyles
+  getLayers?: () => LayerVisibility
   /**
    * 路径类型目录（来自插件设置）。
    *
@@ -253,6 +263,9 @@ export class MapBasesView extends BasesView {
         // 缩略图与导出**共用同一份实现**：标记按字形画、区域带自己的不透明度与边框
         customMarkers: this.deps.getCustomMarkers?.() ?? [],
         iconSvgFor: lucideIconFragment,
+        // 数据层同理：样式与开关都现读（关掉的层不会出现在缩略图里）
+        ...(this.deps.getOverlayStyles ? { overlayStyles: this.deps.getOverlayStyles() } : {}),
+        ...(this.deps.getLayers ? { layers: this.deps.getLayers() } : {}),
       })
     }
     redraw()

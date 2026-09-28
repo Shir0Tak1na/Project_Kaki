@@ -39,12 +39,14 @@ import {
 import { LAYER_TABLE, isLayerVisible } from '../render/layerVisibility.ts'
 import {
   OVERLAY_FIELDS,
+  OVERLAY_MODES,
   OVERLAY_OPACITY_MAX,
   OVERLAY_OPACITY_MIN,
   OVERLAY_OPACITY_STEP,
   overlayUnitOf,
   overlayUnitTitle,
   type OverlayFieldSpec,
+  type OverlayMode,
 } from '../render/overlayFields.ts'
 import type { DepthDisplayUnit } from '../render/elevationUnits.ts'
 import type { RampSpec } from '../render/colorRamp.ts'
@@ -446,6 +448,45 @@ export class CartographerSettingTab extends PluginSettingTab {
             void this.plugin.setOverlayStyle(spec.id, { opacity: value })
           }),
       )
+
+    // 显示方式：逐格（局限在六边形里）/ 连续场（插值 + 等值线）。
+    // 连续场的参数**只在选了连续场时才出现** —— 用户抱怨过设置页太挤（§5.31/A3）。
+    new Setting(containerEl)
+      .setName(`${spec.label}的显示方式`)
+      .setDesc(
+        '逐格上色：每格一块颜色，局限在六边形里。连续场：把格心值插成连续面并画出等值线' +
+          '（温度的等温线 / 深度的等高线），不局限于六边形格。两种方式共用同一份几何，导出里也是同一份。',
+      )
+      .addDropdown((dropdown) => {
+        for (const option of OVERLAY_MODES) dropdown.addOption(option.value, option.label)
+        dropdown.setValue(style.mode)
+        dropdown.onChange((value) => {
+          void this.plugin
+            .setOverlayStyle(spec.id, { mode: value as OverlayMode })
+            .then(() => this.rerenderKeepingScroll())
+        })
+      })
+
+    if (style.mode === 'field') {
+      new Setting(containerEl)
+        .setName(`${spec.label}的等值线间距`)
+        .setDesc(
+          '留空 = 直接用色带锚点（"5 个体感分类"就是现成的 5 条线）。填一个正数则按"间隔的整数倍"取线' +
+            `（例如填 10 表示 0、±10、±20…，单位与色带锚点相同：${spec.unit}）。`,
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('留空 = 用色带锚点')
+            .setValue(style.contourInterval === null ? '' : String(style.contourInterval))
+            .onChange((value) => {
+              const trimmed = value.trim()
+              // 空 = 回到"用色带锚点"；非正的数**不写**（与设置页其它数字输入同一口径：拒绝而不是悄悄夹取）
+              const next = trimmed.length === 0 ? null : Number(trimmed)
+              if (next !== null && (!Number.isFinite(next) || next <= 0)) return
+              void this.plugin.setOverlayStyle(spec.id, { contourInterval: next })
+            }),
+        )
+    }
 
     const setStop = (index: number, patch: { value?: number; color?: string }): void => {
       const ramp = liveRamp()

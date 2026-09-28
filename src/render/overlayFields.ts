@@ -49,7 +49,60 @@ export interface OverlayStyle {
    * 温度这类不需要换算的字段永远没有这一项。
    */
   unit?: DepthDisplayUnit
+  /**
+   * **显示方式**：`cell` = 逐格上色（局限在六边形格内）；`field` = 连续场（格心值插值成连续面 + 等值线）。
+   *
+   * 出厂是 `cell`：老设置里没有这一项时按 `cell` 收敛，于是升级后**画面一字不变**。
+   * 连续场的几何由 `fieldPlan.ts` 的图元 IR 产出（画布与导出共用同一份）。
+   */
+  mode: OverlayMode
+  /**
+   * 连续场：**等值线间距**（与字段同单位）；`null` = 不按间距取，直接用色带锚点
+   * （"5 个体感温度分类"那 5 条线就是现成的，见 `fieldPlan.contourLevels`）。
+   *
+   * 逐格模式下这一项无意义（界面上也不显示），但仍然存着 —— 切回来时用户上次填的值还在。
+   */
+  contourInterval: number | null
 }
+
+/** 数据层的两种显示方式（下拉选项的顺序就是这里的顺序） */
+export type OverlayMode = 'cell' | 'field'
+
+export const OVERLAY_MODES: readonly { value: OverlayMode; label: string }[] = [
+  { value: 'cell', label: '逐格上色' },
+  { value: 'field', label: '连续场（等值线）' },
+]
+
+export const DEFAULT_OVERLAY_MODE: OverlayMode = 'cell'
+
+/**
+ * 数值文字的**字体栈**（画布与导出共用一条）。
+ *
+ * 用户实机提的两条之一："用编程字体的数字" —— 数字等宽才好在密铺的格上对齐；
+ * 顺带一个好处：等宽字体的数字宽度一致，导出与画布的换行/裁切行为不会差一像素。
+ */
+export const OVERLAY_LABEL_FONT =
+  'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Courier New", monospace'
+
+/**
+ * 数值文字的**字号比例**（相对"格半径"或"等值线标注半径"）。
+ *
+ * 0.5 是用户实机反馈的第二条（"希望能小一点"）：原来按 0.7 画，六边形里挤得慌；
+ * 换成 0.5 之后两位数的读数在格心仍清楚，长数字（例如 `-1200`）也不至于顶出格子。
+ * 两个后端各在自己的坐标空间里乘这个比例（画布是位图像素、SVG 是 SVG 单位），
+ * 于是"画布上的相对大小"与"导出里的相对大小"是同一条式子。
+ */
+export const OVERLAY_LABEL_SCALE = 0.5
+
+/**
+ * 垂直居中的**基线偏移比例**。
+ *
+ * 为什么不用 `textBaseline = 'middle'` / `dominant-baseline="middle"`：
+ * 那两个都是"按 em 盒居中"，而数字只占 em 盒的上半截，视觉上会偏上（用户实机说"不在正中间"）。
+ * 数字的下沿落在基线上、高度约 0.7em，所以**把基线放在中心下 0.35em** 才是看着正中。
+ * 画布用 `textBaseline='alphabetic'` + `y + size * 0.35`，SVG 用 `dy="0.35em"` —— 同一条口径。
+ */
+export const OVERLAY_LABEL_BASELINE_RATIO = 0.35
 
 /** 带单位字段的"值怎么读"：可选单位 + 出厂值 + 两种后缀写法（都收在这一处，避免散落） */
 export interface OverlayFieldUnits {
@@ -121,7 +174,7 @@ const TEMPERATURE_FIELD: OverlayFieldSpec = {
   label: '温度',
   unit: '℃',
   read: (cell) => readFinite(cell?.temp),
-  defaultStyle: () => ({ opacity: 0.5, showValues: false, ramp: defaultTemperatureRamp() }),
+  defaultStyle: () => ({ opacity: 0.5, showValues: false, ramp: defaultTemperatureRamp(), mode: 'cell', contourInterval: null }),
 }
 
 /**
@@ -141,7 +194,7 @@ const DEPTH_FIELD: OverlayFieldSpec = {
   read: (cell) => readFinite(cell?.depth),
   // 归一化保证 `style.unit` 一定是三个合法值之一，所以这里的兜底只是类型上的需要
   format: (value, style, calibration) => formatDepthReading(value, style.unit ?? 'm', calibration),
-  defaultStyle: () => ({ opacity: 0.5, showValues: false, ramp: defaultDepthRamp(), unit: 'm' }),
+  defaultStyle: () => ({ opacity: 0.5, showValues: false, ramp: defaultDepthRamp(), unit: 'm', mode: 'cell', contourInterval: null }),
 }
 
 /**
@@ -236,6 +289,14 @@ export function normalizeOverlayStyles(raw: unknown): OverlayStyles {
       showValues: typeof record.showValues === 'boolean' ? record.showValues : fallback.showValues,
       // 色带交给 colorRamp 自己的规范化：它知道"少于两条锚点就整体回退"这类规则
       ramp: normalizeRampSpec(record.ramp, fallback.ramp),
+      // 显示方式：**只认登记表里那两个值**，其余（含老设置里的缺失）一律回退到出厂（逐格）
+      mode: record.mode === 'field' || record.mode === 'cell' ? record.mode : fallback.mode,
+      // 等值线间距：正的有限数才算；0 / 负数 / 非数字一律当"用色带锚点"（null），
+      // 而不是悄悄取一个间隔 —— "0 间距"会让 levels 直接算成一个无限循环的意图
+      contourInterval:
+        typeof record.contourInterval === 'number' && Number.isFinite(record.contourInterval) && record.contourInterval > 0
+          ? record.contourInterval
+          : fallback.contourInterval,
     }
     // 展示单位只对有 `units` 的字段生效；别的字段**不写这一项**（写了就是无意义的第二份状态）
     if (spec.units) {

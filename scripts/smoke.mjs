@@ -291,6 +291,7 @@ function makeRecordingContext() {
     setLineDash: 0,
     fillText: 0,
     strokeText: 0,
+    putImageData: 0,
   }
   /**
    * 每次 `stroke()` 记录一条「路径段」：该段的点、描边颜色与线宽。
@@ -311,6 +312,8 @@ function makeRecordingContext() {
   const fills = []
   /** 每次 `drawImage()` 的实参（source + 目标矩形）：用来断言"画的是这张图/这个图块" */
   const images = []
+  /** 每次 `putImageData()` 的尺寸与"实色 / 全透明"像素计数（连续场的颜色面） */
+  const putImages = []
   /**
    * 每次 `clip()` 时当前路径的点（位图坐标）。
    *
@@ -330,6 +333,7 @@ function makeRecordingContext() {
     texts,
     fills,
     images,
+    putImages,
     clips,
     fillStyle: '',
     strokeStyle: '',
@@ -355,6 +359,7 @@ function makeRecordingContext() {
       texts.length = 0
       fills.length = 0
       images.length = 0
+      putImages.length = 0
       clips.length = 0
       current = null
       tx = 0
@@ -472,6 +477,25 @@ function makeRecordingContext() {
       // 记录来源与目标矩形：这样"画的是哪张图 / 哪个图块"可以被断言，
       // 而不是只能断言"drawImage 被调了 N 次"（后者放过过真 bug）
       images.push({ source, args: args.map((value) => (typeof value === 'number' ? value : value)) })
+    },
+    /**
+     * 连续场的颜色面：先把 RGBA 像素放进 `ImageData`，`putImageData` 落在离屏画布上，
+     * 再由 `drawImage` 缩放铺到主画布。桩必须支持这三步，否则"连续场是不是真的一张栅格"
+     * 就只能靠肉眼 —— 而那正是用户实机报"呈方格状"时我们缺的东西。
+     */
+    createImageData(width, height) {
+      return { width, height, data: new Uint8ClampedArray(Math.max(0, width * height * 4)) }
+    },
+    putImageData(image, x, y) {
+      calls.putImageData += 1
+      // 记下**像素的内容**（哈希一下即可）：断言"有值的点是实色、没值的是全透明"要靠它
+      let opaque = 0
+      let transparent = 0
+      for (let index = 3; index < image.data.length; index += 4) {
+        if (image.data[index] === 0) transparent += 1
+        else opaque += 1
+      }
+      putImages.push({ width: image.width, height: image.height, x, y, opaque, transparent })
     },
   }
 
@@ -10301,6 +10325,339 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
     plugin.getSettings().overlays.depth.ramp.over.color === '#0b1f4b',
     plugin.getSettings().overlays.depth.ramp.over.color,
   )
+
+  plugin.onunload()
+}
+
+// ================================================== 场景 44：连续场（等温线 / 等高线）
+console.log('\n场景 44：数据层的连续场 —— 插值 + 等值线 + 采样缓存')
+{
+  // 用户可见目标：数据层不只"每格涂一块"，还能把格心值插成连续面并画等值线（不局限于六边形格）。
+  // 这一场同时盯**缓存**：IDW 每帧重算是不可接受的，第二帧必须命中。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const document_ = layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  /** 连续场的颜色面会新建一张离屏画布：`putImageData` 落在**它**身上（不是主画布那个上下文） */
+  const rasterBaseline = createdCanvasContexts.length
+  const rasterContexts = () => createdCanvasContexts.slice(rasterBaseline).filter((candidate) => candidate.calls.putImageData > 0)
+
+  // 一条有梯度的温度带（连续场要有东西可插值）：-20 → 40
+  for (let q = 0; q < 6; q += 1) document_.terrain[`${q}_0`] = { t: 'plains', temp: -20 + q * 12 }
+
+  // ---- 逐格模式（出厂）：与改动前一致 —— 六边形色块、没有等值线 ----
+  await plugin.setLayerVisible('temperature', true)
+  await tick(20)
+  const cellFrame = frame()
+  check(
+    '逐格模式的统计：mode=cell、六块色块、没有等值线',
+    stats().lastOverlayMode === 'cell' && stats().lastOverlayDrawn === 6 && stats().lastOverlayContours === 0,
+    `${stats().lastOverlayMode}/${stats().lastOverlayDrawn}/${stats().lastOverlayContours}`,
+  )
+  check(
+    '逐格模式的色块是六边形（6 个顶点）',
+    cellFrame.fills.filter((fill) => fill.points.length === 6).length >= 6,
+    String(cellFrame.fills.filter((fill) => fill.points.length === 6).length),
+  )
+
+  // ---- 切到连续场：连续填色片 + 等值线 ----
+  const rampColors = plugin.getSettings().overlays.temperature.ramp.stops.map((stop) => stop.color)
+  await plugin.setOverlayStyle('temperature', { mode: 'field', contourInterval: 20 })
+  await tick(20)
+  const fieldFrame = frame()
+  check('切到连续场后模式统计变 field', stats().lastOverlayMode === 'field', String(stats().lastOverlayMode))
+  check(
+    '连续场的颜色面是**一张栅格**（色块数 = 1，而不是每格一个方块）',
+    stats().lastOverlayDrawn === 1,
+    String(stats().lastOverlayDrawn),
+  )
+  check(
+    '栅格先落在离屏画布上（putImageData），再由主画布 drawImage 铺开 —— 缩放平滑才有连续渐变',
+    rasterContexts().length === 1 && rasterContexts()[0].putImages[0].opaque > 0 && fieldFrame.images.length > 0,
+    `离屏栅格=${rasterContexts().length} 实色像素=${rasterContexts()[0]?.putImages[0]?.opaque} 主画布 drawImage=${fieldFrame.images.length}`,
+  )
+  check(
+    '那一帧里没有"每格一个方块"的残余（用户报的"方格状"就是它）',
+    fieldFrame.fills.filter((fill) => fill.points.length === 4).length === 0,
+    JSON.stringify(fieldFrame.fills.map((fill) => fill.points.length).slice(0, 8)),
+  )
+  check('连续场画出了等值线', stats().lastOverlayContours > 0, String(stats().lastOverlayContours))
+  check(
+    '等值线上有数值标注（用户实机要求"线上要有数字"）',
+    stats().lastOverlayLabels > 0 && fieldFrame.texts.some((item) => /^-?\d+(\.\d+)?$/.test(item.text)),
+    `${stats().lastOverlayLabels}/${JSON.stringify(fieldFrame.texts.map((item) => item.text).slice(0, 6))}`,
+  )
+  check(
+    '等值线的标注带白边（不然压在彩色场上看不见）',
+    fieldFrame.calls.strokeText > 0,
+    String(fieldFrame.calls.strokeText),
+  )
+  check(
+    '等值线的颜色来自色带（该值在色带里的颜色）',
+    fieldFrame.groups.some((group) => rampColors.includes(group.strokeStyle)),
+    JSON.stringify([...new Set(fieldFrame.groups.map((group) => group.strokeStyle))].slice(0, 8)),
+  )
+  check(
+    '数值用等宽字体（用户实机要求"编程字体的数字"）',
+    fieldFrame.texts.some((item) => String(item.font).includes('monospace')),
+    JSON.stringify(fieldFrame.texts.map((item) => item.font).slice(0, 3)),
+  )
+  check(
+    '等值线的数字**沿着线排列**（工程图样式：绕切线旋转，不是横排）',
+    fieldFrame.texts.filter((item) => Number.isFinite(item.angle) && item.angle !== 0).length > 0,
+    JSON.stringify(fieldFrame.texts.map((item) => item.angle)),
+  )
+
+  // ---- 缓存：同一视口的第二帧必须命中（不重新采样）----
+  const buildsAfterSwitch = stats().lastOverlayFieldBuilds
+  const hitsAfterSwitch = stats().lastOverlayFieldHits
+  check('第一次进连续场时重算过采样网格', buildsAfterSwitch >= 1, String(buildsAfterSwitch))
+  frame()
+  check(
+    '同一视口的第二帧命中缓存（没有重新采样）',
+    stats().lastOverlayFieldBuilds === buildsAfterSwitch && stats().lastOverlayFieldHits > hitsAfterSwitch,
+    `${stats().lastOverlayFieldBuilds}/${stats().lastOverlayFieldHits}`,
+  )
+
+  // ---- 平移：视口变了，但**采样不该重算**（缓存键不含视口 —— DATA-LAYER-PLAN §0 D2②）----
+  const buildsBeforePan = stats().lastOverlayFieldBuilds
+  const hitsBeforePan = stats().lastOverlayFieldHits
+  canvas._applyViewport({ de: 48, df: 32, scaleFactor: 1 })
+  frame()
+  check(
+    '平移一帧后没有重新采样（缓存键不含视口）',
+    stats().lastOverlayFieldBuilds === buildsBeforePan && stats().lastOverlayFieldHits > hitsBeforePan,
+    `builds ${buildsBeforePan}→${stats().lastOverlayFieldBuilds} / hits ${hitsBeforePan}→${stats().lastOverlayFieldHits}`,
+  )
+
+  // ---- 改一格的值：必须重算（否则"改了温度画面不变"）----
+  document_.terrain['0_0'].temp = 33
+  frame()
+  check('改了某一格的值 → 缓存失效并重算', stats().lastOverlayFieldBuilds === buildsAfterSwitch + 1, String(stats().lastOverlayFieldBuilds))
+
+  // ---- 数据全没了：不留残留 ----
+  for (let q = 0; q < 6; q += 1) delete document_.terrain[`${q}_0`].temp
+  frame()
+  check(
+    '数据改成"无值"后连续场不留残留（填色片与等值线都为 0）',
+    stats().lastOverlayDrawn === 0 && stats().lastOverlayContours === 0,
+    `${stats().lastOverlayDrawn}/${stats().lastOverlayContours}`,
+  )
+
+  // ---- 切回逐格：立刻恢复（不需要重载插件）----
+  for (let q = 0; q < 6; q += 1) document_.terrain[`${q}_0`].temp = -20 + q * 12
+  await plugin.setOverlayStyle('temperature', { mode: 'cell' })
+  await tick(20)
+  frame()
+  check(
+    '切回逐格后立刻恢复：mode=cell、色块回来、等值线为 0',
+    stats().lastOverlayMode === 'cell' && stats().lastOverlayDrawn === 6 && stats().lastOverlayContours === 0,
+    `${stats().lastOverlayMode}/${stats().lastOverlayDrawn}/${stats().lastOverlayContours}`,
+  )
+
+  // ---- 关掉这一层：两种模式都必须什么都不画 ----
+  await plugin.setLayerVisible('temperature', false)
+  await tick(20)
+  frame()
+  check('关掉温度层后连续场也一格不画（开关对两种模式都生效）', stats().lastOverlayDrawn === 0, String(stats().lastOverlayDrawn))
+
+  // ---- 设置页：显示方式下拉 + 连续场参数只在连续场时出现 ----
+  await plugin.setLayerVisible('temperature', true)
+  await tick(20)
+  FakeSetting.created.length = 0
+  plugin.settingTabs[0].display()
+  const named = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  check(
+    '设置页有「温度的显示方式」下拉，选项是逐格 / 连续场',
+    (named('温度的显示方式')?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'cell,field',
+    JSON.stringify(named('温度的显示方式')?.dropdowns?.[0]?.options),
+  )
+  check('逐格模式下不显示等值线间距（参数只在需要时出现）', named('温度的等值线间距') === undefined)
+  await named('温度的显示方式').dropdowns[0].select('field')
+  await tick(20)
+  FakeSetting.created.length = 0
+  plugin.settingTabs[0].display()
+  check('切到连续场后设置里出现等值线间距', named('温度的等值线间距') !== undefined)
+  await named('温度的等值线间距').texts[0].type('5')
+  await tick(20)
+  check('等值线间距写进设置', plugin.getSettings().overlays.temperature.contourInterval === 5, String(plugin.getSettings().overlays.temperature.contourInterval))
+
+  plugin.onunload()
+}
+
+// ================================================== 场景 45：导出 / Base 缩略图带上叠加层
+console.log('\n场景 45：导出（SVG / PNG）带上数据层叠加层 —— 与画布同一份几何')
+{
+  // 工单 D 的验收：图层开关生效、形状与画布一致、越界色一致、导出里默认不写数值。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const document_ = layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const svgPath = 'Maps/World.svg'
+  const exportedSvg = async () => {
+    app.vault.files.delete(svgPath)
+    await runCommand(plugin, 'export-map-svg')
+    await tick(60)
+    return app.vault.files.get(svgPath) ?? ''
+  }
+  const countOf = (text, pattern) => (text.match(pattern) ?? []).length
+
+  // 四格数据：三格带内（15）、一格越界（80 > 45 → 走 over 的纯红）。
+  // 三格同值沿 r 方向铺开是**故意的**：连续场的数据范围由样本包围盒决定，
+  // 样本只排一行时等值线只有两格长（连"标数字最小长度"都够不上，见 `fieldPlan` 的 ×4 门槛）。
+  document_.terrain['0_0'] = { t: 'forest', temp: 15 }
+  document_.terrain['0_1'] = { t: 'plains', temp: 15 }
+  document_.terrain['0_2'] = { t: 'plains', temp: 15 }
+  document_.terrain['1_0'] = { t: 'water', temp: 80 }
+
+  // ---- 图层关着：导出里不该有叠加层（开关与画布同一份）----
+  const without = await exportedSvg()
+  check('温度层关着时导出里没有温度段', without.includes('data-fc-overlay="temperature"') === false)
+
+  // ---- 打开温度层（逐格）：段出现，图元数与画布一致 ----
+  await plugin.setLayerVisible('temperature', true)
+  await tick(20)
+  frame()
+  const cellSvg = await exportedSvg()
+  check('打开温度层后导出里出现温度段', cellSvg.includes('data-fc-overlay="temperature"'), cellSvg.slice(0, 120))
+  check(
+    '导出与画布画同样多的色块（几何只有一份）',
+    countOf(cellSvg, /data-fc-primitive="polygon"/g) + countOf(cellSvg, /data-fc-primitive="raster"/g) ===
+      stats().lastOverlayDrawn,
+    `导出 ${countOf(cellSvg, /data-fc-primitive="polygon"/g)} / 画布 ${stats().lastOverlayDrawn}`,
+  )
+  check('越界格在导出里是 over 的纯红（与画布一致）', cellSvg.includes('fill="#ff0000"'), cellSvg.slice(0, 200))
+  check('导出里默认不写数值（导出要能看清地形）', cellSvg.includes('>80<') === false && cellSvg.includes('>15<') === false)
+
+  // ---- 连续场：导出与画布的等值线数一致 ----
+  await plugin.setOverlayStyle('temperature', { mode: 'field', contourInterval: 20 })
+  await tick(20)
+  frame()
+  const fieldSvg = await exportedSvg()
+  check('连续场的等值线也进了导出', countOf(fieldSvg, /data-fc-primitive="polyline"/g) > 0)
+  check(
+    '导出与画布的等值线数一致',
+    countOf(fieldSvg, /data-fc-primitive="polyline"/g) === stats().lastOverlayContours,
+    `导出 ${countOf(fieldSvg, /data-fc-primitive="polyline"/g)} / 画布 ${stats().lastOverlayContours}`,
+  )
+  check(
+    '连续场的颜色面在导出里是内联 PNG（同一份像素，所以不会"画布连续、导出方格"）',
+    countOf(fieldSvg, /data-fc-primitive="raster"/g) === 1 && fieldSvg.includes('data:image/png;base64,'),
+    String(fieldSvg.length),
+  )
+  check(
+    '等值线的数值标注也进了导出（它不是"逐格数值"，不受那一档开关管）',
+    countOf(fieldSvg, /data-fc-primitive="text"/g) === stats().lastOverlayLabels && stats().lastOverlayLabels > 0,
+    `导出 ${countOf(fieldSvg, /data-fc-primitive="text"/g)} / 画布 ${stats().lastOverlayLabels}`,
+  )
+  {
+    // 导出提示必须写明颜色面走了哪条路（内联栅格 / 超上限退回矢量）：
+    // 否则"导出的图是矢量兜底"这件事用户永远看不见（DATA-LAYER-PLAN §0 D1 a3）
+    const exportNotice = noticeLog.filter((line) => line.includes('已导出地图 SVG')).at(-1) ?? ''
+    check(
+      '导出提示里写明颜色面走了哪条路（含体积）',
+      exportNotice.includes('数据层导出：温度：内联栅格（') && exportNotice.includes('KiB'),
+      exportNotice.replace(/\n/g, ' ⏎ '),
+    )
+  }
+  {
+    // ---- 工程图样式：数字沿线排列（rotate），且线在数字处**真的断开** ----
+    // 这一对断言是"假断线"的照妖镜：拿背景色盖住的做法会让折线照样穿过标注点。
+    const polylines = [...fieldSvg.matchAll(/<polyline data-fc-primitive="polyline" points="([^"]+)"/g)].map((match) =>
+      match[1].split(' ').map((pair) => pair.split(',').map(Number)),
+    )
+    const anchors = [...fieldSvg.matchAll(/<text data-fc-primitive="text" x="([-\d.]+)" y="([-\d.]+)"/g)].map((match) => [
+      Number(match[1]),
+      Number(match[2]),
+    ])
+    const onSegment = (points, [x, y]) => {
+      for (let index = 1; index < points.length; index += 1) {
+        const [ax, ay] = points[index - 1]
+        const [bx, by] = points[index]
+        const dx = bx - ax
+        const dy = by - ay
+        const lengthSquared = dx * dx + dy * dy
+        if (lengthSquared === 0) continue
+        const t = ((x - ax) * dx + (y - ay) * dy) / lengthSquared
+        if (t < 0 || t > 1) continue
+        if (Math.hypot(x - (ax + dx * t), y - (ay + dy * t)) < 1e-3) return true
+      }
+      return false
+    }
+    check(
+      '导出的标注带 rotate（数字沿线排列，与画布同一条口径）',
+      /data-fc-primitive="text"[^>]*transform="rotate\(/.test(fieldSvg),
+      String(anchors.length),
+    )
+    check(
+      '导出的等值线在数字处**真的断开**（没有任何折线穿过标注点）',
+      anchors.length > 0 && anchors.every((anchor) => !polylines.some((points) => onSegment(points, anchor))),
+      `折线 ${polylines.length} / 标注 ${anchors.length}`,
+    )
+  }
+
+  // ---- PNG 复用同一份 SVG（不单独写绘制）----
+  const seenSvgs = []
+  plugin.setPngRasterizer({
+    createImage: () => ({ src: '', complete: false, naturalWidth: 8, onload: null, onerror: null }),
+    waitForImage: async (image) => {
+      seenSvgs.push(image.src)
+      return true
+    },
+    createCanvas: (width, height) => ({ width, height, getContext: () => ({ drawImage() {} }) }),
+    toBlob: async () => ({ arrayBuffer: async () => new Uint8Array([137, 80, 78, 71]).buffer.slice(0) }),
+  })
+  await runCommand(plugin, 'export-map-png')
+  await tick(60)
+  const pngSvg = decodeURIComponent(seenSvgs[0] ?? '')
+  check('PNG 走的是同一张 SVG（叠加层也在里面）', pngSvg.includes('data-fc-overlay="temperature"'), String(seenSvgs[0]).slice(0, 60))
+  plugin.setPngRasterizer(null)
+
+  // ---- 关掉图层再导一次：段消失（不是"只在第一次生效"）----
+  await plugin.setLayerVisible('temperature', false)
+  await tick(20)
+  const offAgain = await exportedSvg()
+  check('再关掉温度层，导出里的温度段跟着消失', offAgain.includes('data-fc-overlay="temperature"') === false)
 
   plugin.onunload()
 }

@@ -1,22 +1,31 @@
 /**
- * 数据层的画布绘制（hex 模式）：把「一格一个数值」画成半透明色块。
+ * 数据层的画布绘制：把**图元清单**落到 canvas 上。
+ *
+ * 它现在**不含任何几何**（这是工单 C 的核心要求）：取数、插值、等值线、颜色、
+ * 甚至"哪些格该写数值"都在 `overlayPlan.ts` → `fieldPlan.ts` 那条纯函数链上算好，
+ * 本模块只做三件事 —— 世界坐标 → 位图坐标、剔除视口外的图元、把图元画出来。
+ * 于是导出侧（SVG）能消费同一批图元，"导出的图与画布不一样"这个长期缺陷从结构上消失。
  *
  * 与 `shapeDraw.ts` 同一层：**碰 canvas，但不 import obsidian**（于是它测不了像素，
- * 但它的输入输出全是纯数据 —— 颜色、格数、越界计数都能被假 ctx 断言）。
+ * 但它的输入输出全是纯数据 —— 图元数、越界数、缓存命中都能被假 ctx 断言）。
  *
- * 一条关键事实（决定了这里的遍历方式）：**`plan.cells` 不是数据层的取数来源**。
+ * 一条关键事实（决定了取数方式）：**`plan.cells` 不是数据层的取数来源**。
  * 那份计划只含"有地形"的格（没有 `t` 的格被地形计划跳过了），而"只有温度没有地形"的格
  * 恰恰是数据层最该画的东西（§5.40 的 F2 就是为了让它合法存在）。
- * 所以这里自己遍历 `document.terrain`，并用与地形计划**同一个纯函数**（`cellIntersectsBBox`）
- * 做视口裁剪 —— 裁剪口径与地形一致，不会出现"地形裁了、叠加层没裁"。
+ * 所以样本来自 `overlayPlan.collectOverlaySamples(document, …)`（遍历 `document.terrain`）。
  */
 
-import { axialToWorld, hexCorners, parseCellKey } from '../core/hex.ts'
+import type { BBox } from '../core/viewport.ts'
 import type { MapDocument } from '../data/mapDocument.ts'
-import { colorForValue } from './colorRamp.ts'
-import { DEFAULT_ELEVATION_CALIBRATION } from './elevationUnits.ts'
-import { cellIntersectsBBox } from './hexGrid.ts'
-import { formatFieldReading, type OverlayFieldSpec, type OverlayStyle } from './overlayFields.ts'
+import type { FieldPrimitive } from './fieldPlan.ts'
+import { buildOverlayPlan, type OverlayFieldCache } from './overlayPlan.ts'
+import {
+  OVERLAY_LABEL_BASELINE_RATIO,
+  OVERLAY_LABEL_FONT,
+  OVERLAY_LABEL_SCALE,
+  type OverlayFieldSpec,
+  type OverlayStyle,
+} from './overlayFields.ts'
 import type { MapRenderPlan } from './renderPlan.ts'
 
 /**
@@ -34,15 +43,34 @@ export interface OverlayDrawContext {
   document: MapDocument
   /** 这一层的字段与样式；**不是数据层时为 undefined**，此时钩子什么都不做 */
   overlay?: { spec: OverlayFieldSpec; style: OverlayStyle }
+  /**
+   * 连续场的**采样缓存**（由绘制层持有、每个字段一份）。
+   * 缺省即不缓存 —— 每帧重算 IDW，只适合测试与一次性调用（见 `overlayPlan`）。
+   */
+  fieldCache?: OverlayFieldCache
+  /**
+   * 造一张**离屏画布**（连续场的栅格要先落在自己的一张画布上，再缩放铺到主画布）。
+   *
+   * 注入而不是在这里 `document.createElement`：与地形图集（`TerrainAtlas`）同一条路 ——
+   * 本模块不碰 DOM，造画布的能力由绘制层给。取不到（没有 document）时连续场**退回不画**，
+   * 而不是抛异常把整帧带塌。
+   */
+  createCanvas?: (width: number, height: number) => HTMLCanvasElement | null
 }
 
 export interface OverlayDrawResult {
-  /** 真的画出来的格数（有值 且 与视口相交 且 色带可用） */
+  /** 本帧用的是哪种显示方式 */
+  mode: 'cell' | 'field'
+  /** **色块**个数（逐格 = 格数；连续场 = 1 —— 一整张栅格） */
   drawn: number
-  /** 其中落在色带外、走了 `under` / `over` 纯色的格数 */
+  /** 其中走了 `under` / `over` 纯色的个数 */
   outOfRange: number
-  /** 画出的数值文字个数（`showValues` 关掉时是 0） */
+  /** 画出的数值文字个数（等值线的标注也算） */
   labels: number
+  /** 画出的等值线折线条数（逐格模式恒为 0） */
+  contours: number
+  /** 图元总数 */
+  primitives: number
 }
 
 /**
@@ -51,80 +79,195 @@ export interface OverlayDrawResult {
  */
 export { formatOverlayValue } from './overlayFields.ts'
 
+/** 图元的包围盒是否与视口相交（世界坐标；逐格与连续场共用同一条剔除口径） */
+function primitiveIntersects(primitive: FieldPrimitive, bounds: BBox): boolean {
+  if (primitive.kind === 'text') {
+    return primitive.x >= bounds.minX && primitive.x <= bounds.maxX && primitive.y >= bounds.minY && primitive.y <= bounds.maxY
+  }
+  if (primitive.kind === 'raster') {
+    return (
+      primitive.x + primitive.width >= bounds.minX &&
+      primitive.x <= bounds.maxX &&
+      primitive.y + primitive.height >= bounds.minY &&
+      primitive.y <= bounds.maxY
+    )
+  }
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  for (const [x, y] of primitive.points) {
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (x > maxX) maxX = x
+    if (y > maxY) maxY = y
+  }
+  return maxX >= bounds.minX && minX <= bounds.maxX && maxY >= bounds.minY && minY <= bounds.maxY
+}
+
+/**
+ * 连续场栅格的**离屏画布**备忘（按"像素数组"这个对象本身索引）。
+ *
+ * 为什么可以用模块级 WeakMap：键是像素数组的**身份**，而像素数组由每个覆盖层实例自己的
+ * 计划缓存产出 —— 两张画布的数据不同、数组也就不同，不会互相踩（§5.12 那条"别用模块级状态
+ * 存跨实例的东西"在这里不适用，因为键已经把它们分开了）。WeakMap 也不留引用。
+ *
+ * 为什么不放在计划缓存里：那是纯模块（不能碰画布），而"像素"与"承载它的画布"是两件事，
+ * 缓存只该管前者（否则每次重建像素都要连画布一起重造）。
+ */
+const rasterCanvases = new WeakMap<object, { canvas: HTMLCanvasElement; cols: number; rows: number }>()
+
+/** 取（必要时建）这张栅格的离屏画布，并把像素写进去 */
+function rasterCanvasFor(
+  primitive: Extract<FieldPrimitive, { kind: 'raster' }>,
+  createCanvas: ((width: number, height: number) => HTMLCanvasElement | null) | undefined,
+): HTMLCanvasElement | null {
+  const memo = rasterCanvases.get(primitive.pixels)
+  if (memo !== undefined && memo.cols === primitive.cols && memo.rows === primitive.rows) return memo.canvas
+  if (createCanvas === undefined) return null
+  const canvas = createCanvas(primitive.cols, primitive.rows)
+  if (canvas === null) return null
+  const offscreen = canvas.getContext('2d')
+  if (offscreen === null) return null
+  const image = offscreen.createImageData(primitive.cols, primitive.rows)
+  image.data.set(primitive.pixels)
+  offscreen.putImageData(image, 0, 0)
+  rasterCanvases.set(primitive.pixels, { canvas, cols: primitive.cols, rows: primitive.rows })
+  return canvas
+}
+
 /**
  * 数据层的绘制钩子 —— `LAYER_TABLE` 里每一行数据层都挂它，`overlay` 决定画哪个字段。
  *
- * 返回值是**本帧的统计**（画了几格 / 几格越界 / 几个数值文字）：
- * 有了它，"叠加层没画出来"能被断言抓到，而不是靠肉眼看截图（同 §5.9 的口径）。
+ * 分三步：**算计划**（纯函数，连续场的采样走缓存）→ **剔除视口外** → **画**。
+ * 返回值是**本帧的统计**：有了它，"叠加层没画出来"能被断言抓到，而不是靠肉眼看截图（同 §5.9）。
  */
 export function drawOverlayLayer(context: OverlayDrawContext): OverlayDrawResult {
-  const result: OverlayDrawResult = { drawn: 0, outOfRange: 0, labels: 0 }
+  const empty: OverlayDrawResult = { mode: 'cell', drawn: 0, outOfRange: 0, labels: 0, contours: 0, primitives: 0 }
   const overlay = context.overlay
-  if (!overlay) return result
+  if (!overlay) return empty
 
-  const { ctx, document } = context
+  const { ctx, document, plan } = context
   const { spec, style } = overlay
-  const grid = document.grid
-  const visible = context.plan.visibleWorld
-  // 展示单位的换算要用地图自己的标定（相对值没有标定就算不出来）——
-  // 从这里**现读**，所以"在弹窗里改了标定"下一帧就生效，不需要任何广播。
-  const calibration = document.elevation ?? DEFAULT_ELEVATION_CALIBRATION
-  // 位图上的格半径：世界半径 × 位图/世界的比例（与地形层的 targetRadius 同一条式子）
-  const rasterRadius = grid.size * context.plan.layer.deviceScale
+  const visible = plan.visibleWorld
+  const layer = plan.layer
+
+  // 连续场的采样与上色都在 `buildOverlayPlan` 里（走 `fieldCache`）——本模块只负责把图元画出来
+  const { plan: fieldPlan, stats } = buildOverlayPlan({
+    document,
+    spec,
+    style,
+    bounds: visible,
+    ...(context.fieldCache !== undefined ? { cache: context.fieldCache } : {}),
+  })
 
   // 文字状态只在真的要画数值时改一次，循环结束后还原（canvas 状态是全局的，不许留给下一帧）
-  // `showValues` = "**所有**格都写数值"；越界格**总是**写（关掉也一样）——
-  // 颜色只能表达"比上限还高"，表达不了"高多少"，而越界恰恰是最需要读数的情况。
-  const drawAllValues = style.showValues
   const previousFont = ctx.font
   const previousAlign = ctx.textAlign
   const previousBaseline = ctx.textBaseline
-  ctx.font = `${Math.max(9, rasterRadius * 0.7).toFixed(1)}px ${context.plan.layer.fontFamily}`
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
+  const previousAlpha = ctx.globalAlpha
+  const previousDash = typeof ctx.getLineDash === 'function' ? ctx.getLineDash() : []
+  // 位图上的格半径：世界半径 × 位图/世界的比例（与地形层的 targetRadius 同一条式子）
+  const rasterRadius = document.grid.size * layer.deviceScale
+  const labelSize = Math.max(8, rasterRadius * OVERLAY_LABEL_SCALE)
+  if (stats.labels > 0) {
+    // 数字用**等宽字体**、字号按格半径的比例（用户实机要求："小一点、用编程字体的数字"）
+    ctx.font = `${labelSize.toFixed(1)}px ${OVERLAY_LABEL_FONT}`
+    ctx.textAlign = 'center'
+    // 见 `OVERLAY_LABEL_BASELINE_RATIO`：按"基线下移 0.35em"居中，而不是按 em 盒的 middle
+    ctx.textBaseline = 'alphabetic'
+  }
 
-  for (const [key, cell] of Object.entries(document.terrain)) {
-    const value = spec.read(cell)
-    if (value === undefined) continue
-    const color = colorForValue(value, style.ramp)
-    // 色带没有可用锚点时 colorForValue 返回 null：这一格**不画**
-    // （拿越界纯色冒充会让"设置坏了"看起来像"数据是极值"）
-    if (color === null) continue
-    const axial = parseCellKey(key)
-    if (axial === null) continue
-    if (!cellIntersectsBBox(grid, axial.q, axial.r, visible)) continue
-
-    const corners = hexCorners(grid, axial.q, axial.r).map((point) => context.toRaster(point.x, point.y))
+  let drawn = 0
+  for (const primitive of fieldPlan.primitives) {
+    if (!primitiveIntersects(primitive, visible)) continue
+    if (primitive.kind === 'text') {
+      const center = context.toRaster(primitive.x, primitive.y)
+      const baseline = labelSize * OVERLAY_LABEL_BASELINE_RATIO
+      // 等值线的数字**沿着线走**（工程图画法）：绕落点旋转 `primitive.rotation`。
+      // 角度是在 `fieldPlan.cutPolyline` 里按切线算好的（已收进 ±90°，所以数字不会倒着看）——
+      // 这里只负责照着画，几何在那边只有一份。
+      const rotation = primitive.rotation ?? 0
+      if (rotation !== 0) {
+        ctx.save()
+        ctx.translate(center.x, center.y)
+        ctx.rotate(rotation)
+      }
+      const drawX = rotation !== 0 ? 0 : center.x
+      const drawY = rotation !== 0 ? baseline : center.y + baseline
+      // 等值线的数字压在彩色场与线上：先描一圈白边（halo）再写字，否则浅色区域里彻底看不见
+      if (primitive.halo === true) {
+        ctx.lineWidth = Math.max(2, labelSize * 0.3)
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+        ctx.strokeText(primitive.text, drawX, drawY)
+      }
+      ctx.fillStyle = primitive.color
+      ctx.fillText(primitive.text, drawX, drawY)
+      if (rotation !== 0) ctx.restore()
+      continue
+    }
+    if (primitive.kind === 'raster') {
+      const offscreen = rasterCanvasFor(primitive, context.createCanvas)
+      if (offscreen === null) continue
+      // 世界包围盒 → 位图矩形：一次 `drawImage` 把整张颜色面铺开，
+      // 由画布的**平滑缩放**把它插值成连续渐变（这正是"方格状"的解法）。
+      const topLeft = context.toRaster(primitive.x, primitive.y)
+      const bottomRight = context.toRaster(primitive.x + primitive.width, primitive.y + primitive.height)
+      ctx.globalAlpha = previousAlpha * primitive.opacity
+      ctx.imageSmoothingEnabled = true
+      ctx.drawImage(offscreen, topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y)
+      ctx.globalAlpha = previousAlpha
+      drawn += 1
+      continue
+    }
+    if (primitive.kind === 'polygon') {
+      ctx.beginPath()
+      primitive.points.forEach(([x, y], index) => {
+        const point = context.toRaster(x, y)
+        if (index === 0) ctx.moveTo(point.x, point.y)
+        else ctx.lineTo(point.x, point.y)
+      })
+      ctx.closePath()
+      // 透明度**乘**在既有 alpha 上（而不是直接赋值）：将来若有别的层也调了 alpha，
+      // 谁都不会把对方的设置吃掉。
+      ctx.globalAlpha = previousAlpha * primitive.opacity
+      ctx.fillStyle = primitive.color
+      ctx.fill()
+      ctx.globalAlpha = previousAlpha
+      drawn += 1
+      continue
+    }
+    // 等值线：线宽是世界单位，乘上位图比例换算成像素（与地形/网格同一条换算）
+    ctx.globalAlpha = previousAlpha * (primitive.opacity ?? 1)
+    ctx.strokeStyle = primitive.color
+    ctx.lineWidth = Math.max(1, primitive.width * layer.deviceScale)
+    if (typeof ctx.setLineDash === 'function') {
+      ctx.setLineDash((primitive.dash ?? []).map((value) => value * layer.deviceScale))
+    }
     ctx.beginPath()
-    corners.forEach((point, index) => {
+    primitive.points.forEach(([x, y], index) => {
+      const point = context.toRaster(x, y)
       if (index === 0) ctx.moveTo(point.x, point.y)
       else ctx.lineTo(point.x, point.y)
     })
-    ctx.closePath()
-    // 透明度**乘**在既有 alpha 上（而不是直接赋值）：将来若有别的层也调了 alpha，
-    // 谁都不会把对方的设置吃掉。
-    const previousAlpha = ctx.globalAlpha
-    ctx.globalAlpha = previousAlpha * style.opacity
-    ctx.fillStyle = color.color
-    ctx.fill()
+    ctx.stroke()
     ctx.globalAlpha = previousAlpha
-
-    result.drawn += 1
-    if (color.outOfRange !== null) result.outOfRange += 1
-
-    if (drawAllValues || color.outOfRange !== null) {
-      const world = axialToWorld(grid, axial.q, axial.r)
-      const center = context.toRaster(world.x, world.y)
-      // 越界用的是 `under` / `over` 的 textColor（出厂白字）——与"纯蓝底白字"的需求一致
-      ctx.fillStyle = color.textColor
-      // 读数的格式由**字段自己**决定（深度会按展示单位换算成 km / 相对值）
-      ctx.fillText(formatFieldReading(spec, value, style, calibration), center.x, center.y)
-      result.labels += 1
-    }
   }
 
-  ctx.font = previousFont
-  ctx.textAlign = previousAlign
-  ctx.textBaseline = previousBaseline
-  return result
+  if (stats.labels > 0) {
+    ctx.font = previousFont
+    ctx.textAlign = previousAlign
+    ctx.textBaseline = previousBaseline
+  }
+  if (typeof ctx.setLineDash === 'function') ctx.setLineDash(previousDash)
+  ctx.globalAlpha = previousAlpha
+
+  return {
+    mode: stats.mode,
+    drawn,
+    outOfRange: stats.outOfRange,
+    labels: stats.labels,
+    contours: stats.contours,
+    primitives: stats.primitives,
+  }
 }

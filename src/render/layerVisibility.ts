@@ -27,7 +27,8 @@
 
 import type { MapDocument } from '../data/mapDocument.ts'
 import { drawOverlayLayer } from './overlayDraw.ts'
-import type { FieldId, OverlayFieldSpec, OverlayStyle } from './overlayFields.ts'
+import type { FieldId, OverlayFieldSpec, OverlayMode, OverlayStyle } from './overlayFields.ts'
+import type { OverlayFieldCache } from './overlayPlan.ts'
 import type { MapRenderPlan } from './renderPlan.ts'
 
 /**
@@ -35,10 +36,21 @@ import type { MapRenderPlan } from './renderPlan.ts'
  * 于是"叠加层没画出来"能被断言抓到，而不是靠肉眼看截图（同 `lastGridCells` 的口径）。
  */
 export interface LayerDrawOutcome {
-  /** 本帧画出的图元个数（数据层是"格数"） */
+  /** 本帧画出的图元个数（数据层是"色块数"） */
   drawn: number
   /** 其中走了"越界纯色"的个数（只有色带类图层有这个概念） */
   outOfRange?: number
+  /** 画出的数值文字个数（数据层） */
+  labels?: number
+  /** 画出的等值线折线条数（连续场才有；逐格模式是 0） */
+  contours?: number
+  /**
+   * 这一层本帧用的显示方式（数据层才有）。
+   *
+   * 名字与 `drawOverlayLayer` 的返回值**必须一致**：统计字段是"真实渲染确实按设置走"的证据，
+   * 名字对不上时它的表现是"永远是 null"（那种静默错位最难查）。
+   */
+  mode?: OverlayMode
 }
 
 /**
@@ -65,6 +77,20 @@ export interface LayerDrawContext {
    * 所以"在设置里改了色带 → 下一帧就是新颜色"，不需要任何广播。
    */
   overlay?: { spec: OverlayFieldSpec; style: OverlayStyle }
+  /**
+   * 这一层**连续场采样的缓存**（由绘制层持有、每个字段一份）。
+   *
+   * 放在这里而不是让钩子自己存模块级变量：地图层实例活得比一帧长，而"哪个 canvas 的哪一层"
+   * 只有绘制层知道。钩子只管用，不管它住在哪。
+   */
+  fieldCache?: OverlayFieldCache
+  /**
+   * 造一张**离屏画布**（连续场的颜色面要先落在自己的一张画布上，再缩放铺开）。
+   *
+   * 与地形图集同一条路：本模块（以及 `overlayDraw`）不碰 DOM，造画布的能力由绘制层注入。
+   * 取不到时连续场**退回不画**，而不是抛异常把整帧带塌。
+   */
+  createCanvas?: (width: number, height: number) => HTMLCanvasElement | null
 }
 
 interface LayerSpecShape {

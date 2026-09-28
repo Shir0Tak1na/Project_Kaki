@@ -56,7 +56,8 @@ import {
   type LayerKey,
   type LayerVisibility,
 } from './layerVisibility.ts'
-import { DEFAULT_OVERLAY_STYLES, overlayField, type OverlayStyles } from './overlayFields.ts'
+import { DEFAULT_OVERLAY_STYLES, overlayField, type FieldId, type OverlayStyles } from './overlayFields.ts'
+import { createOverlayFieldCache, type OverlayFieldCache } from './overlayPlan.ts'
 import type { MapDraft } from '../editor/MapEditor.ts'
 
 /** 超过这个可见格数就不画网格线（缩小到很远时逐格描边会拖垮帧率） */
@@ -97,6 +98,25 @@ export interface OverlayStats {
    */
   lastOverlayDrawn: number
   lastOverlayOutOfRange: number
+  /**
+   * 本帧数据层的**显示方式**（`null` = 这一帧没有画数据层）。
+   *
+   * 为什么要有它：逐格与连续场在屏幕上"都像有颜色"，出问题时不能只靠肉眼判断用了哪一套；
+   * 多个数据层同时可见时取**绘制次序靠后**的那一个（确定的取值，不是随机）。
+   */
+  lastOverlayMode: 'cell' | 'field' | null
+  /** 本帧数据层写出的数值文字个数 */
+  lastOverlayLabels: number
+  /** 本帧数据层画出的等值线折线条数（逐格模式恒为 0） */
+  lastOverlayContours: number
+  /**
+   * 连续场采样缓存的累计计数（按字段求和）。
+   *
+   * `builds` 只增不减：断言"平移前后各一帧，第二帧没有重新采样"就靠它
+   * （第二帧 `builds` 不变、`hits` 增加 —— 见冒烟场景 44）。
+   */
+  lastOverlayFieldBuilds: number
+  lastOverlayFieldHits: number
   /**
    * 最近一帧"可见的世界矩形"（导出范围＝「当前视口」时用它）。
    *
@@ -289,6 +309,11 @@ export class MapOverlay {
     lastDrawOrder: [],
     lastOverlayDrawn: 0,
     lastOverlayOutOfRange: 0,
+    lastOverlayMode: null,
+    lastOverlayLabels: 0,
+    lastOverlayContours: 0,
+    lastOverlayFieldBuilds: 0,
+    lastOverlayFieldHits: 0,
     lastVisibleWorld: null,
     markerLayerAttached: false,
     lastRaster: null,
@@ -409,6 +434,8 @@ export class MapOverlay {
     this.markerLayer = null
     this.stats.markerLayerAttached = false
     this.stats.attached = false
+    // 采样缓存跟着这一份覆盖层一起结束（重挂载时重新采样一次，比"用着旧图的数据"安全）
+    this.overlayFieldCaches.clear()
   }
 
   /** 请求一次重绘（同一帧内的多次请求会被合并） */
@@ -651,6 +678,49 @@ export class MapOverlay {
   /** 当前数据层样式（色带 / 不透明度），与 `layers()` 同一条口径：每帧现读 */
   private overlayStyles(): OverlayStyles {
     return this.options.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES
+  }
+
+  /**
+   * 连续场采样缓存（**每个数据字段一份**，随本覆盖层实例存活）。
+   *
+   * 为什么放在这里：缓存必须活得比一帧长，而"哪张画布的哪一层"只有覆盖层知道；
+   * 放在 `overlayDraw` 的模块级变量里会让两张画布互相踩（同一字段的数据不同）。
+   */
+  private readonly overlayFieldCaches = new Map<FieldId, OverlayFieldCache>()
+
+  private fieldCacheFor(field: FieldId): OverlayFieldCache {
+    const found = this.overlayFieldCaches.get(field)
+    if (found !== undefined) return found
+    const created = createOverlayFieldCache()
+    this.overlayFieldCaches.set(field, created)
+    return created
+  }
+
+  /** 所有字段的缓存计数之和（进统计；断言"第二帧没重采样"用它） */
+  private fieldCacheCounts(): { builds: number; hits: number } {
+    let builds = 0
+    let hits = 0
+    for (const cache of this.overlayFieldCaches.values()) {
+      builds += cache.builds
+      hits += cache.hits
+    }
+    return { builds, hits }
+  }
+
+  /**
+   * 造一张**离屏画布**（连续场的颜色面用）。
+   *
+   * 与地形图集同一条路：先问注入的 `canvasFactory`（测试与特殊宿主用），
+   * 否则用当前挂载点的 `document` 造一张；两样都拿不到就返回 `null`（连续场退回不画）。
+   */
+  private createOffscreenCanvas(width: number, height: number): HTMLCanvasElement | null {
+    if (this.canvasFactory !== null) return this.canvasFactory(width, height)
+    const doc = this.container?.ownerDocument ?? null
+    if (doc === null) return null
+    const canvas = doc.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    return canvas
   }
 
   /**
@@ -991,6 +1061,9 @@ export class MapOverlay {
     const overlayStyles = this.overlayStyles()
     let overlayDrawn = 0
     let overlayOutOfRange = 0
+    let overlayLabels = 0
+    let overlayContours = 0
+    let overlayMode: 'cell' | 'field' | null = null
     const drawn: LayerKey[] = []
     for (const spec of LAYERS_BY_DRAW_ORDER) {
       if (!isLayerVisible(layers, spec.id)) {
@@ -1007,16 +1080,33 @@ export class MapOverlay {
         plan,
         document: document_,
         layers,
-        ...(spec.overlay ? { overlay: { spec: overlayField(spec.overlay), style: overlayStyles[spec.overlay] } } : {}),
+        ...(spec.overlay
+          ? {
+              overlay: { spec: overlayField(spec.overlay), style: overlayStyles[spec.overlay] },
+              // 连续场的采样缓存按字段各一份（活得比一帧长，所以挂在覆盖层实例上）
+              fieldCache: this.fieldCacheFor(spec.overlay),
+              // 颜色面要落在自己的一张离屏画布上（绘制层提供造画布的能力，钩子不碰 DOM）
+              createCanvas: (width: number, height: number) => this.createOffscreenCanvas(width, height),
+            }
+          : {}),
       })
       if (outcome) {
         overlayDrawn += outcome.drawn
         overlayOutOfRange += outcome.outOfRange ?? 0
+        overlayLabels += outcome.labels ?? 0
+        overlayContours += outcome.contours ?? 0
+        if (outcome.mode !== undefined) overlayMode = outcome.mode
       }
     }
     this.stats.lastDrawOrder = drawn
     this.stats.lastOverlayDrawn = overlayDrawn
     this.stats.lastOverlayOutOfRange = overlayOutOfRange
+    this.stats.lastOverlayMode = overlayMode
+    this.stats.lastOverlayLabels = overlayLabels
+    this.stats.lastOverlayContours = overlayContours
+    const cacheCounts = this.fieldCacheCounts()
+    this.stats.lastOverlayFieldBuilds = cacheCounts.builds
+    this.stats.lastOverlayFieldHits = cacheCounts.hits
 
     const draft = this.options.getDraft?.() ?? null
     if (draft) drawDraft(ctx, layer, draft)
