@@ -36,7 +36,7 @@
 | 多点手势（逐点点击 / 双击 / 回车 / Esc / 右键结束） | ✅ | `src/editor/MapEditor.ts`、`MapInteraction.ts` |
 | 路径与区域命名（画完即命名 / 双击重命名 / 名称开关） | ✅ | `shapeGeometry.ts`、`history.ts`、`ui/TextPromptModal.ts` |
 | 名称排版（逐字沿弧长 / 实测标定 / 字号可调） | ✅ 已在真实库验证 | `shapeDraw.ts`、`ui/SettingsTab.ts` |
-| Base 自定义视图（Phase 3：表格视图 + 笔记坐标桥） | ✅ 已实现，待真实库验证 | `src/base/`、`docs/PHASE-3-BASE-VIEW.md` |
+| Base 自定义视图（Phase 3：表格视图 + 笔记坐标桥） | ✅ 已实现，待真实库验证 | `src/base/`、`PHASE-3-BASE-VIEW.md` |
 | 导出 PNG / 图例 / 多图层（Phase 4） | ⏳ | — |
 
 ## 关键决定

@@ -1,4 +1,4 @@
-# Project Kaki
+﻿# Project Kaki
 
 **在 Obsidian 里画一张虚构世界的地图。**
 
@@ -30,7 +30,7 @@ Project Kaki（译名 **Project 垣**）是一个 Obsidian 插件：把 `.canvas
   - 怎么加东西：**`docs/EXTENSION-POINTS.md`**（扩展点与硬约束）· `docs/DATA-LAYER-PLAN-v5.md`（数据层施工文件）
    · `docs/BIOMES.md`（生物群系分类表）· `docs/BORROWED-IDEAS.md`（待办池：值得借鉴的改进）
   - 为什么这样做：`docs/ENGINEERING-NOTES.md`（每条教训都付过代价）· 用法：`docs/USER-MANUAL.md`
-  - 交接与历史：`docs/HANDOFF.md`（入口）· `docs/ARCHIVE-HANDOFF.md`（2026-09 逐轮叙事，只读）
+  - 交接与历史：`docs/HANDOFF.md`（入口）· `docs/archive/ARCHIVE-HANDOFF.md`（2026-09 逐轮叙事，只读）
 - [自定义地形](#自定义地形) · [自定义标记图标](#自定义标记图标) · [自定义路径类型](#自定义路径类型) · [自定义区域类型](#自定义区域类型)
 - [定义文件](#定义文件把自定义定义带到别的库) · [Base 视图](#base-视图把地图和笔记连起来) · [导出](#导出) · [设置](#设置)
 - [数据与文件](#数据与文件) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题)
@@ -537,8 +537,8 @@ docs/         用户手册 · 工程笔记 · 技术方案 · 各阶段实施记
 2. [`docs/ENGINEERING-NOTES.md`](docs/ENGINEERING-NOTES.md) — **接手必读**：踩过的坑、测试策略、
    未验证项。其中 §5「已经踩过的坑」是这个项目最贵的东西；
 3. [`docs/HANDOFF.md`](docs/HANDOFF.md) — 当前基线与下一步；
-4. [`docs/TECHNICAL-DESIGN-v2.md`](docs/TECHNICAL-DESIGN-v2.md)、
-   [`docs/PHASE-0-RESULTS.md`](docs/PHASE-0-RESULTS.md) — 设计推导与平台实测数据。
+4. [`docs/archive/TECHNICAL-DESIGN-v2.md`](docs/archive/TECHNICAL-DESIGN-v2.md)、
+   [`docs/archive/PHASE-0-RESULTS.md`](docs/archive/PHASE-0-RESULTS.md) — 设计推导与平台实测数据。
 
 ## 路线图
 

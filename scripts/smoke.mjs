@@ -1,7 +1,7 @@
-/**
+﻿/**
  * 运行时冒烟测试：用桩替身模拟 Obsidian，把编译产物 main.js 真正加载并执行一遍。
  *
- * 桩环境**复刻 Phase 0 在 Obsidian 1.13.7 上实测到的真实结构**（见 docs/PHASE-0-RESULTS.md）：
+ * 桩环境**复刻 Phase 0 在 Obsidian 1.13.7 上实测到的真实结构**（见 docs/archive/PHASE-0-RESULTS.md）：
  *   - wrapper(transform:none) 之下同时存在 svg、canvas-card-menu(纯平移矩阵)、canvas-controls
  *     和真正的世界层 div.canvas(矩阵 a = scale)，世界层里再套各个 canvas-node(纯平移矩阵)；
  *   - 几何关系 client = wrapperRect.topLeft + matrix(e,f) + scale × world；

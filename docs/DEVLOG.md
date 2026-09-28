@@ -107,8 +107,8 @@
 
 ## 四、历史与归档
 
-- 本周期之前的实施记录：`PHASE-0-RESULTS.md` / `PHASE-1-NOTES.md` / `PHASE-3-BASE-VIEW.md` /
-  `TECHNICAL-DESIGN-v2.md`（均已加「历史文档（已归档）」横幅）；
-- HANDOFF 里 2026-09-24 ～ 2026-09-28 的逐轮交接叙事已移入 **`ARCHIVE-HANDOFF.md`**（原文保留，便于追责与复盘）；
+- 本周期之前的实施记录：`archive/PHASE-0-RESULTS.md` / `archive/PHASE-1-NOTES.md` / `archive/PHASE-3-BASE-VIEW.md` /
+  `archive/TECHNICAL-DESIGN-v2.md`（均已加「历史文档（已归档）」横幅）；
+- HANDOFF 里 2026-09-24 ～ 2026-09-28 的逐轮交接叙事已移入 **`archive/ARCHIVE-HANDOFF.md`**（原文保留，便于追责与复盘）；
 - **当前该读的**：`PLAN.md`（现在做什么）· `EXTENSION-POINTS.md`（怎么加）·
   `DATA-LAYER-PLAN-v5.md`（数据层施工文件）· `BIOMES.md` · `BORROWED-IDEAS.md`（待办池）。

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 客户端坐标 ↔ 世界坐标的投影 —— 纯函数模块。
  *
  * 为什么不是「中心 + 缩放」公式：Obsidian 的 `.canvas` 是视口大小的盒子，
@@ -152,7 +152,7 @@ function median(values: number[]): number {
  * 由多组 (client, world) 采样校准原点。
  *
  * 为什么必须多采样：Phase 0 实测发现 `posFromEvt` 的输出被量化到设备像素
- * （见 docs/PHASE-0-RESULTS.md §2.5），单点锚点会带上最多半个量子的误差。
+ * （见 docs/archive/PHASE-0-RESULTS.md §2.5），单点锚点会带上最多半个量子的误差。
  * 取**中位数**而非均值，是为了对个别异常样本保持稳健。
  *
  * 缩放必须由调用方传入精确值（变换矩阵的 a 分量或 `scale` 字段），

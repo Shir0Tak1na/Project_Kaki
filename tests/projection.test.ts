@@ -1,6 +1,6 @@
-/**
+﻿/**
  * 投影模块的单元测试。
- * 回归依据：Phase 0 在 Obsidian 1.13.7 上实测得到的一组真实对应点（见 docs/PHASE-0-RESULTS.md）。
+ * 回归依据：Phase 0 在 Obsidian 1.13.7 上实测得到的一组真实对应点（见 docs/archive/PHASE-0-RESULTS.md）。
  */
 
 import test from 'node:test'
@@ -173,7 +173,7 @@ test('形状守卫拒绝不可用的投影', () => {
 })
 
 // ---------------------------------------------------------------- 量化与校准
-// 依据：Phase 0 第二轮实测（见 docs/PHASE-0-RESULTS.md §2.5）发现 posFromEvt 的输出
+// 依据：Phase 0 第二轮实测（见 docs/archive/PHASE-0-RESULTS.md §2.5）发现 posFromEvt 的输出
 // 被量化到设备像素，散布达 0.34–0.75 px；而变换矩阵与 scale 字段是精确值。
 
 /** 模拟 posFromEvt：精确仿射 + 量化到 quantumPx（客户端像素） */
