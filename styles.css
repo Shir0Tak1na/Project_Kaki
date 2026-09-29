@@ -803,6 +803,22 @@
   font-size: var(--font-ui-smaller);
 }
 
+/*
+ * 「定义文件（导入 / 导出）」那一行按钮（施工文件 §F.2：从侧栏「文件与导出」组搬来）。
+ * 窄设置页里两个按钮仍要并排放得下；放不下就整行折下去，不许横向溢出（与 `.fc-settings` 那条同一要求）。
+ */
+.fc-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 18px;
+}
+
+.fc-settings-action {
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
 /* ---- 快速上手清单（设置页顶部一份、侧栏面板顶部一份） ---- */
 /*
  * 两份清单的 DOM 同源（`quickStart.ts` 里是两份不同的文案，渲染在各自那一侧），

@@ -582,6 +582,8 @@ export default class ProjectKakiPlugin extends Plugin {
         name: '导出定义文件…（自定义地形/标记/路径类型/区域类型）',
         icon: 'file-down',
         group: 'file',
+        // 不进侧栏面板：日常不在画布上做，搬到设置页「定义文件（导入 / 导出）」（§F.2）
+        panelHidden: true,
         // 刻意**不给** `available`：这两件事只依赖插件设置，不需要地图层、也不需要打开 Canvas
         // （其余 file 组动作都带 `available: hasLayer`，因为那些真的要有地图才能做）
         describe: () => '把设置里的自定义地形、标记、路径类型与区域类型打包成一份 JSON 写进库根目录',
@@ -592,6 +594,8 @@ export default class ProjectKakiPlugin extends Plugin {
         name: '导入定义文件…',
         icon: 'file-up',
         group: 'file',
+        // 同上：只在命令面板与设置页出现（与导出成对）
+        panelHidden: true,
         describe: () => '从库里选一份定义文件；只做补充 —— 同 ID 保留你现有的定义，且不删除任何东西',
         run: () => this.importResourceBundle(),
       },
@@ -651,7 +655,11 @@ export default class ProjectKakiPlugin extends Plugin {
 
   /** 面板用的动作清单（按当前开发者模式过滤） */
   getPanelActions(): PluginAction[] {
-    return this.actions.filter((action) => action.devOnly !== true || this.pluginSettings.developerMode)
+    return this.actions.filter(
+      (action) =>
+        // `panelHidden` 的动作（导入 / 导出定义文件）归设置页：面板不画，命令面板与设置页照旧能用
+        action.panelHidden !== true && (action.devOnly !== true || this.pluginSettings.developerMode),
+    )
   }
 
   // ------------------------------------------------------------ 地图面板
@@ -2526,7 +2534,7 @@ export default class ProjectKakiPlugin extends Plugin {
    * 3. **没有可导出的东西时干脆不写文件**：写出一份空文件只会让用户以为"导出成功了"，
    *    然后拿着一个什么都没有的文件去导入。
    */
-  private async exportResourceBundle(): Promise<void> {
+  async exportResourceBundle(): Promise<void> {
     const bundle = buildResourceBundle(
       {
         terrains: this.pluginSettings.customTerrains,
@@ -2566,7 +2574,7 @@ export default class ProjectKakiPlugin extends Plugin {
    * 选择器复用图片那套（`AssetSuggestModal` + 可注入工厂）：**选文件这件事只有一份实现**，
    * 于是"库里一个候选都没有"这类退化路径的文案与行为也是同一份。
    */
-  private importResourceBundle(): void {
+  importResourceBundle(): void {
     const files = this.app.vault.getFiles()
     const candidates = listBundlePaths(files.map((file) => file.path))
     this.openAssetPicker({

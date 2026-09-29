@@ -90,7 +90,7 @@ export const QUICK_START_PANEL: readonly QuickStartItem[] = [
   },
   {
     title: '把自定义定义带到别的库',
-    hint: '「导出定义文件…」把自定义地形 / 标记 / 路径类型 / 区域类型打成一份 JSON；导入是只增不删的。',
+    hint: '设置页最下面「定义文件（导入 / 导出）」：把自定义地形 / 标记 / 路径类型 / 区域类型打成一份 JSON；导入是只增不删的。',
     commandId: 'export-resource-bundle',
   },
 ]

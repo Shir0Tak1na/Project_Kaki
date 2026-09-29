@@ -8190,15 +8190,41 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   )
   check('注册了「导入定义文件…」命令', commandById('import-resource-bundle') !== undefined)
   check(
-    '两个动作都在地图面板的「文件与导出」组里（面板按钮与命令来自同一份定义）',
-    panelAction('export-resource-bundle')?.group === 'file' && panelAction('import-resource-bundle')?.group === 'file',
-    `${panelAction('export-resource-bundle')?.group} / ${panelAction('import-resource-bundle')?.group}`,
+    'getPanelActions()（面板真正画的那一份）里已经没有这两个动作',
+    plugin
+      .getPanelActions()
+      .every((action) => action.id !== 'export-resource-bundle' && action.id !== 'import-resource-bundle'),
+    plugin.getPanelActions().filter((action) => action.group === 'file').map((action) => action.id).join(','),
   )
   check(
     '这两个动作不受"必须先启用地图层"的限制（它们只依赖设置，不需要打开 Canvas）',
     panelAction('export-resource-bundle')?.available === undefined &&
       panelAction('import-resource-bundle')?.available === undefined,
     'available 不该存在',
+  )
+
+  // ---- 新家：设置页「定义文件（导入 / 导出）」（施工文件 §F.2）----
+  plugin.settingTabs[0].display()
+  /** 每次现取：设置页是整页重建，旧的元素引用会变成挂在已卸载子树上的死节点 */
+  const bundleRow = () =>
+    collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-actions').find(
+      (el) => el.dataset?.fcSettingsRole === 'bundle-actions',
+    )
+  const bundleButton = (role) =>
+    collectByClass(bundleRow(), 'fc-settings-action').find((el) => el.dataset?.fcBundle === role)
+  check('设置页画出了「定义文件（导入 / 导出）」那一行（两个动作的新家）', bundleRow() !== undefined)
+  check(
+    '导出 / 导入各有一个按钮，带稳定标记（断言不怕以后改文案）',
+    bundleButton('export') !== undefined && bundleButton('import') !== undefined,
+    `${String(bundleButton('export')?.textContent)} / ${String(bundleButton('import')?.textContent)}`,
+  )
+  const bundleHint = collectByClass(plugin.settingTabs[0].containerEl, 'fc-settings-note').find(
+    (el) => el.dataset?.fcSettingsRole === 'bundle-hint',
+  )
+  check(
+    '这一节写清了「导入只增不删」（与命令描述同一口径，用户不用点进去才知道）',
+    (bundleHint?.textContent ?? '').includes('只增不删'),
+    String(bundleHint?.textContent).slice(0, 140),
   )
 
   // ---- 一条自定义定义都没有时：不产出空文件（写出空文件会让人以为导出成功了） ----
@@ -8613,6 +8639,34 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   await wait()
   check('库里没有定义文件时给出可操作的提示', noticeLog.some((line) => line.includes('没有找到定义文件')), noticeLog.join(' | '))
   check('这时根本不打开空的选择器', pickerEmpty.calls.length === 0, String(pickerEmpty.calls.length))
+
+  // ---- 新家（设置页）那两个按钮点下去真的做事：与命令**同一个方法**，不是另起一条链路 ----
+  clearNotices()
+  fireEvent(bundleButton('export'), 'click')
+  await wait()
+  const fromSettings = jsonFiles()
+  check(
+    '设置页的「导出定义文件…」按钮真的写出文件（与命令走同一个方法）',
+    fromSettings.length === 1 && /^project-kaki-definitions-\d{8}-\d{4}\.json$/.test(fromSettings[0]),
+    fromSettings.join(','),
+  )
+  const capture5 = captureImportModals(plugin)
+  const pickerFromSettings = makePickerDouble(fromSettings[0])
+  plugin.setImagePickerFactory(pickerFromSettings.factory)
+  fireEvent(bundleButton('import'), 'click')
+  await wait()
+  check(
+    '设置页的「导入定义文件…」按钮打开的是同一个选择器（标题与候选都对）',
+    pickerFromSettings.calls[0]?.title === '导入定义文件' &&
+      (pickerFromSettings.calls[0]?.files ?? []).includes(fromSettings[0]),
+    `${String(pickerFromSettings.calls[0]?.title)} / ${JSON.stringify(pickerFromSettings.calls[0]?.files)}`,
+  )
+  check(
+    '选中之后照样走到确认对话框（搬了家，链路没断）',
+    capture5.last()?.source === fromSettings[0],
+    String(capture5.last()?.source),
+  )
+  capture5.restore()
 
   plugin.onunload()
 }
@@ -9785,6 +9839,16 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     JSON.stringify(manage),
   )
   check('面板里真的画出了这个按钮（命令面板与面板同一份定义）', panelButton('管理地图定义') !== undefined)
+  check(
+    '面板里不再画「导出定义文件」按钮（它搬去了设置页，见场景 36）',
+    panelButton('导出定义文件') === undefined,
+    String(panelButton('导出定义文件')?.textContent),
+  )
+  check(
+    '面板里也不再画「导入定义文件」按钮（命令面板与设置页仍可点）',
+    panelButton('导入定义文件') === undefined,
+    String(panelButton('导入定义文件')?.textContent),
+  )
   check(
     '面板里出现了「地图定义」这一组标题',
     collectByClass(panel.contentEl, 'fc-panel-group-title')

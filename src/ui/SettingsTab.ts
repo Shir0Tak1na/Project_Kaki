@@ -5,7 +5,9 @@
  *
  * 1. **引导**：顶部一份「快速上手」清单（讲怎么开始画、以及"改单个对象去侧栏"）；
  * 2. **全局开关**：字号、开发者模式、`图层`（默认收起，含图例）；
- * 3. **新对象默认值**：路径类型与区域类型的参数、名称字体族、恢复出厂（默认收起）。
+ * 3. **新对象默认值**：路径类型与区域类型的参数、名称字体族、恢复出厂（默认收起）；
+ * 4. **定义文件（导入 / 导出）**：从侧栏「文件与导出」组搬来（施工文件 §F.2）——
+ *    它不依赖地图层、平时也不在画布上做，命令面板里那两条命令照旧存在（同一个 `run`）。
  *
  * ## 为什么定义管理搬走了
  *
@@ -330,6 +332,30 @@ export class CartographerSettingTab extends PluginSettingTab {
           void this.plugin.activatePanel()
         }),
       )
+
+    // ---- 6. 定义文件（导入 / 导出）----
+    //
+    // 从侧栏面板的「文件与导出」组搬来（§F.2）：这两个动作不依赖地图层，日常也不在画布上做。
+    // 这里只是**多一个入口**：命令面板里的 `export-resource-bundle` / `import-resource-bundle`
+    // 照旧能用，两边调的是同一个方法（面板那一侧由 `panelHidden` 挡掉，见 `MapPanel.PluginAction`）。
+    containerEl.createEl('h3', { text: '定义文件（导入 / 导出）' })
+    const bundleHint = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
+    bundleHint.dataset.fcSettingsRole = 'bundle-hint'
+    bundleHint.textContent =
+      '导出：把自定义地形、标记、路径类型与区域类型打包成一份 JSON（写在库根目录，同名不覆盖）。' +
+      '导入：从库里的 .json 文件里挑一份，先看确认对话框再决定 —— 导入是只增不删的，同 ID 保留你现有的定义。'
+    const bundleRow = containerEl.createEl('div', { cls: 'fc-settings-actions' })
+    bundleRow.dataset.fcSettingsRole = 'bundle-actions'
+    const exportBundle = bundleRow.createEl('button', { cls: 'fc-settings-action', text: '导出定义文件…' })
+    exportBundle.dataset.fcBundle = 'export'
+    exportBundle.addEventListener('click', () => {
+      void this.plugin.exportResourceBundle()
+    })
+    const importBundle = bundleRow.createEl('button', { cls: 'fc-settings-action', text: '导入定义文件…' })
+    importBundle.dataset.fcBundle = 'import'
+    importBundle.addEventListener('click', () => {
+      this.plugin.importResourceBundle()
+    })
   }
 
   /**

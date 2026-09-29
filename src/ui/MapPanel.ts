@@ -66,6 +66,13 @@ export interface PluginAction {
   group: PanelActionGroup
   /** 仅在开发者模式下可见（面板与命令面板同时隐藏） */
   devOnly?: boolean
+  /**
+   * **不进地图面板**（命令面板与设置页照旧能用）。
+   *
+   * 用于"归设置页、不常用"的文件级动作：导入 / 导出定义文件不依赖地图层，
+   * 摆在画布侧栏里既占位置，又容易被当成"导出当前这张地图"（那是 `export-map…`）。
+   */
+  panelHidden?: boolean
   /** 现在是否可以执行（面板据此禁用按钮） */
   available?: () => boolean
   /** 悬停提示里的状态说明 */

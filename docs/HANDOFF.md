@@ -25,15 +25,15 @@
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
 - 单元测试：634 个通过
-- 冒烟测试：50 个场景、1425 条断言全部通过
+- 冒烟测试：50 个场景、1433 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
-- **最新一轮（ISSUE-003：筛选器看不看得懂）** —— 运算符显示名（`selectionRules.ts` 的
-  `RULE_OP_LABELS` / `ruleOpLabel()`：等于 / 不等于 / 属于其中之一 / 介于…之间 / 有 / 没有这个数据）；
-  `SelectionFilterModal.ts` 重写成"顶部先给真结果"（`preview` 必填，`ruleHits()` 被预览与真应用**共用**）、
-  动作按钮带**前后格数**、「子句」等术语全部改成人话。
-  用户可见口径见 `CHANGELOG.md`，流水见 `DEVLOG.md` §2f，验收清单见 `PLAN.md` §2.1，
-  教训见 `ENGINEERING-NOTES.md` §5.61。**下一步是「导入 / 导出定义文件搬去设置页」（`PLAN.md` §3 的最后一项），
-  以及左上角浮窗与原生控件是否重叠的实机确认（需要你）**；
+- **最新一轮（导入 / 导出定义文件搬去设置页）** —— 侧栏「文件与导出」组不再画这两个按钮
+  （动作标 `panelHidden: true`，由 `getPanelActions()` 过滤），设置页新增「定义文件（导入 / 导出）」
+  一节（两个按钮 + 口径说明），按钮与命令面板调**同一个方法**
+  （`main.ts` 的 `exportResourceBundle()` / `importResourceBundle()`，本轮由 private 改公开）。
+  用户可见口径见 `CHANGELOG.md`，流水见 `DEVLOG.md` §2g，验收清单见 `PLAN.md` §2.1，
+  教训见 `ENGINEERING-NOTES.md` §5.62。
+  **下一步只剩 `PLAN.md` §3 的最后一项：左上角状态浮窗与 Obsidian 原生控件是否重叠的实机确认（需要你）**；
   再往前是「§F：侧栏「显示」三组」、
   「§D + §E：生物群系的分类字段渲染 /
   逐条配色 / 图例按群系分行，与数据层笔刷的「设为 ID」与「＋ − × ÷」三条硬口径」、
