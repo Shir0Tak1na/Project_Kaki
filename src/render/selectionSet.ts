@@ -134,14 +134,28 @@ export function applyRuleToSelection(
   mode: RuleApplyMode,
   context?: SelectionRuleContext,
 ): CellSelection {
+  const hits = ruleHits(document, group, context)
+  if (mode === 'add') return addToSelection(current, hits)
+  if (mode === 'remove') return removeFromSelection(current, hits)
+  return replaceSelection(hits)
+}
+
+/**
+ * 规则**命中了哪些格**（不改任何状态）。
+ *
+ * 为什么单独抽出来：对话框顶部那行"按这些条件会选中 N 格"必须与"真的应用一次"给出同一个数，
+ * 而最稳的做法就是**两者走同一个函数**（INSUE-003 的验收第 2 条：数字与实际应用结果一致）。
+ * 应用（`applyRuleToSelection`）改的是集合运算，命中判定只有这一处 —— 复制一份循环迟早分叉。
+ *
+ * 只遍历文件里**真实存在**的格（空白区不在其中），并且跳过损坏的键（与绘制层同一条纪律）。
+ */
+export function ruleHits(document: MapDocument, group: RuleGroup, context?: SelectionRuleContext): CellSelection {
   const hits: string[] = []
   for (const [key, cell] of Object.entries(document.terrain)) {
     if (parseCellKey(key) === null) continue
     if (matchesGroup(cell, group, context)) hits.push(key)
   }
-  if (mode === 'add') return addToSelection(current, hits)
-  if (mode === 'remove') return removeFromSelection(current, hits)
-  return replaceSelection(hits)
+  return normalizeSelection(hits)
 }
 
 /**

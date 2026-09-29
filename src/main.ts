@@ -174,7 +174,8 @@ import {
   resolveBiomeStyle,
   type CustomBiome,
 } from './render/biomeCatalog.ts'
-import type { SelectionRuleContext } from './render/selectionRules.ts'
+import { clauseIsUsable, type SelectionRuleContext } from './render/selectionRules.ts'
+import { applyRuleToSelection, ruleHits, summarizeSelection } from './render/selectionSet.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
 export type PromptModalFactory = (
@@ -2091,7 +2092,39 @@ export default class ProjectKakiPlugin extends Plugin {
     const context = this.selectionRuleContext()
     this.selectionFilterModalFactory(this.app, {
       context,
-      currentCount: editor.getCellSelection().length,
+      /**
+       * 顶部那行大字（"按这些条件会选中 37 格，其中 5 格没有温度"）与按钮上的格数**全部靠试算**。
+       *
+       * 关键：命中判定走的就是应用时同一个 `ruleHits`（ISSUE-003 验收第 2 条要的"数字与实际
+       * 应用结果一致"于是是**结构上成立**的 —— 不是两处实现碰巧一样）。
+       * `current` 每次现取：弹窗开着时用户还能在画布上继续点格。
+       */
+      preview: (group) => {
+        const document_ = this.layers?.getActiveDocument() ?? null
+        const current = (this.layers?.getActiveEditor() ?? editor).getCellSelection()
+        if (document_ === null) {
+          return { hits: 0, current: current.length, missing: [], after: { replace: 0, add: 0, remove: 0, inside: 0 } }
+        }
+        const hits = ruleHits(document_, group, context)
+        const hitSet = new Set(hits)
+        // "其中 5 格没有温度"只提**这条规则真的用到的**字段：一张有温度的图不该顺带报"3 格没有深度"
+        const referenced = new Set(group.clauses.filter(clauseIsUsable).map((clause) => clause.key))
+        const missing = summarizeSelection(document_, hits)
+          .fields.filter((field) => field.missing > 0 && referenced.has(field.key))
+          .map((field) => ({ label: field.label, count: field.missing }))
+        return {
+          hits: hits.length,
+          current: current.length,
+          missing,
+          // 四个动作做完会剩几格：全部是纯计算（`applyRuleToSelection` / `intersectSelection` 都不改状态）
+          after: {
+            replace: hits.length,
+            add: applyRuleToSelection(current, document_, group, 'add', context).length,
+            remove: applyRuleToSelection(current, document_, group, 'remove', context).length,
+            inside: current.filter((key) => hitSet.has(key)).length,
+          },
+        }
+      },
       // 三个集合动作与两个"动作"都走**编辑器**（它持有当前选择），
       // 而对话框是异步的 → 每次调用都重新取一次编辑器（期间视图可能已关闭）。
       // 上下文也一起传：`biomeTag` 那条规则要知道"某个群系带哪些标签"。

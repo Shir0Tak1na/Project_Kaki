@@ -249,7 +249,21 @@
 
 /* 数据层笔刷（§E）的样式现在跟着侧栏面板走，见文末「面板里的工具 / 笔刷 / 选择方式」。 */
 
-/* ---- 选择筛选器对话框（规则子句构建器）---- */
+/* ---- 选择筛选器对话框（规则条件构建器）---- */
+
+/* 顶部那行大字 = **结果**（"按这些条件会选中 37 格，其中 5 格没有温度"）。
+   它是用户唯一真正想知道的事，所以放在条件列表**之上**，并给一点底色跟条件分开 ——
+   ISSUE-003 的主因就是"组完条件得不到反馈"。 */
+.fc-filter-result {
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: 15px;
+  font-weight: 600;
+  min-height: 1.4em;
+}
+
 .fc-filter-clauses {
   display: flex;
   flex-direction: column;

@@ -118,6 +118,32 @@ export interface SelectionRuleContext {
   biomeTags?: readonly RuleEnumOption[]
 }
 
+/**
+ * 运算符的**显示名**（值仍然是不变的 token）。
+ *
+ * 为什么必须有：ISSUE-003 的第一条证据就是"运算符下拉里写的是 `in` / `between` / `exists`"——
+ * 用户看不懂，而这三个词与 IR 里的 token 同名，看起来像"界面没做完"。
+ * 口径（`UI-COPY-REVIEW.md` §4.1）：**只改显示名，token 一个都不动** ——
+ * IR 是共享的（将来要加文本语法也是同一份），把 token 改成中文才是真会出事的做法。
+ * ``>` `≥` `<` `≤`` 保持符号：它们本来就是通用写法，换成"大于"反而更长。
+ */
+export const RULE_OP_LABELS: Record<RuleOp, string> = {
+  '=': '等于',
+  '≠': '不等于',
+  '>': '>',
+  '≥': '≥',
+  '<': '<',
+  '≤': '≤',
+  in: '属于其中之一',
+  between: '介于…之间',
+  exists: '有 / 没有这个数据',
+}
+
+/** 取运算符的显示名（认不出的 token 原样返回 —— 手改过的 IR 也不该让界面空着） */
+export function ruleOpLabel(op: RuleOp): string {
+  return RULE_OP_LABELS[op] ?? op
+}
+
 const NUMERIC_OPS: readonly RuleOp[] = ['=', '≠', '>', '≥', '<', '≤', 'between', 'exists']
 const ENUM_OPS: readonly RuleOp[] = ['=', '≠', 'in', 'exists']
 
@@ -244,7 +270,7 @@ const TERRAIN_RULE: SelectionRuleSpec = {
     if (op === 'in') {
       const list = asStrings(value)
       return list === null
-        ? '地形 ∈（未选）'
+        ? '地形 属于其中之一（未选）'
         : `地形是 ${list.map((id) => enumLabel(context.terrains, id)).join(' / ')} 之一`
     }
     const wanted = asStrings(value)?.[0]
@@ -291,7 +317,7 @@ const BIOME_RULE: SelectionRuleSpec = {
     if (op === 'in') {
       const list = asStrings(value)
       return list === null
-        ? '生物群系 ∈（未选）'
+        ? '生物群系 属于其中之一（未选）'
         : `生物群系是 ${list.map((id) => enumLabel(context.biomes, id)).join(' / ')} 之一`
     }
     const wanted = asStrings(value)?.[0]

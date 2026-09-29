@@ -11250,75 +11250,158 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
     JSON.stringify(selected()),
   )
 
-  // ---- ⑦ 规则筛选器：真实对话框（命令入口），子句行由**规则表**派生 ----
+  // ---- ⑦ 规则筛选器：真实对话框（命令入口），条件行由**规则表**派生 ----
   const before = selected().length
   runCommand(plugin, 'filter-selection')
   const modal = fakeObsidian.Modal.lastAny
   const clausesEl = collectByClass(modal?.contentEl, 'fc-filter-clauses')[0]
   check('命令能打开筛选器对话框', modal !== null && modal !== undefined && clausesEl !== undefined)
   check(
-    '对话框里一开始没有子句（空规则不匹配任何格，不会把选择清空）',
+    '对话框里一开始没有条件（空规则不匹配任何格，不会把选择清空）',
     (clausesEl?.children ?? []).length === 1 && selected().length === before,
     JSON.stringify((clausesEl?.children ?? []).map((child) => child.textContent)),
   )
 
-  // 「+ 添加子句」是 Setting 按钮（`dataset.fcFilter = 'add'`）
+  // ISSUE-003 的主因：组完条件得不到反馈。于是**结果在顶部**，而且算的是"会选中什么"
+  const resultEl = collectByClass(modal?.contentEl, 'fc-filter-result')[0]
+  check(
+    '结果行在**最上面**（排在条件列表之前）',
+    resultEl !== undefined && modal.contentEl.children.indexOf(resultEl) < modal.contentEl.children.indexOf(clausesEl),
+    String(modal?.contentEl?.children?.map((child) => child.className ?? child.tagName).slice(0, 4)),
+  )
+  check(
+    '还没有可用的条件时结果行如实说（不是"当前选择 N 格"）',
+    /还没有可用的条件/.test(resultEl?.textContent ?? ''),
+    String(resultEl?.textContent),
+  )
+
+  // 「+ 再加一个条件」是 Setting 按钮（`dataset.fcFilter = 'add'`）
   const addClauseButton = FakeSetting.created
     .flatMap((setting) => setting.buttons ?? [])
     .find((button) => button.buttonEl?.dataset?.fcFilter === 'add')
-  check('「+ 添加子句」按钮存在', addClauseButton !== undefined)
+  check('「+ 再加一个条件」按钮存在', addClauseButton !== undefined)
   await addClauseButton.click()
   const rows = collectByClass(clausesEl, 'fc-filter-row')
-  check('加了一条子句：规则 / 运算符 / 值三个控件都在', rows.length === 1, String(rows.length))
-  const selectsInRow = (rows[0]?.children ?? []).filter((child) => child.tagName === 'SELECT')
+  check('加了一条条件：规则 / 运算符 / 值三个控件都在', rows.length === 1, String(rows.length))
+  // 控件**函数现取**：换规则 / 换运算符都会重建整行（与场景 50 同一条纪律）
+  const rowSelects = () =>
+    (collectByClass(clausesEl, 'fc-filter-row')[0]?.children ?? []).filter((child) => child.tagName === 'SELECT')
+  const selectsInRow = rowSelects()
   check(
-    '子句的控件由**规则表**派生（规则下拉里的选项 = 登记表里的规则，含自动生成的数值规则）',
+    '条件的控件由**规则表**派生（规则下拉里的选项 = 登记表里的规则，含自动生成的数值规则）',
     selectsInRow.length === 3 &&
       selectsInRow[0].children.length >= 3 &&
       selectsInRow[0].children.map((option) => option.value).includes('temp') &&
       selectsInRow[0].children.map((option) => option.value).includes('depth'),
     `${selectsInRow.length} · ${JSON.stringify(selectsInRow[0]?.children?.map((option) => option.value))}`,
   )
+  // ISSUE-003 的第一条硬证据：运算符下拉以前直接显示 `in` / `between` / `exists`
+  const opLabels = () => rowSelects()[1]?.children?.map((option) => option.textContent)
+  check(
+    '运算符下拉写的是**中文显示名**（值仍是 IR 里的 token）',
+    JSON.stringify(opLabels()) === JSON.stringify(['等于', '不等于', '属于其中之一', '有 / 没有这个数据']),
+    JSON.stringify(opLabels()),
+  )
   // 值控件是**枚举下拉**（地形），候选项带显示名（不能拿 slug 当名字给用户看）
   check(
     '枚举规则的值渲染成带显示名的下拉',
-    selectsInRow[2]?.children?.some((option) => option.value === 'forest' && option.textContent === '森林') === true,
-    JSON.stringify(selectsInRow[2]?.children?.map((option) => `${option.value}:${option.textContent}`)),
+    rowSelects()[2]?.children?.some((option) => option.value === 'forest' && option.textContent === '森林') === true,
+    JSON.stringify(rowSelects()[2]?.children?.map((option) => `${option.value}:${option.textContent}`)),
   )
 
   const echo = collectByClass(modal?.contentEl, 'fc-filter-echo')[0]
   // 默认那一行是"地形 = 第一个地形"；把它改成森林（真实用户的操作路径）
-  selectsInRow[2].value = 'forest'
-  selectsInRow[2].dispatchEvent({ type: 'change' })
+  rowSelects()[2].value = 'forest'
+  rowSelects()[2].dispatchEvent({ type: 'change' })
   check(
     '人话回显把 ID 翻成了显示名（"地形 = 森林"，不是 "地形 = forest"）',
     /地形 = 森林/.test(echo?.textContent ?? ''),
     String(echo?.textContent),
   )
 
-  // 按"地形 = 森林"**替换**选择：与连通扩展的结果应当一致（12 格森林）
-  const applyReplace = collectByClass(modal?.contentEl, 'fc-filter-action').find(
-    (button) => button.dataset.fcFilter === 'apply-replace',
+  // 顶部大字 = **试算**结果（这条规则命中的正是那 12 格森林），动作按钮写着前后格数
+  check(
+    '顶部大字给的是结果（"按这些条件会选中 12 格"）',
+    resultEl?.textContent === '按这些条件会选中 12 格',
+    String(resultEl?.textContent),
   )
-  press(applyReplace)
+  const actionButton = (key) =>
+    collectByClass(modal?.contentEl, 'fc-filter-action').find((button) => button.dataset.fcFilter === key)
+  check(
+    '动作按钮写着**前后格数**（替换 / 并入 / 移出 / 内筛）',
+    ['apply-replace', 'apply-add', 'apply-remove', 'apply-inside']
+      .map((key) => actionButton(key)?.textContent)
+      .join('|') ===
+      [`替换（→12 格）`, `并入（${before} → 12 格）`, `移出（${before} → 0 格）`, `在当前选择内筛（${before} → 12 格）`].join('|'),
+    ['apply-replace', 'apply-add', 'apply-remove', 'apply-inside'].map((key) => actionButton(key)?.textContent).join(' | '),
+  )
+  check(
+    '整个对话框里不出现 in / between / exists 这类英文 token',
+    /\b(in|between|exists)\b/.test(modal?.contentEl?.textContent ?? '') === false,
+    String(modal?.contentEl?.textContent).slice(0, 240),
+  )
+
+  // 按"地形 = 森林"**替换**选择：与连通扩展的结果应当一致（12 格森林）
+  press(actionButton('apply-replace'))
   check(
     '「替换选择」按规则选出 12 格森林',
     selected().length === 12 && selected().includes('0_0') && selected().includes('3_2'),
     JSON.stringify(selected()),
   )
+  check(
+    '按下之后按钮上的"前后"跟着更新（当前选择已经变成那 12 格）',
+    actionButton('apply-add')?.textContent === '并入（12 → 12 格）' &&
+      actionButton('apply-remove')?.textContent === '移出（12 → 0 格）',
+    `${actionButton('apply-add')?.textContent} · ${actionButton('apply-remove')?.textContent}`,
+  )
 
   // 「在当前选择内筛」= 同一条规则 ∩ 当前选择：结果仍是那 12 格森林
   // （"当前选择内"依赖选择本身 → 它是**动作**而不是规则，见 §C.2 末尾那条分工）
-  const applyInside = collectByClass(modal?.contentEl, 'fc-filter-action').find(
-    (button) => button.dataset.fcFilter === 'apply-inside',
-  )
-  press(applyInside)
+  press(actionButton('apply-inside'))
   check('「在当前选择内筛」（地形 = 森林 ∩ 当前选择）结果仍是 12 格', selected().length === 12, String(selected().length))
 
   check(
     '筛选器**不改地图数据、不进撤销栈**（选择只是"在看哪些格"）',
     editor.getStatus().undo === 0,
     String(editor.getStatus().undo),
+  )
+
+  // ---- ⑦b "其中 N 格没有温度"：换成「温度 · 没有这个数据」把话说死（命中数必须 = 缺数据数）----
+  rowSelects()[0].value = 'temp'
+  rowSelects()[0].dispatchEvent({ type: 'change' })
+  check(
+    '换规则后运算符换成该规则那一套（温度：等于 / 不等于 / > / ≥ / < / ≤ / 介于…之间 / 有 / 没有这个数据）',
+    JSON.stringify(opLabels()) === JSON.stringify(['等于', '不等于', '>', '≥', '<', '≤', '介于…之间', '有 / 没有这个数据']),
+    JSON.stringify(opLabels()),
+  )
+  // 行元素也要**现取**：换规则会重建整行（旧引用上没有 is-invalid）
+  const invalidRow = collectByClass(clausesEl, 'fc-filter-row')[0]
+  check(
+    '数值条件还没填数时标红、且不算数（结果行退回"还没有可用的条件"）',
+    invalidRow?.classList?.contains('is-invalid') === true && /还没有可用的条件/.test(resultEl?.textContent ?? ''),
+    `${invalidRow?.classList?.contains('is-invalid')} · ${resultEl?.textContent}`,
+  )
+  rowSelects()[1].value = 'exists'
+  rowSelects()[1].dispatchEvent({ type: 'change' })
+  check(
+    '"有 / 没有这个数据"的值控件是两选（有 / 没有）',
+    JSON.stringify(rowSelects()[2]?.children?.map((option) => option.textContent)) === JSON.stringify(['有', '没有']),
+    JSON.stringify(rowSelects()[2]?.children?.map((option) => option.textContent)),
+  )
+  rowSelects()[2].value = 'false'
+  rowSelects()[2].dispatchEvent({ type: 'change' })
+  const missingHeadline = String(resultEl?.textContent)
+  const missingMatch = /^按这些条件会选中 (\d+) 格，其中 (\d+) 格没有温度$/.exec(missingHeadline)
+  check(
+    '命中格全部没温度时，结果行写成"…会选中 N 格，其中 N 格没有温度"',
+    missingMatch !== null && missingMatch[1] === missingMatch[2],
+    missingHeadline,
+  )
+  press(actionButton('apply-replace'))
+  check(
+    '试算的格数与"真的应用一次"完全一致（预览不会与结果分叉）',
+    selected().length === Number(missingMatch?.[1] ?? -1),
+    `${selected().length} vs ${missingMatch?.[1]}`,
   )
 
   // ---- ⑧ 单选的详情形态：坐标 / 地形显示名 / 没有的字段写"未填" ----
