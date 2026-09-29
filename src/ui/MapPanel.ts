@@ -52,6 +52,7 @@ import {
   renderToolSection,
   toolControlsSignature,
   type ToolControlsHost,
+  type ToolSectionOptions,
 } from './toolSections.ts'
 
 export const MAP_PANEL_VIEW_TYPE = 'fictional-cartographer-panel'
@@ -266,8 +267,13 @@ function findByDataset(root: HTMLElement | null | undefined, key: string, value:
  * （状态没变就跳过），而"用户点了一个控件"这件事本身不在签名里 ——
  * 只清签名 + 排帧，才能保证这一帧一定重建。
  */
-function toolControlHostWithRerender(host: ToolControlsHost, requestRerender: () => void): ToolControlsHost {
-  return { ...host, requestRerender }
+function toolControlHostWithRerender(
+  host: ToolControlsHost,
+  requestRerender: () => void,
+  createSection: (parent: HTMLElement, options: ToolSectionOptions) => HTMLElement,
+): ToolControlsHost {
+  // `createSection` 也换成面板自己的实现 —— 只有它拿得到 `openGroups` / `userToggledGroups`
+  return { ...host, requestRerender, createSection }
 }
 
 /** 渲染一个动作时拿得到的东西（面板只画界面，写入全部回 `deps`） */
@@ -371,6 +377,14 @@ export class MapPanelView extends ItemView {
    * 重建前记下来、重建时再传回去（`collapsible.ts` 的 `open` 选项）。
    */
   private readonly openGroups = new Set<string>()
+  /**
+   * 用户**手动**开合过的那几组（role 集合）。
+   *
+   * `openGroups` 记的是"现在开着"，而三节（工具 / 笔刷 / 选择方式）还多一层"默认跟当前工具走"：
+   * 笔刷那一节默认只在使用笔刷时展开。只看 `openGroups` 的话，用户手动收起笔刷之后再切回
+   * 笔刷工具，它又会自己弹开 —— 手动决定必须盖过默认，所以另记一份"谁被手动动过"。
+   */
+  private readonly userToggledGroups = new Set<string>()
   /**
    * 是否已经画过至少一次。
    *
@@ -499,12 +513,16 @@ export class MapPanelView extends ItemView {
      * （当前工具、刷哪一层、半径、框选方式…），漏掉就会出现"点了没反应 / 还高亮着上一个"
      * 这类静默不更新（§5.9）。目录签名由 `toolControlsSignature` 一并算进去。
      */
-    const toolControls = toolControlHostWithRerender(this.deps.getToolControls(), () => {
-      // 控件改完状态后要"这一帧一定重绘"：写状态走的是插件层，签名未必马上变，
-      // 所以先清签名再排帧（否则点了按钮面板可能停在旧值上，§5.9）
-      this.lastSignature = null
-      this.requestRender()
-    })
+    const toolControls = toolControlHostWithRerender(
+      this.deps.getToolControls(),
+      () => {
+        // 控件改完状态后要"这一帧一定重绘"：写状态走的是插件层，签名未必马上变，
+        // 所以先清签名再排帧（否则点了按钮面板可能停在旧值上，§5.9）
+        this.lastSignature = null
+        this.requestRender()
+      },
+      (parent, options) => this.createSection(parent, options),
+    )
     const toolSignature = toolControlsSignature(toolControls)
     const signature = [
       summary,
@@ -532,6 +550,8 @@ export class MapPanelView extends ItemView {
     this.captureOpenGroups()
     // 同理："正在打字的那个框"也要能还原（见 `focusedInput` 的说明）
     this.focusedInput = this.captureFocusedInput()
+    // 还有滚动位置：`empty()` 会把 scrollTop 钳回 0 = 点一下控件就被弹回顶部（用户实测）
+    const scrollTop = this.captureScrollTop()
     this.groupEls.clear()
     root.empty()
     root.addClass('fc-panel-root')
@@ -559,6 +579,7 @@ export class MapPanelView extends ItemView {
       for (const row of items) this.renderAction(list, row.action, row.available, row.description)
     }
     this.restoreFocusedInput()
+    this.restoreScrollTop(scrollTop)
     this.rendered = true
   }
 
@@ -789,6 +810,58 @@ export class MapPanelView extends ItemView {
       if (element.open === true) this.openGroups.add(role)
       else this.openGroups.delete(role)
     }
+  }
+
+  /**
+   * 建一个可折叠的一节（`ToolControlsHost.createSection` 的面板版实现）。
+   *
+   * 开合状态由面板保管（`openGroups` / `userToggledGroups`），三节的默认开合跟当前工具走
+   * （`defaultOpen` 由各 `render*Section` 按状态算好传进来），而**用户手动开合过就听用户的**。
+   */
+  private createSection(parent: HTMLElement, options: ToolSectionOptions): HTMLElement {
+    const open = this.userToggledGroups.has(options.role)
+      ? this.openGroups.has(options.role)
+      : options.defaultOpen
+    const group = createCollapsibleGroup(parent, {
+      title: options.title,
+      role: options.role,
+      open,
+      cls: `fc-panel-group ${options.cls}`,
+      titleCls: 'fc-panel-group-title',
+    })
+    group.dataset[options.dataKey] = 'group'
+    // 手动开合要留痕：浏览器只在用户点 summary 时发 `toggle`，程序设 `open` 不发
+    group.addEventListener('toggle', () => this.userToggledGroups.add(options.role))
+    this.groupEls.set(options.role, group)
+    return group
+  }
+
+  /**
+   * 重建前记下侧栏滚到哪儿了。
+   *
+   * 与 `openGroups` / `focusedInput` 同一类处理：重建第一步是 `root.empty()`，内容被清空时
+   * 滚动容器的 `scrollHeight` 变成 0，浏览器随即把 `scrollTop` **钳回 0** —— 表现就是
+   * "按一下工具按钮就跳回最上面"（用户实测）。设置页早就踩过同一个坑，那边的入口是
+   * `CartographerSettingTab.rerenderKeepingScroll()`（`.fc-panel-root` 自己就是那个滚动容器，
+   * CSS 里写着 `overflow: auto`，所以这里不需要像设置页那样往上找祖先）。
+   */
+  private captureScrollTop(): number | null {
+    const value = (this.contentEl as unknown as { scrollTop?: unknown }).scrollTop
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+
+  /** 重建后把滚动位置放回去（新内容更短时浏览器会自己夹到最大值，这是对的） */
+  private restoreScrollTop(previous: number | null): void {
+    if (previous === null || previous === 0) return
+    const root = this.contentEl as unknown as { scrollTop: number }
+    root.scrollTop = previous
+    // 刚重建时新内容的高度可能还没算出来，这一次赋值会被夹成 0 —— 下一帧再补一次
+    // （幂等：真写进去了就不会再进这里）
+    if (root.scrollTop === previous) return
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return
+    window.requestAnimationFrame(() => {
+      root.scrollTop = previous
+    })
   }
 
   /**

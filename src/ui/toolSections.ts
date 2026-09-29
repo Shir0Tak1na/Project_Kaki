@@ -89,8 +89,30 @@ export interface ToolControlsHost {
   resolveImageSrc?: (path: string) => string
   /** 打开「按规则筛选选择…」对话框；缺省时**不渲染**那两个按钮（而不是渲染一个点了没反应的） */
   onOpenSelectionFilter?: () => void
+  /**
+   * 建一个可折叠的一节（`<details>`）。缺省时退回"永远展开的 div"（搬运时的老样子）。
+   *
+   * 为什么由宿主建：面板是**整块重建**式重绘，开合状态必须跨重建活下来
+   * （`MapPanel` 那套"重建前从 DOM 读、重建时再传回去"），而 `toolSections.ts`
+   * 不认识面板状态。所以这里只提要求（标题、身份、默认开合），状态归宿主。
+   */
+  createSection?: (parent: HTMLElement, options: ToolSectionOptions) => HTMLElement
   /** 改完状态后请宿主重绘 */
   requestRerender: () => void
+}
+
+/** `ToolControlsHost.createSection` 的参数 */
+export interface ToolSectionOptions {
+  /** 显示在 summary 上的标题 */
+  title: string
+  /** 宿主用它记住这一节的开合状态 */
+  role: string
+  /** 额外的样式类（`fc-panel-tools` / `fc-panel-brush` / `fc-panel-selection-mode`） */
+  cls: string
+  /** `dataset` 上的钩子键（既有断言按它取元素） */
+  dataKey: string
+  /** 用户**没有**手动开合过时的默认状态 */
+  defaultOpen: boolean
 }
 
 /** 工具的中文名与提示（浮窗的标题行也用它，所以是 export —— 两处不能各写一份） */
@@ -179,12 +201,23 @@ export function toolControlsSignature(host: ToolControlsHost): string {
   ].join('|')
 }
 
-/** 一节的外壳（标题 + `data` 钩子，供冒烟按节取元素） */
-function sectionShell(parent: HTMLElement, cls: string, dataKey: string, title: string): HTMLElement {
-  const group = parent.createEl('div', { cls: `fc-panel-group ${cls}` })
-  group.dataset[dataKey] = 'group'
-  group.createEl('div', { cls: 'fc-panel-group-title', text: title })
-  return group
+/**
+ * 一节的外壳（标题 + `data` 钩子，供冒烟按节取元素）。
+ *
+ * 从浮窗搬进侧栏之后，真实库的反馈是"侧边栏里 UI 一大坨"：三节永远整块展开，
+ * 一屏里既有工具按钮又有调色板/数值框，还得再滚过一屏命令按钮才够到动作。
+ * 所以外壳改成**可折叠** —— 但开合状态归宿主保管（面板整块重建，状态放这里每次都会被重置成默认），
+ * 这一层只回答"用户没动过时该不该展开"。
+ */
+function sectionShell(parent: HTMLElement, host: ToolControlsHost, options: ToolSectionOptions): HTMLElement {
+  // 宿主没接这个能力时退回老样子（永远展开的 div），而不是少画一节
+  if (typeof host.createSection !== 'function') {
+    const group = parent.createEl('div', { cls: `fc-panel-group ${options.cls}` })
+    group.dataset[options.dataKey] = 'group'
+    group.createEl('div', { cls: 'fc-panel-group-title', text: options.title })
+    return group
+  }
+  return host.createSection(parent, options)
 }
 
 /** 一行说明（"为什么现在是灰的"）—— 三节共用同一套排版 */
@@ -213,8 +246,15 @@ function unusableReason(status: EditorStatus): string {
  * 地形选择**不在这里**：它属于笔刷（见文件头那条"每个控件只出现一次"）。
  */
 export function renderToolSection(parent: HTMLElement, host: ToolControlsHost): void {
-  const group = sectionShell(parent, 'fc-panel-tools', 'fcTools', '工具')
   const status = host.getStatus()
+  // 「工具」是首屏一定要看的那一节（我现在是什么工具 + 它的参数），默认展开
+  const group = sectionShell(parent, host, {
+    title: '工具',
+    role: 'panel-tools',
+    cls: 'fc-panel-tools',
+    dataKey: 'fcTools',
+    defaultOpen: true,
+  })
   if (status === null) {
     hintLine(group, NO_LAYER_HINT)
     return
@@ -362,8 +402,17 @@ function renderGeometry(group: HTMLElement, host: ToolControlsHost, status: Edit
  * 浮窗的状态行也照旧写一份）、**换层或换算法不静默沿用**（数字留着但标"未确认"）。
  */
 export function renderBrushSection(parent: HTMLElement, host: ToolControlsHost): void {
-  const group = sectionShell(parent, 'fc-panel-brush', 'fcBrush', '笔刷')
   const status = host.getStatus()
+  // 默认只在使用笔刷时展开：这一节最长（层 / 算法 / 数值 / 群系 / 半径 / 调色板），
+  // 用标记或路径时它整块是灰的，展开只是把真正要用的东西挤出屏幕（用户报的"一大坨"）。
+  // 没有地图层时展开，否则 `NO_LAYER_HINT` 被收在折叠里 = 用户看不到"为什么这里是空的"。
+  const group = sectionShell(parent, host, {
+    title: '笔刷',
+    role: 'panel-brush',
+    cls: 'fc-panel-brush',
+    dataKey: 'fcBrush',
+    defaultOpen: status === null || (status.mode === 'paint' && status.tool === 'brush'),
+  })
   if (status === null) {
     hintLine(group, NO_LAYER_HINT)
     return
@@ -524,8 +573,15 @@ function renderTerrainPalette(group: HTMLElement, host: ToolControlsHost, status
  * 一节忽隐忽现会让人以为功能被删了，而置灰能同时回答"有这个东西"和"现在用不上"。
  */
 export function renderSelectionModeSection(parent: HTMLElement, host: ToolControlsHost): void {
-  const group = sectionShell(parent, 'fc-panel-selection-mode', 'fcSelectionMode', '选择方式')
   const status = host.getStatus()
+  // 默认只在"选择"这一档展开：这节的按钮在绘制模式下全是灰的，展开没有意义
+  const group = sectionShell(parent, host, {
+    title: '选择方式',
+    role: 'panel-selection-mode',
+    cls: 'fc-panel-selection-mode',
+    dataKey: 'fcSelectionMode',
+    defaultOpen: status === null || status.mode !== 'paint',
+  })
   if (status === null) {
     hintLine(group, NO_LAYER_HINT)
     return

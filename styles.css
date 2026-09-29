@@ -1155,6 +1155,17 @@
   font-size: var(--font-ui-smaller);
 }
 
+/* §F.2 的三节（工具 / 笔刷 / 选择方式）是可折叠的 `<details>`：默认只展开"跟当前工具
+   相关"的那一节，其余收成一行标题 —— 用户报的"侧栏里 UI 一大坨"就是这三节永远
+   整块展开的样子。动作组那些标题还是普通 div，所以这里限定 `summary`。 */
+.fc-panel-group > summary.fc-panel-group-title {
+  cursor: pointer;
+  /* 收起时也要一眼看出"这里能展开"（原生三角） */
+  list-style: revert;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 /* 一行一个动作：图标 + 名称，不换行、不堆描述 */
 .fc-panel-button {
   display: flex;

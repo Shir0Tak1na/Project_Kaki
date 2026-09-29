@@ -11876,6 +11876,99 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
     String(cardRows.get('生物群系')),
   )
 
+  // ---- ⑭ 三节可折叠：默认只展开"跟当前工具相关"的那一节（用户实测："侧边栏 UI 一大坨"）
+  //
+  // 纪律与场景 48/50 相同：面板整块重建 ⇒ 控件元素一律**现取**，改完状态要 `flushFrames()`。
+  const sectionOf = (cls) => inPanel(panel, cls)[0]
+  const toolSectionEl = () => sectionOf('fc-panel-tools')
+  const brushSectionEl = () => sectionOf('fc-panel-brush')
+  const selectionSectionEl = () => sectionOf('fc-panel-selection-mode')
+  const tagNames = () => [toolSectionEl(), brushSectionEl(), selectionSectionEl()].map((el) => el?.tagName).join('/')
+  check(
+    '三节（工具 / 笔刷 / 选择方式）都是可折叠的 <details>，不再是永远铺开的 div',
+    [toolSectionEl(), brushSectionEl(), selectionSectionEl()].every((el) => el?.tagName === 'DETAILS'),
+    tagNames(),
+  )
+  editor.setMode('paint')
+  editor.setTool('brush')
+  flushFrames()
+  check(
+    '绘制 + 笔刷：工具与笔刷两节都展开（这会儿真的要用的就在眼前）',
+    toolSectionEl()?.open === true && brushSectionEl()?.open === true,
+    `工具=${toolSectionEl()?.open} 笔刷=${brushSectionEl()?.open}`,
+  )
+  check(
+    '绘制 + 笔刷：选择方式收起（它的按钮这会儿全是灰的）',
+    selectionSectionEl()?.open === false,
+    String(selectionSectionEl()?.open),
+  )
+  editor.setTool('marker')
+  flushFrames()
+  check(
+    '换成标记工具：笔刷节自己收起（那一节最长，用不上时不该占着一屏）',
+    brushSectionEl()?.open === false && toolSectionEl()?.open === true,
+    `工具=${toolSectionEl()?.open} 笔刷=${brushSectionEl()?.open}`,
+  )
+  // 手动开合要盖过默认：手动展开之后，再切工具也不该把它收回去
+  brushSectionEl().open = true
+  brushSectionEl().dispatchEvent({ type: 'toggle' })
+  editor.setTool('brush')
+  flushFrames()
+  check('手动展开过就听用户的（切工具不会再把它收起来）', brushSectionEl()?.open === true, String(brushSectionEl()?.open))
+  brushSectionEl().open = false
+  brushSectionEl().dispatchEvent({ type: 'toggle' })
+  editor.setTool('marker')
+  flushFrames()
+  editor.setTool('brush')
+  flushFrames()
+  check(
+    '手动收起过也听用户的（切回笔刷工具不会自己弹开）',
+    brushSectionEl()?.open === false,
+    String(brushSectionEl()?.open),
+  )
+  // 选择模式：反过来（这节本来只在"选择"这一档有意义）
+  editor.setMode('select')
+  flushFrames()
+  check(
+    '切到选择模式：选择方式节展开、笔刷节收起',
+    selectionSectionEl()?.open === true && brushSectionEl()?.open === false,
+    `选择方式=${selectionSectionEl()?.open} 笔刷=${brushSectionEl()?.open}`,
+  )
+  editor.setMode('paint')
+  flushFrames()
+
+  // ---- ⑮ 整块重建不许把滚动位置弹回顶部（用户实测："每次按工具按钮就要跳到最上面"）----
+  const scrollHost = panel.contentEl
+  scrollHost.scrollHeight = 2000
+  scrollHost.clientHeight = 600
+  // 反例控制：桩里的 `empty()` 如实模拟"内容被清空 ⇒ 浏览器把 scrollTop 钳回 0"
+  // （不模拟的话，下面那两条断言就是空转的：什么都不做 scrollTop 也不会变）
+  scrollHost.scrollTop = 420
+  scrollHost.empty()
+  check(
+    '前提：桩里清空内容确实会把 scrollTop 钳回 0（否则下面两条是空转的）',
+    scrollHost.scrollTop === 0,
+    `scrollTop=${scrollHost.scrollTop}`,
+  )
+  scrollHost.scrollTop = 420
+  editor.setTool('marker') // 改一次编辑器状态 = 面板整块重建
+  flushFrames()
+  check(
+    '改状态重建之后侧栏没跳回顶部（滚到哪儿就还在哪儿）',
+    scrollHost.scrollTop === 420,
+    `scrollTop=${scrollHost.scrollTop}`,
+  )
+  scrollHost.scrollTop = 700
+  press(inPanel(panel, 'fc-panel-tool').find((el) => el.dataset.fcTool === 'brush'))
+  flushFrames()
+  check(
+    '点侧栏里真实的工具按钮同样不跳顶（不是只给 setTool 那条路径打补丁）',
+    scrollHost.scrollTop === 700,
+    `scrollTop=${scrollHost.scrollTop}`,
+  )
+  editor.setTool('brush')
+  flushFrames()
+
   console.log('  （场景 49 结束）')
   plugin.onunload()
 }
