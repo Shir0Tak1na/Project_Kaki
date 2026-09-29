@@ -417,7 +417,9 @@ function makeRecordingContext() {
     },
     strokeText(text, x, y) {
       calls.strokeText += 1
-      texts.push({ kind: 'stroke', text, x: tx + x, y: ty + y, angle, font: context.font, fillStyle: context.fillStyle })
+      // 描边记的是 `strokeStyle`（不是 `fillStyle`）：等值线数字的**描边颜色必须与字色相反**，
+      // 而"相反"这件事只有在能读到描边色时才断言得了 —— 桩记错颜色会让那条断言永远看不到东西
+      texts.push({ kind: 'stroke', text, x: tx + x, y: ty + y, angle, font: context.font, strokeStyle: context.strokeStyle })
     },
     measureText(text) {
       // 按当前字号估算宽度：CJK 约 1 em、西文约 0.55 em。
@@ -633,9 +635,18 @@ function makeEl({
      */
     focus() {
       el.doc.activeElement = el
+      /**
+       * 真实的 `document.activeElement` 与 `el.doc.activeElement` 是**同一份**信息的两个入口：
+       * `CanvasAdapter` 读前者（`el.doc?.activeElement ?? document.activeElement`），
+       * 而工具条的"数值框有焦点时别去改它的字"读的是 `ownerDocument.activeElement`。
+       * 只更新 `el.doc` 会让后一条守卫在冒烟里**永不生效** —— 表现是"打字打到一半被冲掉"
+       * 这个真实缺陷在测试里看不见（桩少了一半行为，§5.13 那类）。
+       */
+      if (el.ownerDocument) el.ownerDocument.activeElement = el
     },
     blur() {
       if (el.doc.activeElement === el) el.doc.activeElement = null
+      if (el.ownerDocument && el.ownerDocument.activeElement === el) el.ownerDocument.activeElement = null
     },
     select() {},
     setSelectionRange() {},
@@ -704,6 +715,17 @@ function makeEl({
       if (typeof options.text === 'string') child.textContent = options.text
       el.appendChild(child)
       return child
+    },
+    /**
+     * Obsidian 在 `HTMLElement` 上还挂了 `createDiv` / `createSpan`（`createEl` 的糖）。
+     * 真实环境里它们一直都在，桩里缺了就会**把"用了糖"的实现判成崩溃** ——
+     * 那是桩太薄造成的假失败，与被测逻辑无关。
+     */
+    createDiv(options = {}) {
+      return el.createEl('div', options)
+    },
+    createSpan(options = {}) {
+      return el.createEl('span', options)
     },
     empty() {
       el.children.length = 0
@@ -1127,6 +1149,12 @@ class FakeSetting {
     const setting = this
     const toggle = {
       value: null,
+      // 真实 ToggleComponent 有 `toggleEl`（设置页要给它挂 dataset 标记）与 `setTooltip`。
+      // 桩里缺这两个会让"用了它们"的实现直接崩 —— 那是桩太薄造成的假失败。
+      toggleEl: makeEl({ tagName: 'div', className: 'checkbox-container' }),
+      setTooltip() {
+        return this
+      },
       setValue(value) {
         this.value = value
         return this
@@ -1255,6 +1283,17 @@ const fakeObsidian = {
     String(value).replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '') || '/',
   // TextPromptModal 会 extends Modal，因此桩里必须存在这两个类（否则类定义阶段就会抛错）
   Modal: class FakeModal {
+    /**
+     * 最近一次 `open()` 的对话框（按类名索引）。
+     *
+     * 为什么要有它：有些对话框的控件是**裸 DOM**（不是 `Setting`），
+     * 于是 `FakeSetting.created` 那条路子看不到它们 —— 而"对话框里到底建了什么"
+     * 恰恰是要断言的（选择筛选器的子句行就是这种情况）。
+     * 用 `FakeModal.last.get('SelectionFilterModal')` 取那一份，比给对话框加测试专用后门干净。
+     */
+    static last = new Map()
+    /** 最近一次 `open()` 的对话框（不分类型）—— 免得断言依赖被压缩后的类名 */
+    static lastAny = null
     constructor(app) {
       this.app = app
       /**
@@ -1270,6 +1309,8 @@ const fakeObsidian = {
      * 桩里不调的话，面板的正文根本不会被构建 —— 于是"面板里的内容"这类断言全部测不到东西。
      */
     open() {
+      FakeModal.last.set(this.constructor.name, this)
+      FakeModal.lastAny = this
       this.onOpen?.()
     }
     close() {
@@ -1677,7 +1718,11 @@ const settleEvents = () => new Promise((resolve) => setTimeout(resolve, 25))
 const registeredViewCreators = new Map()
 
 /** 构造并派发一个指针事件（模拟真实的按下—拖动—抬手） */
-function firePointer(element, type, { clientX = 0, clientY = 0, button = 0, pointerId = 1, target = null } = {}) {
+function firePointer(
+  element,
+  type,
+  { clientX = 0, clientY = 0, button = 0, pointerId = 1, target = null, shiftKey = false, altKey = false } = {},
+) {
   let prevented = false
   let stopped = false
   const event = {
@@ -1686,6 +1731,10 @@ function firePointer(element, type, { clientX = 0, clientY = 0, button = 0, poin
     clientY,
     button,
     pointerId,
+    // 修饰键要真的带上：选择模式的「Shift 加选 / Alt 取消单格」全靠它，
+    // 桩里不给就会变成"断言永远落在默认分支上"（空转）
+    shiftKey,
+    altKey,
     target: target ?? element,
     preventDefault() {
       prevented = true
@@ -2554,10 +2603,30 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   check('覆盖层始终保持 pointer-events: none（不做命中测试）', overlayContainer.style.pointerEvents !== 'auto', String(overlayContainer.style.pointerEvents))
   check('指针监听挂在视图容器上（捕获阶段）', host._listeners.get('pointerdown')?.size === 1, String(host._listeners.get('pointerdown')?.size))
 
-  // 选择模式下左键必须原样放行（原生框选不受影响）
+  // 选择模式下**左键归插件**（施工文件 §C.1 那张表：左键拖动 = 框选 / 笔迹选择）。
+  // 这条以前断言的是"左键原样放行"——那是旧口径（那时选择模式只有"点一下选中对象"）。
+  // 现在 §C.1 明确要求插件消费左键，硬纪律改成了"永不接管右键 / 中键 / 滚轮 / 空格拖动"。
   const idlePoint = canvas._clientFor({ x: 0, y: 0 })
   const idleDown = firePointer(host, 'pointerdown', { clientX: idlePoint.x, clientY: idlePoint.y, target: wrapper })
-  check('选择模式下左键不被拦截', idleDown.stopped === false && idleDown.prevented === false)
+  check('选择模式下左键被消费（拖动 = 框选）', idleDown.stopped === true && idleDown.prevented === true)
+  // 中键必须原样放行（原生平移）
+  const idleMiddle = firePointer(host, 'pointerdown', {
+    clientX: idlePoint.x,
+    clientY: idlePoint.y,
+    button: 1,
+    target: wrapper,
+  })
+  check('选择模式下中键不被接管（原生平移）', idleMiddle.stopped === false && idleMiddle.prevented === false)
+  // 右键没命中形状时必须照常弹出菜单
+  const idleRight = firePointer(host, 'pointerdown', {
+    clientX: idlePoint.x,
+    clientY: idlePoint.y,
+    button: 2,
+    target: wrapper,
+  })
+  check('选择模式下右键不被接管（原生菜单）', idleRight.stopped === false && idleRight.prevented === false)
+  // 把这次单击收尾，别让手势状态带到下一段
+  firePointer(host, 'pointerup', { clientX: idlePoint.x, clientY: idlePoint.y, target: wrapper })
 
   // 进入绘制模式（用命令路径）
   const toggleMode = plugin.commands.find((c) => c.id === 'toggle-edit-mode')
@@ -5329,16 +5398,18 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   // 所以只想看"全部显示"那句话，就得连它们一起打开 —— 隐藏清单里会如实写着它们。
   await plugin.setLayerVisible('temperature', true)
   await plugin.setLayerVisible('depth', true)
+  await plugin.setLayerVisible('biome', true)
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check('全部显示时状态命令这么说', layerCapture.text().includes('图层：全部显示'), layerCapture.text().slice(0, 200))
   await plugin.setLayerVisible('temperature', false)
   await plugin.setLayerVisible('depth', false)
+  await plugin.setLayerVisible('biome', false)
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check(
     '数据层默认关着这件事在状态命令里可查（"地图怎么没有颜色"有一个可读答案）',
-    layerCapture.text().includes('已隐藏 温度 / 深度'),
+    layerCapture.text().includes('已隐藏 温度 / 深度 / 生物群系'),
     layerCapture.text().slice(0, 200),
   )
   layerCapture.restore()
@@ -5609,22 +5680,22 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
   check('面板已打开', panel !== undefined)
   const toggleEls = () => collectByClass(panel.contentEl, 'fc-layer-toggle')
   const toggleFor = (key) => toggleEls().find((element) => element.dataset.layer === key)
-  check('面板里有八个图层开关（六层 + 温度、深度两条数据层）', toggleEls().length === 8, String(toggleEls().length))
+  check('面板里有九个图层开关（六层 + 温度、深度、生物群系三条数据层）', toggleEls().length === 9, String(toggleEls().length))
   const panelLayerOrder = toggleEls().map((element) => element.dataset.layer).join(',')
   check(
-    '八个开关的 key 与图层登记表一致（表驱动，顺序就是表里的行序）',
-    panelLayerOrder === 'terrain,temperature,depth,grid,regions,paths,markers,labels',
+    '九个开关的 key 与图层登记表一致（表驱动，顺序就是表里的行序）',
+    panelLayerOrder === 'terrain,temperature,depth,biome,grid,regions,paths,markers,labels',
     panelLayerOrder,
   )
   check(
     '开关显示的是中文层名',
     collectByClass(panel.contentEl, 'fc-layer-toggle-label').map((el) => el.textContent).join(',') ===
-      '地形,温度,深度,网格,区域,路径,标记,名称',
+      '地形,温度,深度,生物群系,网格,区域,路径,标记,名称',
     collectByClass(panel.contentEl, 'fc-layer-toggle-label').map((el) => el.textContent).join(','),
   )
-  const dataLayerKeys = ['temperature', 'depth']
+  const dataLayerKeys = ['temperature', 'depth', 'biome']
   check(
-    '除数据层外默认都是"开"（温度 / 深度出厂是关的：新功能不该改变现有画面）',
+    '除数据层外默认都是"开"（三条数据层出厂是关的：新功能不该改变现有画面）',
     toggleEls()
       .filter((element) => !dataLayerKeys.includes(element.dataset.layer))
       .every((element) => element.classList.contains('is-active')) &&
@@ -5720,7 +5791,7 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
     JSON.stringify(layers.listStatus().map((status) => status.attached)),
   )
   check('工具条确实随地图层一起消失了', collectByClass(wrapper, 'fc-toolbar').length === 0)
-  check('而面板还在（所以关掉之后仍有入口 —— 这正是把按钮从工具条拿掉的前提）', collectByClass(panel.contentEl, 'fc-layer-toggle').length === 8)
+  check('而面板还在（所以关掉之后仍有入口 —— 这正是把按钮从工具条拿掉的前提）', collectByClass(panel.contentEl, 'fc-layer-toggle').length === 9)
 
   fireEvent(layerButton(), 'click')
   await new Promise((resolve) => setTimeout(resolve, 80))
@@ -10824,6 +10895,845 @@ console.log('\n场景 46：每格默认值 —— 兜底只影响渲染、真值
   frame()
   check('清空后那格又回到不画', stats().lastOverlayDrawn === 2, String(stats().lastOverlayDrawn))
 
+  plugin.onunload()
+}
+
+// ================================================== 场景 47：等值线数字的颜色 / 字号 / 重复（ISSUES-001）
+console.log('\n场景 47：等值线数字 —— 描边与字色相反、字号比格心读数小、沿线按间隔重复')
+{
+  // 用户报的三条（原话）："等高线数字没弄好，还是黑色的，很大不跟着线走。" + 追加要求"每隔多少距离重复一次数字"。
+  // 复诊结论：看到的是**等值线标签**（压在线上、线在数字处断开），旋转其实生效；
+  // 真正要修的是**颜色口径**（描边写死白色）+ **字号**（与格心读数同大）+ **取点**（每层只有 3 个）。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const document_ = layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const pxOf = (textItem) => Number((/([\d.]+)px/.exec(String(textItem.font)) ?? [])[1] ?? Number.NaN)
+
+  // 一条跨度很大的温度带：从极寒（纯蓝，暗）到温热（绿/橙，亮）——
+  // 两端都要有数字，才能同时验"深底白字配深边"与"浅底深字配浅边"。
+  // 铺 4 行是**故意的**：连续场的数据范围由样本包围盒决定，只铺一行时等值线只有两三格长，
+  // "沿线重复"根本没地方放第二个数字（场景 45 踩过同一个坑）。
+  for (let q = 0; q < 6; q += 1) {
+    for (let r = 0; r < 4; r += 1) document_.terrain[`${q}_${r}`] = { t: 'plains', temp: -50 + q * 18 }
+  }
+
+  // ---- ① 字号：等值线数字必须**小于**格心读数（同一条数据、同一个视口下比）----
+  await plugin.setLayerVisible('temperature', true)
+  await plugin.setOverlayStyle('temperature', { showValues: true })
+  await tick(20)
+  const cellFrame = frame()
+  const cellPx = pxOf(cellFrame.texts.find((item) => item.kind === 'fill') ?? { font: '' })
+  // 间距取 10：色带两端都落在层级上（-30 = 纯蓝 → 白字；40 附近 → 深字），
+  // 这样"深底白字配深边 / 浅底深字配浅边"两种情况都能在同一帧里出现
+  await plugin.setOverlayStyle('temperature', { mode: 'field', contourInterval: 10 })
+  await tick(20)
+  const fieldFrame = frame()
+  const contourPx = pxOf(fieldFrame.texts.find((item) => item.kind === 'fill') ?? { font: '' })
+  check(
+    '等值线数字比格心读数小一档（0.35 / 0.5 = 0.7 倍）',
+    Number.isFinite(cellPx) && Number.isFinite(contourPx) && contourPx < cellPx * 0.95,
+    `格心 ${cellPx}px vs 等值线 ${contourPx}px`,
+  )
+  check('前提：这一帧确实有等值线数字', stats().lastOverlayLabels > 0, String(stats().lastOverlayLabels))
+
+  // ---- ② 描边与字色相反：桩记得下 strokeStyle 才断言得了（旧桩只记 fillStyle，这条永远看不到东西）----
+  const pairs = []
+  for (let index = 0; index < fieldFrame.texts.length; index += 1) {
+    const stroke = fieldFrame.texts[index]
+    const fill = fieldFrame.texts[index + 1]
+    if (stroke?.kind === 'stroke' && fill?.kind === 'fill' && stroke.text === fill.text) {
+      pairs.push({ text: stroke.text, halo: stroke.strokeStyle, color: fill.fillStyle })
+    }
+  }
+  check('每一处等值线数字都是"先描边、后填字"（顺序错了会盖住字）', pairs.length > 0, String(pairs.length))
+  check(
+    '描边颜色与字色**相反**（白字配深边 / 深字配浅边）',
+    pairs.every((pair) => pair.halo !== pair.color && ['#ffffff', '#111827'].includes(pair.halo)),
+    JSON.stringify(pairs.slice(0, 6)),
+  )
+  check(
+    '深色底上的数字是白字 + 深边（旧口径写死白边 ⇒ 白字配白边等于没描边）',
+    pairs.some((pair) => pair.color === '#ffffff' && pair.halo === '#111827'),
+    JSON.stringify(pairs.slice(0, 6)),
+  )
+
+  // ---- ③ 旋转：斜的线上数字跟着斜（水平段为 0 属正常）----
+  check(
+    '等值线数字带着该处的切线角（不是一律水平）',
+    fieldFrame.texts.some((item) => item.kind === 'fill' && item.angle !== 0),
+    JSON.stringify(fieldFrame.texts.map((item) => item.angle).slice(0, 8)),
+  )
+
+  // ---- ④ 重复间隔：调小 ⇒ 数字当场变密，并且**采样缓存重算**（间隔进键）----
+  const beforeDense = stats().lastOverlayLabels
+  const buildsBefore = stats().lastOverlayFieldBuilds
+  await plugin.setOverlayStyle('temperature', { contourLabelSpacing: 1.5 })
+  await tick(20)
+  const denseFrame = frame()
+  check(
+    '把「重复间隔」调小之后数字变多（沿等值线重复）',
+    stats().lastOverlayLabels > beforeDense,
+    `${beforeDense} → ${stats().lastOverlayLabels}`,
+  )
+  check(
+    '重复间隔进缓存键（调完当场重算，不是等下次数据变化）',
+    stats().lastOverlayFieldBuilds === buildsBefore + 1,
+    `${buildsBefore} → ${stats().lastOverlayFieldBuilds}`,
+  )
+  check('密起来之后每一层仍有上限（不爆炸）', stats().lastOverlayLabels <= 12 * 4, String(stats().lastOverlayLabels))
+  const denseCounts = denseFrame.texts.filter((item) => item.kind === 'fill').map((item) => item.text)
+  check('变密后同一个读数在线上重复出现', new Set(denseCounts).size < denseCounts.length, JSON.stringify(denseCounts))
+
+  // ---- ⑤ 断线仍然是"真的断开"（多切点之后也不能漏）----
+  const feeds = denseFrame.groups.filter((group) => group.points.length >= 2)
+  check('多切点之后折线段数 > 数字数（N 个数字切出 N+1 段）', feeds.length > denseFrame.texts.filter((i) => i.kind === 'fill').length, `${feeds.length}`)
+
+  plugin.onunload()
+}
+
+// ================================================== 场景 48：选择系统（施工文件 §C）
+console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取消 / 笔迹框选 / 连通扩展 / 规则筛选器')
+{
+  // 这一层最容易悄悄变的是**语义**而不是崩溃：Alt 变成"集合取补"、Shift 把原选择冲掉、
+  // 框选把空白区也算进来。所以断言直接看"选中了哪些格"，而不是"看起来有没有高亮"。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const wrapper = canvas.wrapperEl
+  const toolbarEl = wrapper.children.find((child) => child.className === 'fc-toolbar')
+  const editor = layers.getEditor(canvasPath)
+  const document_ = layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const selected = () => [...editor.getCellSelection()]
+  const frame = () => {
+    canvas.markViewportChanged()
+    flushFrames()
+  }
+  const press = (element) => element.dispatchEvent({ type: 'click' })
+
+  // 一片 4×3 的森林 + 两格水（水既"挡路"，也证明扩展不会顺手把别的地形收进来）
+  for (let q = 0; q < 4; q += 1) for (let r = 0; r < 3; r += 1) document_.terrain[`${q}_${r}`] = { t: 'forest' }
+  document_.terrain['4_0'] = { t: 'water' }
+  document_.terrain['0_3'] = { t: 'water' }
+
+  const origin = canvas._clientFor({ x: 0, y: 0 }) // 世界原点 = 格 0_0
+  const farA = canvas._clientFor({ x: -4000, y: -4000 }) // 覆盖整张图的左上角
+  const farB = canvas._clientFor({ x: 4000, y: 4000 }) // 右下角
+  let pointerSeq = 20
+  const down = (at, modifiers = {}) => {
+    pointerSeq += 1
+    firePointer(host, 'pointerdown', { clientX: at.x, clientY: at.y, target: wrapper, pointerId: pointerSeq, ...modifiers })
+    return pointerSeq
+  }
+  const move = (at, pointerId, modifiers = {}) =>
+    firePointer(host, 'pointermove', { clientX: at.x, clientY: at.y, target: wrapper, pointerId, ...modifiers })
+  const up = (at, pointerId) => firePointer(host, 'pointerup', { clientX: at.x, clientY: at.y, target: wrapper, pointerId })
+  const drag = (from, to, modifiers = {}) => {
+    const id = down(from, modifiers)
+    move(to, id, modifiers)
+    up(to, id)
+  }
+
+  const cardEl = () => collectByClass(wrapper, 'fc-selection-card')[0]
+  const statusEl = () => collectByClass(toolbarEl, 'fc-toolbar-status')[0]
+  const cardRows = () => {
+    const map = new Map()
+    for (const row of collectByClass(cardEl(), 'fc-selection-card-row')) {
+      map.set(row.children[0]?.textContent, row.children[1]?.textContent)
+    }
+    return map
+  }
+  /** 按前缀找一行（字段的显示名里带单位，写死全名会让断言跟着文案一起漂） */
+  const rowStartingWith = (prefix) => {
+    for (const [label, value] of cardRows()) if (String(label).startsWith(prefix)) return value
+    return undefined
+  }
+
+  // ---- ① 矩形框选（替换）----
+  drag(farA, farB)
+  check('框选整张图：14 格全选中（12 森林 + 2 水；只收地图里已有的格）', selected().length === 14, String(selected().length))
+  frame()
+  check('格选择真的画出来了（有可读的统计）', stats().lastCellHighlight === 14, String(stats().lastCellHighlight))
+
+  // ---- ①b 右上角信息卡（§C.4）与左上角状态条（§F.3）----
+  check('有选择时信息卡显示出来', cardEl() !== undefined && cardEl().classList.contains('is-empty') === false)
+  check('卡片标题是总格数', collectByClass(cardEl(), 'fc-selection-card-title')[0]?.textContent === '已选 14 格', collectByClass(cardEl(), 'fc-selection-card-title')[0]?.textContent)
+  check(
+    '卡片的"地形种类"把 ID 翻成显示名并带个数（森林 12 · 水域 2）',
+    /森林 12/.test(cardRows().get('地形种类') ?? '') && /水域 2/.test(cardRows().get('地形种类') ?? ''),
+    String(cardRows().get('地形种类')),
+  )
+  check('卡片给出坐标范围', /^q 0–4 · r 0–3$/.test(cardRows().get('坐标范围') ?? ''), String(cardRows().get('坐标范围')))
+  check(
+    '卡片说明"有几格没有数据"（这一片全部没有温度）',
+    /14 格/.test(cardRows().get('温度 缺数据') ?? ''),
+    String(cardRows().get('温度 缺数据')),
+  )
+  check(
+    '状态条写清"当前是哪种框选、选了多少格"',
+    statusEl()?.textContent === '选择：矩形框选 · 14 格',
+    String(statusEl()?.textContent),
+  )
+
+  // ---- ①c 整批编辑（§C.5）：一次提交 = 一条历史、不预填共同值 ----
+  plugin.ribbonIcons[0].callback()
+  await tick(30)
+  const panel = app.workspace.getLeavesOfType('fictional-cartographer-panel')[0]?.view
+  const batchGroup = () => collectByClass(panel.contentEl, 'fc-panel-batch')[0]
+  const batchTitle = () => collectByClass(batchGroup(), 'fc-panel-group-title')[0]?.textContent ?? ''
+  const batchInput = (key) =>
+    collectByClass(panel.contentEl, 'fc-selection-input').find(
+      (el) => el.dataset?.fcRole === 'batch-input' && el.dataset?.fcField === key,
+    )
+  const batchClear = (key) =>
+    collectByClass(panel.contentEl, 'fc-selection-button').find(
+      (el) => el.dataset?.fcRole === 'batch-clear' && el.dataset?.fcField === key,
+    )
+  const tempOf = () => Object.values(document_.terrain).filter((cell) => cell.temp === 25).length
+  const anyTemp = () => Object.values(document_.terrain).some((cell) => cell.temp !== undefined)
+
+  check('多选时侧栏换成「整批编辑（14 格）」', batchTitle() === '整批编辑（14 格）', batchTitle())
+  check(
+    '每个字段一行、输入框**初始留空**（不预填共同值）',
+    batchInput('temp') !== undefined && batchInput('temp').value === '',
+    String(batchInput('temp')?.value),
+  )
+  check(
+    '说明里点出"这批里有 14 格没有数据"（不猜共同值）',
+    collectByClass(panel.contentEl, 'fc-selection-hintline').some((el) => /这批里有 14 格没有数据/.test(el.textContent ?? '')),
+    JSON.stringify(collectByClass(panel.contentEl, 'fc-selection-hintline').map((el) => el.textContent)),
+  )
+
+  batchInput('temp').value = '25'
+  batchInput('temp').dispatchEvent({ type: 'keydown', key: 'Enter', preventDefault() {} })
+  await tick(20)
+  check('整批写入：14 格都拿到温度 25', tempOf() === 14, String(tempOf()))
+  check('一次提交 = 一条历史（Ctrl+Z 一次全部回退）', editor.getStatus().undo === 1, String(editor.getStatus().undo))
+
+  batchClear('temp').dispatchEvent({ type: 'click' })
+  await tick(20)
+  check('「清除该值」把字段整个删掉（不是写一个 0 进去）', anyTemp() === false)
+  check('清除也是一条历史', editor.getStatus().undo === 2, String(editor.getStatus().undo))
+
+  editor.undo()
+  check('撤销一次回到"整批写入之后"（14 格仍是 25）', tempOf() === 14, String(tempOf()))
+  editor.undo()
+  check('再撤销一次回到"完全没有温度"', anyTemp() === false)
+
+  // ---- ② Alt + 单击 = 只取消这一格 ----
+  {
+    const id = down(origin, { altKey: true })
+    up(origin, id)
+  }
+  check(
+    'Alt + 单击 = 只取消这一格（不是集合取补）',
+    selected().length === 13 && selected().includes('0_0') === false,
+    JSON.stringify(selected()),
+  )
+
+  // ---- ③ Shift + 拖动 = 并入选择 ----
+  drag(farA, farB, { shiftKey: true })
+  check('Shift + 拖动 = 并入选择（原有 13 格一个都不掉）', selected().length === 14, String(selected().length))
+
+  // ---- ④ Alt + 拖动 = 移出一片 ----
+  drag(farA, farB, { altKey: true })
+  check('Alt + 拖动 = 从选择里移出这一片', selected().length === 0, String(selected().length))
+
+  // ---- ⑤ 笔迹框选：切换模式走**工具条上的真实按钮** ----
+  const brushSelectButton = collectByClass(toolbarEl, 'fc-toolbar-select-brush')[0]
+  check('选择模式那一组在工具条上（矩形 / 笔迹框选）', brushSelectButton !== undefined)
+  press(brushSelectButton)
+  check('点「笔迹框选」切换了选择子模式', editor.getStatus().selectionMode === 'brush', editor.getStatus().selectionMode)
+
+  const nearB = canvas._clientFor({ x: 60, y: 0 })
+  drag(origin, nearB)
+  check(
+    '笔迹框选：笔迹扫过的格被选中（世界原点 0_0 起、60 世界单位处是 1_0）',
+    selected().length >= 1 && selected().includes('0_0'),
+    JSON.stringify(selected()),
+  )
+
+  // ---- ⑥ 连通扩展：同地形六邻域，水挡住去路 ----
+  const expandButton = collectByClass(toolbarEl, 'fc-toolbar-select-expand')[0]
+  press(expandButton)
+  check(
+    '连通扩展：从种子扩到整片森林（12 格），两格水不进选择',
+    selected().length === 12 && selected().includes('4_0') === false && selected().includes('0_3') === false,
+    JSON.stringify(selected()),
+  )
+
+  // ---- ⑦ 规则筛选器：真实对话框（命令入口），子句行由**规则表**派生 ----
+  const before = selected().length
+  runCommand(plugin, 'filter-selection')
+  const modal = fakeObsidian.Modal.lastAny
+  const clausesEl = collectByClass(modal?.contentEl, 'fc-filter-clauses')[0]
+  check('命令能打开筛选器对话框', modal !== null && modal !== undefined && clausesEl !== undefined)
+  check(
+    '对话框里一开始没有子句（空规则不匹配任何格，不会把选择清空）',
+    (clausesEl?.children ?? []).length === 1 && selected().length === before,
+    JSON.stringify((clausesEl?.children ?? []).map((child) => child.textContent)),
+  )
+
+  // 「+ 添加子句」是 Setting 按钮（`dataset.fcFilter = 'add'`）
+  const addClauseButton = FakeSetting.created
+    .flatMap((setting) => setting.buttons ?? [])
+    .find((button) => button.buttonEl?.dataset?.fcFilter === 'add')
+  check('「+ 添加子句」按钮存在', addClauseButton !== undefined)
+  await addClauseButton.click()
+  const rows = collectByClass(clausesEl, 'fc-filter-row')
+  check('加了一条子句：规则 / 运算符 / 值三个控件都在', rows.length === 1, String(rows.length))
+  const selectsInRow = (rows[0]?.children ?? []).filter((child) => child.tagName === 'SELECT')
+  check(
+    '子句的控件由**规则表**派生（规则下拉里的选项 = 登记表里的规则，含自动生成的数值规则）',
+    selectsInRow.length === 3 &&
+      selectsInRow[0].children.length >= 3 &&
+      selectsInRow[0].children.map((option) => option.value).includes('temp') &&
+      selectsInRow[0].children.map((option) => option.value).includes('depth'),
+    `${selectsInRow.length} · ${JSON.stringify(selectsInRow[0]?.children?.map((option) => option.value))}`,
+  )
+  // 值控件是**枚举下拉**（地形），候选项带显示名（不能拿 slug 当名字给用户看）
+  check(
+    '枚举规则的值渲染成带显示名的下拉',
+    selectsInRow[2]?.children?.some((option) => option.value === 'forest' && option.textContent === '森林') === true,
+    JSON.stringify(selectsInRow[2]?.children?.map((option) => `${option.value}:${option.textContent}`)),
+  )
+
+  const echo = collectByClass(modal?.contentEl, 'fc-filter-echo')[0]
+  // 默认那一行是"地形 = 第一个地形"；把它改成森林（真实用户的操作路径）
+  selectsInRow[2].value = 'forest'
+  selectsInRow[2].dispatchEvent({ type: 'change' })
+  check(
+    '人话回显把 ID 翻成了显示名（"地形 = 森林"，不是 "地形 = forest"）',
+    /地形 = 森林/.test(echo?.textContent ?? ''),
+    String(echo?.textContent),
+  )
+
+  // 按"地形 = 森林"**替换**选择：与连通扩展的结果应当一致（12 格森林）
+  const applyReplace = collectByClass(modal?.contentEl, 'fc-filter-action').find(
+    (button) => button.dataset.fcFilter === 'apply-replace',
+  )
+  press(applyReplace)
+  check(
+    '「替换选择」按规则选出 12 格森林',
+    selected().length === 12 && selected().includes('0_0') && selected().includes('3_2'),
+    JSON.stringify(selected()),
+  )
+
+  // 「在当前选择内筛」= 同一条规则 ∩ 当前选择：结果仍是那 12 格森林
+  // （"当前选择内"依赖选择本身 → 它是**动作**而不是规则，见 §C.2 末尾那条分工）
+  const applyInside = collectByClass(modal?.contentEl, 'fc-filter-action').find(
+    (button) => button.dataset.fcFilter === 'apply-inside',
+  )
+  press(applyInside)
+  check('「在当前选择内筛」（地形 = 森林 ∩ 当前选择）结果仍是 12 格', selected().length === 12, String(selected().length))
+
+  check(
+    '筛选器**不改地图数据、不进撤销栈**（选择只是"在看哪些格"）',
+    editor.getStatus().undo === 0,
+    String(editor.getStatus().undo),
+  )
+
+  // ---- ⑧ 单选的详情形态：坐标 / 地形显示名 / 没有的字段写"未填" ----
+  editor.setCellSelection(['0_0'])
+  check('单选时卡片换成那一格的详情', cardRows().get('坐标') === '(0, 0)', String(cardRows().get('坐标')))
+  check('详情里的地形是显示名', cardRows().get('地形') === '森林', String(cardRows().get('地形')))
+  check(
+    '没有的字段写"未填"，不猜 0（0 ℃ / 海平面都是合法读数）',
+    rowStartingWith('温度') === '未填' && cardRows().get('生物群系') === '未填',
+    `${String(rowStartingWith('温度'))} / ${String(cardRows().get('生物群系'))}`,
+  )
+
+  // ---- ⑨ Esc 先清空选择：卡片整张收起、状态条回到"空闲" ----
+  editor.clearAllSelection()
+  check('一键清空后选择为空', selected().length === 0 && editor.getSelection() === null)
+  check('没有选择时整张卡片收起（不是显示一张空的）', cardEl().classList.contains('is-empty') === true)
+  check('状态条回到"空闲"', statusEl()?.textContent === '空闲', String(statusEl()?.textContent))
+
+  console.log('  （场景 48 结束）')
+  plugin.onunload()
+}
+
+console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷（§E）—— 逐格纯色 / 设为 ID / ＋−×÷')
+{
+  // §D 与 §E 的共同点：**语义**比崩溃更容易悄悄变（分类值被插值成渐变、"没量过"被当成 0、
+  // 换一层之后笔上还带着上一层的数）。所以断言直接看「格上写了什么」与「画布上什么颜色」，
+  // 而不是"有没有崩"。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const wrapper = canvas.wrapperEl
+  const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
+  const toolbarEl = wrapper.children.find((child) => child.className === 'fc-toolbar')
+  const editor = layers.getEditor(canvasPath)
+  const document_ = layers.getDocument(canvasPath)
+  const stats = () => layers.listStatus()[0].stats
+  const frame = () => {
+    ctx.resetCalls()
+    canvas.markViewportChanged()
+    flushFrames()
+    return ctx
+  }
+  const press = (element) => fireEvent(element, 'click')
+  /** 格心世界坐标（用**网格换算**，不写死像素：写死的数会随 grid.size 漂走） */
+  const worldOf = (q, r) => axialToWorld(document_.grid, q, r)
+
+  // 真实指针：绘制模式下按下即起笔、抬手即收笔 —— §E 的"一笔 = 一条历史"靠它验证
+  let pointerSeq = 80
+  const strokeThrough = (from, to) => {
+    const a = canvas._clientFor(from)
+    const b = canvas._clientFor(to)
+    pointerSeq += 1
+    firePointer(host, 'pointerdown', { clientX: a.x, clientY: a.y, target: wrapper, pointerId: pointerSeq })
+    firePointer(host, 'pointermove', { clientX: b.x, clientY: b.y, target: wrapper, pointerId: pointerSeq })
+    firePointer(host, 'pointerup', { clientX: b.x, clientY: b.y, target: wrapper, pointerId: pointerSeq })
+  }
+  const strokeAt = (world) => strokeThrough(world, world)
+
+  // 工具条上的**真实控件**（§E 的三条硬口径都长在这里，所以断言必须经过它们）
+  const brushFieldSelect = collectByClass(toolbarEl, 'fc-toolbar-brushfield-select')[0]
+  const brushValueInput = collectByClass(toolbarEl, 'fc-toolbar-brushvalue')[0]
+  const brushBiomeSelect = collectByClass(toolbarEl, 'fc-toolbar-brushbiome-select')[0]
+  const brushOpButton = (op) => collectByClass(toolbarEl, 'fc-toolbar-brushop').find((el) => el.dataset.fcBrushOp === op)
+  const brushOpGroupEl = () => brushOpButton('+')?.parentNode
+  const statusEl = collectByClass(toolbarEl, 'fc-toolbar-status')[0]
+  const chooseField = (value) => {
+    brushFieldSelect.value = value
+    fireEvent(brushFieldSelect, 'change')
+  }
+  /** 用户按回车 / 点开别处 = 确认这个数 */
+  const commitValue = (text) => {
+    brushValueInput.value = text
+    fireEvent(brushValueInput, 'change')
+  }
+  const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
+  const legendRows = (kind) => collectByClass(legendEl(), 'fc-legend-row').filter((row) => row.dataset.kind === kind)
+  const rowOf = (row) => ({
+    label: collectByClass(row, 'fc-legend-label')[0]?.textContent ?? '',
+    count: collectByClass(row, 'fc-legend-count')[0]?.textContent ?? '',
+    color: collectByClass(row, 'fc-legend-swatch')[0]?.style.backgroundColor ?? '',
+  })
+  const overlayFills = (frameCtx) => frameCtx.fills.filter((fill) => fill.alpha > 0 && fill.alpha < 1)
+
+  // 两格有地形：0_0 是笔刷的落点，1_0 刻意**一直不填值**（验证 ×/÷ 会跳过它）
+  document_.terrain[cellKey(0, 0)] = { t: 'forest' }
+  document_.terrain[cellKey(1, 0)] = { t: 'plains' }
+
+  // ---- ① 图层登记表：生物群系是一层，出厂默认关 ----
+  check(
+    '生物群系在图层设置里、出厂默认关（新功能不该改变用户现有画面）',
+    plugin.getSettings().layers.biome === false,
+    String(plugin.getSettings().layers.biome),
+  )
+
+  // ---- ② 笔刷那一节的"层"下拉由**字段表**派生 ----
+  press(collectByClass(toolbarEl, 'fc-toolbar-mode')[0])
+  check('点工具条上的模式按钮真的进了绘制模式', editor.getStatus().mode === 'paint', editor.getStatus().mode)
+  check(
+    '层下拉 = 地形 + 字段表里每一层（加一层只加一行，不手抄选项）',
+    brushFieldSelect.children.map((option) => option.value).join(',') === ',temperature,depth,biome',
+    brushFieldSelect.children.map((option) => option.value).join(','),
+  )
+
+  // ---- ③ 数值档：留空不生效 + 状态条说清原因（§E 第 2 条）----
+  chooseField('temperature')
+  check('切到温度层后数值框是**空的**（不预填）', brushValueInput.value === '', brushValueInput.value)
+  check('数值字段才显示 ＋−×÷ 那组', brushOpGroupEl()?.style.display === '', String(brushOpGroupEl()?.style.display))
+  check('群系下拉在温度层下藏起来', brushBiomeSelect.style.display === 'none', brushBiomeSelect.style.display)
+  check(
+    '状态条说清"为什么刷不动"（不是让用户猜）',
+    statusEl.textContent === '编辑：数据层笔刷 · 请先填一个数值',
+    statusEl.textContent,
+  )
+  strokeAt(worldOf(0, 0))
+  check(
+    '留空时一笔都不落（**不是**画成 0 —— 0 ℃ 是合法读数）',
+    document_.terrain[cellKey(0, 0)]?.temp === undefined && editor.getStatus().undo === 0,
+    JSON.stringify(document_.terrain[cellKey(0, 0)]),
+  )
+
+  // ---- ④ 只键入还没回车：值不生效，而且**打字不会被冲掉** ----
+  brushValueInput.focus()
+  brushValueInput.value = '12'
+  fireEvent(brushValueInput, 'input')
+  check('键入把笔刷打回"未确认"（值不生效）', editor.getStatus().brushValueConfirmed === false)
+  check(
+    '刷新不会把用户正打的字冲掉（输入框有焦点时不改它的文字）',
+    brushValueInput.value === '12',
+    brushValueInput.value,
+  )
+  brushValueInput.blur()
+  strokeAt(worldOf(0, 0))
+  check('没确认时也不落笔', document_.terrain[cellKey(0, 0)]?.temp === undefined)
+
+  // ---- ⑤ 回车确认 → 生效；一笔 = 一条历史 ----
+  commitValue('12')
+  check('确认后状态条写清"刷哪一层、怎么刷"', statusEl.textContent === '编辑：温度笔刷 · ＝12', statusEl.textContent)
+  strokeAt(worldOf(0, 0))
+  check('刷上了 12', document_.terrain[cellKey(0, 0)]?.temp === 12, JSON.stringify(document_.terrain[cellKey(0, 0)]))
+  check('一笔 = 一条历史（Ctrl+Z 一次回到笔画前）', editor.getStatus().undo === 1, String(editor.getStatus().undo))
+
+  // ---- ⑥ 换算法 → 打回未确认：数字保留，但笔要再"确认"一次（§E 第 3 条）----
+  press(brushOpButton('+'))
+  check('换算法后数值**保留**（不用重打）', brushValueInput.value === '12', brushValueInput.value)
+  check(
+    '但笔刷被标成"未确认"，状态条提示回车',
+    /按回车确认这个数值后笔刷才生效/.test(statusEl.textContent ?? ''),
+    statusEl.textContent,
+  )
+  strokeAt(worldOf(0, 0))
+  check('未确认时这一笔不生效（12 还是 12）', document_.terrain[cellKey(0, 0)]?.temp === 12)
+  commitValue('12')
+  check('回车确认后状态条变成 ＋', statusEl.textContent === '编辑：温度笔刷 · +12', statusEl.textContent)
+  strokeAt(worldOf(0, 0))
+  check('12 + 12 = 24', document_.terrain[cellKey(0, 0)]?.temp === 24, JSON.stringify(document_.terrain[cellKey(0, 0)]))
+
+  // ---- ⑥b 换**层**（不是换算法）同样打回未确认 —— 这才是最容易出事故的那一种：
+  //          温度层上还留着"刚给深度填的数"，不确认就刷会把温度整片刷错 ----
+  chooseField('depth')
+  check(
+    '换层后数字保留、但打回未确认（状态条提示回车）',
+    brushValueInput.value === '12' && /按回车确认这个数值后笔刷才生效/.test(statusEl.textContent ?? ''),
+    `${brushValueInput.value} / ${statusEl.textContent}`,
+  )
+  strokeAt(worldOf(0, 0))
+  check(
+    '换层后没确认时一笔都不落（温度也没被顺手改掉）',
+    document_.terrain[cellKey(0, 0)]?.depth === undefined && document_.terrain[cellKey(0, 0)]?.temp === 24,
+    JSON.stringify(document_.terrain[cellKey(0, 0)]),
+  )
+  chooseField('temperature')
+  commitValue('12')
+
+  // ---- ⑦ ×/÷：无值格**跳过**（不是当成 0）、÷0 整笔拒绝 ----
+  press(brushOpButton('×'))
+  commitValue('2')
+  strokeThrough(worldOf(0, 0), worldOf(1, 0))
+  check('有值的格乘 2（24 → 48）', document_.terrain[cellKey(0, 0)]?.temp === 48, String(document_.terrain[cellKey(0, 0)]?.temp))
+  check(
+    '无值的格**跳过**（不是拿 0 去乘 —— 那会凭空造出一个读数）',
+    document_.terrain[cellKey(1, 0)]?.temp === undefined,
+    JSON.stringify(document_.terrain[cellKey(1, 0)]),
+  )
+
+  press(brushOpButton('÷'))
+  commitValue('0')
+  const undoBefore = editor.getStatus().undo
+  check('÷0 在整笔上就被拦下（状态条说明原因）', /不能除以 0/.test(statusEl.textContent ?? ''), statusEl.textContent)
+  strokeAt(worldOf(0, 0))
+  check(
+    '÷0 不生效，也不会写出 Infinity',
+    document_.terrain[cellKey(0, 0)]?.temp === 48 && editor.getStatus().undo === undoBefore,
+    `${String(document_.terrain[cellKey(0, 0)]?.temp)} / undo=${editor.getStatus().undo}`,
+  )
+  editor.undo()
+  check('撤销一笔回到"乘 2 之前"（48 → 24）', document_.terrain[cellKey(0, 0)]?.temp === 24)
+
+  // ---- ⑧ 生物群系笔刷：设为某个 ID，且不动别的键 ----
+  chooseField('biome')
+  check('分类字段没有 ＋−×÷（整组藏起来）', brushOpGroupEl()?.style.display === 'none')
+  check('分类字段没有"数值"框', brushValueInput.style.display === 'none')
+  check('分类字段才显示群系下拉', brushBiomeSelect.style.display === '')
+  check(
+    '没选群系就刷不动，状态条说明',
+    statusEl.textContent === '编辑：数据层笔刷 · 请先选一个生物群系',
+    statusEl.textContent,
+  )
+  strokeAt(worldOf(0, 0))
+  check('未选群系时一笔都不落', document_.terrain[cellKey(0, 0)]?.biome === undefined)
+
+  const biomeOptions = brushBiomeSelect.children
+  check(
+    '群系下拉的选项由**现读的目录**给出（内置 34 条 + 一个占位项）',
+    biomeOptions.length === 35 && biomeOptions[1]?.value !== '',
+    String(biomeOptions.length),
+  )
+  check(
+    '选项显示的是中文名、值是稳定 ID（用户看到"沙漠"，文件里写 desert）',
+    biomeOptions.some((option) => option.value === 'desert' && option.textContent === '沙漠'),
+    JSON.stringify(biomeOptions.filter((option) => ['ice-cap', 'desert'].includes(option.value)).map((o) => `${o.value}:${o.textContent}`)),
+  )
+
+  brushBiomeSelect.value = 'desert'
+  fireEvent(brushBiomeSelect, 'change')
+  check('选完群系，状态条报出它的显示名', statusEl.textContent === '编辑：生物群系笔刷 · 沙漠', statusEl.textContent)
+  strokeAt(worldOf(0, 0))
+  check('刷上了沙漠', document_.terrain[cellKey(0, 0)]?.biome === 'desert', JSON.stringify(document_.terrain[cellKey(0, 0)]))
+  check('一格多值：刷生物群系**不碰温度**（24 还在）', document_.terrain[cellKey(0, 0)]?.temp === 24)
+
+  // ---- ⑨ 画布：逐格纯色（不插值、不写数值）----
+  await plugin.setLayerVisible('biome', true)
+  await tick(20)
+  const biomeFrame = frame()
+  check('生物群系层进了绘制序列', stats().lastDrawOrder.includes('biome'), stats().lastDrawOrder.join(','))
+  check('只画有群系的那一格（没填的格不画，而不是画成某个颜色）', stats().lastOverlayDrawn === 1, String(stats().lastOverlayDrawn))
+  check(
+    '颜色取自目录里那一条（沙漠 = #e0c477），按出厂不透明度 0.5 画',
+    biomeFrame.fills.some((fill) => fill.fillStyle === '#e0c477' && Math.abs(fill.alpha - 0.5) < 1e-9),
+    JSON.stringify(overlayFills(biomeFrame).map((fill) => `${fill.fillStyle}@${fill.alpha}`)),
+  )
+  check('分类字段不写数值文字（它的值不是数）', stats().lastOverlayLabels === 0, String(stats().lastOverlayLabels))
+  check('分类字段没有等值线', stats().lastOverlayContours === 0, String(stats().lastOverlayContours))
+
+  // ---- ⑩ 图例：逐个群系一行（不是一条色带）----
+  await plugin.setShowLegend(true)
+  await tick(20)
+  check('图例里没有生物群系的色带条目（分类值之间没有高低）', legendRows('ramp').every((row) => !rowOf(row).label.includes('生物群系')))
+  check(
+    '图例里逐个群系一行：显示名 + 格数 + 目录色',
+    legendRows('biome').length === 1 &&
+      rowOf(legendRows('biome')[0]).label === '沙漠' &&
+      rowOf(legendRows('biome')[0]).count === '1' &&
+      rowOf(legendRows('biome')[0]).color === '#e0c477',
+    JSON.stringify(legendRows('biome').map(rowOf)),
+  )
+
+  // ---- ⑪ 认不出的 ID 也要看得见（§5.11：不能变成空白）----
+  document_.terrain[cellKey(2, 0)] = { t: 'forest', biome: '别处的群系' }
+  layers.setLayers()
+  await tick(20)
+  const unknownRow = legendRows('biome').find((row) => rowOf(row).label === '别处的群系')
+  check('别的库写的 ID 在图例里也有一行，显示名就是 ID 本身', unknownRow !== undefined)
+  check(
+    '它的颜色是中性灰（一眼看出"这里没有本机定义"，而不是被误读成某个群系）',
+    rowOf(unknownRow).color === '#8b8f96',
+    rowOf(unknownRow).color,
+  )
+  const unknownFrame = frame()
+  check(
+    '画布上也照画中性灰',
+    unknownFrame.fills.some((fill) => fill.fillStyle === '#8b8f96'),
+    JSON.stringify(overlayFills(unknownFrame).map((fill) => fill.fillStyle)),
+  )
+
+  // ---- ⑫ 设置页：分类字段是"逐条颜色"，不是色带 ----
+  FakeSetting.created.length = 0
+  plugin.settingTabs[0].display()
+  const biomeColorSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').startsWith('沙漠（'))
+  check('设置页里只列**地图上真的出现**的群系（34 条全列会把设置页撑成一面墙）', biomeColorSetting !== undefined)
+  check('这一行认得出是哪个 ID', biomeColorSetting?.text?.inputEl?.dataset?.fcBiomeColor === 'desert')
+  check(
+    '占位文字就是目录色（用户看得见"不改会是什么颜色"）',
+    biomeColorSetting?.text?.placeholder === '#e0c477',
+    String(biomeColorSetting?.text?.placeholder),
+  )
+
+  await biomeColorSetting.text.type('#ff0000')
+  await tick(20)
+  check(
+    '改这一条的颜色 → 只存**改过的那一条**（其余仍走目录）',
+    plugin.getSettings().overlays.biome.categoryColors?.desert === '#ff0000',
+    JSON.stringify(plugin.getSettings().overlays.biome.categoryColors),
+  )
+  check(
+    '图例那一行的色块跟着变（设置与图例同一份来源）',
+    rowOf(legendRows('biome').find((row) => rowOf(row).label === '沙漠')).color === '#ff0000',
+    rowOf(legendRows('biome').find((row) => rowOf(row).label === '沙漠')).color,
+  )
+  await biomeColorSetting.text.type('')
+  await tick(20)
+  check(
+    '清空输入框 = 删掉这条覆盖（键被删，不是写一个空颜色进去）',
+    'desert' in (plugin.getSettings().overlays.biome.categoryColors ?? {}) === false,
+    JSON.stringify(plugin.getSettings().overlays.biome.categoryColors),
+  )
+
+  // ---- ⑬ 信息卡里的显示名与图例同源 ----
+  editor.setCellSelection([cellKey(0, 0)])
+  const cardRows = new Map()
+  for (const row of collectByClass(collectByClass(wrapper, 'fc-selection-card')[0], 'fc-selection-card-row')) {
+    cardRows.set(row.children[0]?.textContent, row.children[1]?.textContent)
+  }
+  check(
+    '信息卡里写的是"沙漠"而不是裸 ID（三处答案同源）',
+    cardRows.get('生物群系') === '沙漠',
+    String(cardRows.get('生物群系')),
+  )
+
+  console.log('  （场景 49 结束）')
+  plugin.onunload()
+}
+
+console.log('\n场景 50：侧栏「显示」三组（§F.1）—— 每个开关只出现一次 + 数据层参数与设置页共用一份渲染')
+{
+  // 这一场的重点不是"有没有画出来"，而是**同一件事只有一个入口**：
+  // 分组来自图层登记表的一列、图例开关只挂在地物组里、数据层参数与设置页是同一份渲染。
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  await settleEvents()
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(80)
+
+  const wrapper = canvas.wrapperEl
+  const document_ = layers.getDocument(canvasPath)
+  // 一格生物群系：数据层那一组只列"地图上真的出现过"的分类
+  document_.terrain[cellKey(0, 0)] = { t: 'forest', biome: 'desert' }
+
+  // 面板这一节创建的 Setting 要能与设置页逐名对比，所以先把账本清空
+  FakeSetting.created.length = 0
+  plugin.ribbonIcons[0].callback()
+  await tick(40)
+  flushFrames()
+  const panel = app.workspace.getLeavesOfType('fictional-cartographer-panel')[0]?.view
+  const groupOf = (name) => collectByClass(panel.contentEl, 'fc-panel-layers').find((el) => el.dataset?.fcDisplayGroup === name)
+  const keysIn = (group) => collectByClass(group, 'fc-layer-toggle').map((el) => el.dataset.layer)
+  const legendToggle = () => collectByClass(panel.contentEl, 'fc-legend-toggle')[0]
+  const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
+
+  // ---- ① 三组：底图 / 地物（分组来自 LAYER_TABLE 的 displayGroup 一列）----
+  check(
+    '「底图」组里是地形 / 温度 / 深度 / 生物群系 / 网格',
+    keysIn(groupOf('base')).join(',') === 'terrain,temperature,depth,biome,grid',
+    keysIn(groupOf('base')).join(','),
+  )
+  check(
+    '「地物」组里是区域 / 路径 / 标记 / 名称',
+    keysIn(groupOf('feature')).join(',') === 'regions,paths,markers,labels',
+    keysIn(groupOf('feature')).join(','),
+  )
+  const allKeys = collectByClass(panel.contentEl, 'fc-layer-toggle').map((el) => el.dataset.layer)
+  check(
+    '九个图层开关一个不多一个不少，而且**每个 key 只出现一次**（同一件事不挂两处）',
+    allKeys.length === 9 && new Set(allKeys).size === 9,
+    allKeys.join(','),
+  )
+
+  // ---- ② 「显示图例」跟着地物组，且它不是图层开关 ----
+  check(
+    '「显示图例」在「地物」组里',
+    collectByClass(groupOf('feature'), 'fc-legend-toggle').length === 1,
+    String(collectByClass(groupOf('feature'), 'fc-legend-toggle').length),
+  )
+  check(
+    '它**不算**图层开关（那条"九个"的断言按 class 数数，混进来就再也发现不了"加了第十层"）',
+    legendToggle()?.classList.contains('fc-layer-toggle') === false,
+  )
+  check('图例出厂关着（它属于"要看的时候才看"）', legendToggle()?.classList.contains('is-active') === false)
+
+  fireEvent(legendToggle(), 'click')
+  await tick(30)
+  flushFrames()
+  check(
+    '点它 → 设置真的开了，画布右下角的图例也真的露出来了',
+    plugin.getSettings().showLegend === true && legendEl()?.style.display !== 'none',
+    `${String(plugin.getSettings().showLegend)} / ${String(legendEl()?.style.display)}`,
+  )
+  check('按钮自己也跟着亮', legendToggle()?.classList.contains('is-active') === true)
+  fireEvent(legendToggle(), 'click')
+  await tick(30)
+  flushFrames()
+  check('再点一次就关回去（同一个入口开、也由它关）', plugin.getSettings().showLegend === false)
+
+  // ---- ③ 「数据层参数」第三组：默认收起、逐字段一节、与设置页共用一份渲染 ----
+  const dataGroup = () => collectByClass(panel.contentEl, 'fc-panel-data')[0]
+  check(
+    '「数据层参数」是默认收起的折叠组（色带逐行编辑，一屏放不下）',
+    dataGroup()?.tagName === 'DETAILS' && dataGroup().open === false,
+    `tag=${String(dataGroup()?.tagName)} open=${String(dataGroup()?.open)}`,
+  )
+  const fieldSections = () =>
+    collectByClass(panel.contentEl, 'fc-panel-data-field').map((el) => el.dataset.fcOverlayField)
+  check(
+    '组里每个数据层字段各一节（由字段表派生：加一层自动多一节）',
+    fieldSections().join(',') === 'temperature,depth,biome',
+    fieldSections().join(','),
+  )
+  check(
+    '说明里点明"开关不在这里"（在底图一组），免得用户在这一组里找开关',
+    (collectByClass(dataGroup(), 'fc-settings-note')[0]?.textContent ?? '').includes('底图'),
+    String(collectByClass(dataGroup(), 'fc-settings-note')[0]?.textContent).slice(0, 80),
+  )
+
+  // 面板这一节创建的 Setting 与设置页**同名**（同一份渲染的证据）
+  const panelSettingNames = FakeSetting.created.map((setting) => setting.info.name ?? '')
+  check(
+    '数值字段那一节是**色带锚点**（温度的最低锚点那一行在）',
+    panelSettingNames.includes('温度色带锚点 1（最低）'),
+    JSON.stringify(panelSettingNames.filter((name) => name.includes('色带锚点')).slice(0, 4)),
+  )
+  check(
+    '分类字段那一节是**逐条颜色**、没有色带锚点（分类值之间没有高低）',
+    FakeSetting.created.some((setting) => setting.text?.inputEl?.dataset?.fcBiomeColor === 'desert') &&
+      panelSettingNames.some((name) => name.includes('生物群系的逐条颜色')) &&
+      panelSettingNames.includes('生物群系色带锚点 1（最低）') === false,
+    JSON.stringify(panelSettingNames.filter((name) => name.includes('生物群系')).slice(0, 4)),
+  )
+
+  // ---- ④ 面板这一组是**能改的**（不是只读的摆设）：改一个锚点值 → 设置真的变 ----
+  FakeSetting.created.length = 0
+  plugin.settingTabs[0].display()
+  const settingsNames = FakeSetting.created.map((setting) => setting.info.name ?? '')
+  check(
+    '同一份渲染：面板与设置页创建出来的控件名**逐字相同**（不是各写一遍）',
+    ['温度色带锚点 1（最低）', '温度层的不透明度', '生物群系的逐条颜色'].every(
+      (name) => panelSettingNames.includes(name) && settingsNames.includes(name),
+    ),
+    JSON.stringify(settingsNames.filter((name) => name.includes('色带锚点')).slice(0, 2)),
+  )
+
+  FakeSetting.created.length = 0
+  panel.render(true)
+  const anchorSetting = FakeSetting.created.find((setting) => setting.info.name === '温度色带锚点 1（最低）')
+  const before = plugin.getSettings().overlays.temperature.ramp.stops[0].value
+  await anchorSetting.text.type(String(before - 5))
+  await tick(20)
+  check(
+    '在侧栏里改色带锚点 → 插件设置真的跟着变（面板不是只读镜像）',
+    plugin.getSettings().overlays.temperature.ramp.stops[0].value === before - 5,
+    `${before} → ${String(plugin.getSettings().overlays.temperature.ramp.stops[0].value)}`,
+  )
+
+  console.log('  （场景 50 结束）')
   plugin.onunload()
 }
 

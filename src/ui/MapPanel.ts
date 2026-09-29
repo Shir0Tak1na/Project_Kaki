@@ -32,8 +32,20 @@ import {
   type LayerKey,
   type LayerVisibility,
 } from '../render/layerVisibility.ts'
+import {
+  OVERLAY_FIELDS,
+  type CategoryOverlayFieldSpec,
+  type FieldId,
+  type OverlayStyle,
+  type OverlayStyles,
+} from '../render/overlayFields.ts'
 import { createCollapsibleGroup } from './collapsible.ts'
 import { QUICK_START_PANEL } from './quickStart.ts'
+import {
+  renderOverlayFieldSection,
+  type CategoryUsageRow,
+  type OverlaySectionHost,
+} from './settingsSections.ts'
 
 export const MAP_PANEL_VIEW_TYPE = 'fictional-cartographer-panel'
 
@@ -132,6 +144,65 @@ export interface MapPanelDeps {
    * 做成单向门就自相矛盾了（用户明确要求"必须可关闭且可逆"）。
    */
   onShowQuickStart: () => void
+  /**
+   * **整批编辑**要显示的数据（§C.5）；`null` = 当前不是多选（这一节整块不出现）。
+   *
+   * 与 `getSelection` 同一思路：面板不认识编辑器与文档，它只拿"要显示什么"。
+   * 选中 ≥ 2 格时返回一份带字段混合状态的清单；恰好 1 格时仍走既有检查器
+   * （那时它就是"一个地块对象"，逐字段编辑已经够用）。
+   */
+  getBatchEdit: () => BatchEditInfo | null
+  /**
+   * 给当前选择的每一格写同一个字段。**传原始文本**：解析与范围检查都在外面做
+   * （与 `onSetSelectionField` 同一条纪律）。空串 = 清除该字段。
+   */
+  onSetCellsField: (field: string, rawValue: string) => void
+  /**
+   * 一键清空选择（对象选中 + 格选择）。
+   *
+   * 选择**不进撤销栈**（§C.3），所以这个动作也没有"撤销"可言 —— 它是"取消看我选的那些"。
+   */
+  onClearSelection: () => void
+  /**
+   * 「显示图例」当前是否打开（来自插件设置）。
+   *
+   * 图例属于**地物**那一组（它列的是"地图上有什么"），与图层开关同一处出现一次 ——
+   * 不再在别处重复挂一个同名开关（§5.12）。
+   */
+  getShowLegend: () => boolean
+  /** 切换图例显示（写设置 + 广播） */
+  onToggleLegend: () => void
+  /**
+   * ---- 数据层参数（§F.1 第三组）----
+   *
+   * 这一组的控件与**设置页**是**同一份渲染**（`settingsSections.ts`）：
+   * 用户的诉求是"不想每次都去设置界面，尽可能利用侧边栏"，而两处各写一遍必然分叉。
+   * 面板因此只提供"读写方式"，不认识设置本身（同 `getLayerVisibility` 的思路）。
+   */
+  getOverlayStyles: () => OverlayStyles
+  onSetOverlayStyle: (field: FieldId, patch: Partial<OverlayStyle>) => void
+  onResetOverlayRamp: (field: FieldId) => void
+  onSetOverlayCategoryColor: (field: FieldId, categoryId: string, color: string) => void
+  /** 当前地图上真的用到过的分类（面板只列这些；由插件层现算） */
+  getCategoryUsage: (spec: CategoryOverlayFieldSpec) => ReadonlyArray<CategoryUsageRow>
+}
+
+/** 整批编辑那一节要显示的一份数据（由插件层从"当前选择 + 文档"现算） */
+export interface BatchEditInfo {
+  /** 选中的格数 */
+  count: number
+  /** 每个可批量写的字段：标签 / 单位 / 这批里混不混（有的有值、有的没有）/ 有几格没数据 */
+  fields: ReadonlyArray<{
+    key: string
+    label: string
+    unit: string
+    /** 这批格里**既有有值的、也有没有值的** → 输入框留空，且提示"不猜共同值" */
+    mixed: boolean
+    /** 有几格没有这个字段的值 */
+    missing: number
+  }>
+  /** 选择里"地图里已经没有了"的格数（撤销 / 重载之后可能出现，§C.3） */
+  missing: number
 }
 
 const GROUP_ORDER: ReadonlyArray<{ group: PanelActionGroup; title: string }> = [
@@ -338,10 +409,38 @@ export class MapPanelView extends ItemView {
       selection === null
         ? 'none'
         : `${selection.kind}:${selection.id}:${selection.name}:${selection.link}:${selection.detail}`
+    const batch = this.deps.getBatchEdit()
+    const batchSignature =
+      batch === null
+        ? 'batch:none'
+        : `batch:${batch.count}:${batch.missing}:${batch.fields.map((field) => `${field.key}/${field.mixed ? 1 : 0}/${field.missing}`).join(',')}`
+    /**
+     * 「显示」那一组（§F.1 三组）也要进签名：
+     * - 数据层的样式（色带锚点 / 分类配色 / 不透明度 / 显示方式 / 单位）**就是控件里的值**，
+     *   不进签名就会出现"在设置页改了色带，面板里还是旧控件"（§5.9 的老毛病）；
+     * - 分类字段还多一样：**地图上出现过哪些群系**决定列哪几行，所以把清单也压进签名。
+     */
+    const overlays = this.deps.getOverlayStyles()
+    const overlaySignature = OVERLAY_FIELDS.map((spec) => {
+      const usage = spec.numeric
+        ? ''
+        : this.deps
+            .getCategoryUsage(spec)
+            .map((row) => `${row.id}/${row.count}`)
+            .join(',')
+      return `${spec.id}:${JSON.stringify(overlays[spec.id])}:${usage}`
+    }).join('|')
     const signature = [
       summary,
       layerSignature,
       selectionSignature,
+      // 整批编辑那一节的内容也要进签名：否则"框选的范围变了"时面板不重绘，
+      // 卡片上写着 14 格而侧栏还写着 12 格（同一类"签名漏了状态就静默不更新"，§5.9）
+      batchSignature,
+      // 「显示图例」的当前状态进签名：否则点了之后签名没变，面板会跳过重绘，
+      // 按钮上的 ●/○ 停在旧状态（同 §5.9）
+      `legend:${this.deps.getShowLegend() ? 1 : 0}`,
+      `overlays:${overlaySignature}`,
       // 引导的可见性也要进签名：否则点了「不再显示」之后签名没变，面板会**跳过重绘**，
       // 清单看起来"点了没反应"（同 §5.9 那条"签名漏了状态就会静默不更新"）。
       quickStartVisible ? 'qs:1' : 'qs:0',
@@ -363,9 +462,9 @@ export class MapPanelView extends ItemView {
 
     this.renderQuickStart(root, quickStartVisible)
 
-    this.renderSelection(root, selection)
+    this.renderSelection(root, selection, batch)
 
-    this.renderLayers(root, visibility)
+    this.renderDisplay(root, visibility)
 
     for (const { group, title } of GROUP_ORDER) {
       const items = rows.filter((row) => row.action.group === group)
@@ -619,7 +718,93 @@ export class MapPanelView extends ItemView {
     })
   }
 
-  private renderSelection(root: HTMLElement, selection: SelectionInfo | null): void {
+  /**
+   * 「整批编辑」那一节（§C.5）。
+   *
+   * 只在**选中 ≥ 2 格**时出现（`getBatchEdit()` 返回 null 就不渲染）：
+   * 恰好一格时它就是一个普通的地块对象，既有的检查器逐字段编辑已经够用，
+   * 再摆一份"整批"只会让人以为会有两种写法。
+   *
+   * 两条口径直接写在界面上：
+   * - **跨越"有值 / 无值"混合时输入框留空**并写明"这批里有 N 格没有数据" —— **不猜共同值**
+   *   （猜一个"大家可能都是它"的值，会让用户按一下回车就把一半的格改成错的数据）；
+   * - 每行旁边有「清除该值」：`null` 与 0 是两件事（0 ℃ / 海平面都是合法读数）。
+   */
+  private renderBatchEdit(root: HTMLElement, info: BatchEditInfo): void {
+    const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-batch' })
+    block.dataset.fcBatch = 'group'
+    block.createEl('div', { cls: 'fc-panel-group-title', text: `整批编辑（${info.count} 格）` })
+
+    if (info.missing > 0) {
+      // 生命周期那条（§C.3）：撤销 / 重载之后选择里可能留着地图里已经没有的格
+      block.createEl('div', {
+        cls: 'fc-selection-hintline',
+        text: `其中 ${info.missing} 格已不存在（不会被改动）`,
+      })
+    }
+
+    for (const field of info.fields) {
+      const row = block.createEl('div', { cls: 'fc-selection-row' })
+      row.dataset.fcBatchField = field.key
+      const input = row.createEl('input', { cls: 'fc-selection-input' })
+      input.type = 'text'
+      input.dataset.fcRole = 'batch-input'
+      input.dataset.fcField = field.key
+      // **留空**（不预填共同值）：混合状态与"全都没有值"都不该猜
+      input.value = ''
+      input.placeholder = `${field.label}（留空 = 不改）`
+      const commit = (): void => {
+        const raw = input.value.trim()
+        if (raw.length === 0) return
+        this.lastSignature = null
+        this.deps.onSetCellsField(field.key, raw)
+        input.value = ''
+        this.requestRender()
+      }
+      input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        commit()
+      })
+      input.addEventListener('blur', commit)
+
+      const clear = row.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
+      clear.dataset.fcRole = 'batch-clear'
+      clear.dataset.fcField = field.key
+      clear.setText('清除该值')
+      clear.addEventListener('click', () => {
+        this.lastSignature = null
+        this.deps.onSetCellsField(field.key, '')
+        this.requestRender()
+      })
+
+      if (field.missing > 0) {
+        block.createEl('div', {
+          cls: 'fc-selection-hintline',
+          text: field.mixed
+            ? `${field.label}：这批里有 ${field.missing} 格没有数据（留空 = 不猜共同值）`
+            : `${field.label}：这批里有 ${field.missing} 格没有数据`,
+        })
+      }
+    }
+
+    const buttons = block.createEl('div', { cls: 'fc-selection-buttons' })
+    const clearSelection = buttons.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
+    clearSelection.dataset.fcRole = 'clear-cell-selection'
+    clearSelection.setText('清空选择')
+    clearSelection.title = '取消"我在看这些格"（选择不进撤销栈）'
+    clearSelection.addEventListener('click', () => {
+      this.lastSignature = null
+      this.deps.onClearSelection()
+      this.requestRender()
+    })
+  }
+
+  private renderSelection(root: HTMLElement, selection: SelectionInfo | null, batch: BatchEditInfo | null): void {
+    if (batch !== null) {
+      this.renderBatchEdit(root, batch)
+      return
+    }
     const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-selection' })
     block.createEl('div', { cls: 'fc-panel-group-title', text: '选中的对象' })
 
@@ -664,7 +849,28 @@ export class MapPanelView extends ItemView {
   }
 
   /**
-   * 图层开关（数量与名字都来自图层登记表）。
+   * 侧栏「显示」：**三组，每个开关只出现一次**（施工文件 §F.1）。
+   *
+   * ```
+   * 显示
+   * ├─ 底图    地形 · 网格 + 数据层（温度 / 深度 / 生物群系）   ← 这片地方长什么样
+   * ├─ 地物    区域 · 路径 · 标记 · 名称  +「显示图例」          ← 这片地方上有什么
+   * └─ 数据层  每个字段：色带（或分类配色）· 越界色 · 不透明度 · 显示方式 · 展示单位 · 恢复色带
+   * ```
+   *
+   * 两条纪律：
+   * - **分组来自图层登记表的一列**（`displayGroup`），不在这里按 id 硬编码 ——
+   *   加一层仍然只加一行；
+   * - **顺序 = 表里的行序**，所以九个开关的先后与登记表完全一致（有断言钉着）。
+   */
+  private renderDisplay(root: HTMLElement, visibility: LayerVisibility): void {
+    this.renderLayerGroup(root, visibility, 'base', '底图')
+    this.renderLayerGroup(root, visibility, 'feature', '地物')
+    this.renderDataParams(root)
+  }
+
+  /**
+   * 一组的图层开关（数量与名字都来自图层登记表）。
    *
    * 放在**最上面**、状态行下面：用户是"边看画布边切层"，而侧边栏很窄、
    * 动作列表可能比一屏还长 —— 放在中间或末尾就意味着每次切层都要先滚动。
@@ -672,10 +878,17 @@ export class MapPanelView extends ItemView {
    * 这些按钮刻意用**独立的 class**（`fc-layer-toggle`）而不是复用 `fc-panel-button`：
    * 两者语义不同（一个执行动作、一个切换状态），样式与测试选择器都该分得开。
    */
-  private renderLayers(root: HTMLElement, visibility: LayerVisibility): void {
+  private renderLayerGroup(
+    root: HTMLElement,
+    visibility: LayerVisibility,
+    group: 'base' | 'feature',
+    title: string,
+  ): void {
     const list = root.createEl('div', { cls: 'fc-panel-group fc-panel-layers' })
-    list.createEl('div', { cls: 'fc-panel-group-title', text: '图层' })
+    list.dataset.fcDisplayGroup = group
+    list.createEl('div', { cls: 'fc-panel-group-title', text: title })
     for (const spec of LAYER_TABLE) {
+      if (spec.displayGroup !== group) continue
       const visible = isLayerVisible(visibility, spec.id)
       const button = list.createEl('button', { cls: 'fc-layer-toggle' })
       button.dataset.layer = spec.id
@@ -690,6 +903,79 @@ export class MapPanelView extends ItemView {
         this.deps.onToggleLayer(spec.id, !visible)
         this.requestRender()
       })
+    }
+
+    // 「显示图例」跟着**地物**那一组（它列的就是"地图上有什么"）：图例的可见性也是图层设置，
+    // 属于"看不看"这一类；这里出现一次，别处不再重复挂同名开关（§5.12）。
+    if (group !== 'feature') return
+    const showLegend = this.deps.getShowLegend()
+    const legendButton = list.createEl('button', { cls: 'fc-legend-toggle' })
+    legendButton.dataset.fcLegendToggle = '1'
+    if (showLegend) legendButton.addClass('is-active')
+    legendButton.title = `显示图例：在画布右下角列出地图上实际有的地形 / 群系 / 路径 / 区域（点一下${showLegend ? '隐藏' : '显示'}）`
+    legendButton.createEl('span', { cls: 'fc-legend-toggle-mark', text: showLegend ? '●' : '○' })
+    legendButton.createEl('span', { cls: 'fc-legend-toggle-label', text: '显示图例' })
+    legendButton.addEventListener('click', () => {
+      this.lastSignature = null
+      this.deps.onToggleLegend()
+      this.requestRender()
+    })
+  }
+
+  /**
+   * 「数据层」那一组的**参数**（第三组）：每个字段一节，控件与设置页**共用同一份渲染**。
+   *
+   * 默认收起：色带锚点逐行编辑，一屏放不下，而面板首屏该留给"状态 + 开关 + 动作"。
+   * 头部那句说明点明"开关不在这里"（在「底图」一组），免得用户在这一组里找开关。
+   */
+  private renderDataParams(root: HTMLElement): void {
+    const group = createCollapsibleGroup(root, {
+      title: '数据层参数',
+      role: 'panel-data',
+      cls: 'fc-panel-group fc-panel-data',
+      titleCls: 'fc-panel-group-title',
+      open: this.openGroups.has('panel-data'),
+    })
+    this.groupEls.set('panel-data', group)
+    group.dataset.fcPanelData = 'group'
+    group.createEl('div', {
+      cls: 'fc-settings-note',
+      text: '这里只调"怎么画"（色带 / 配色 / 不透明度 / 显示方式）。每一层的**开关**在「底图」一组里。',
+    })
+    for (const spec of OVERLAY_FIELDS) {
+      const section = group.createEl('div', { cls: 'fc-panel-data-field' })
+      section.dataset.fcOverlayField = spec.id
+      section.createEl('div', { cls: 'fc-panel-field-title', text: spec.label })
+      renderOverlayFieldSection(section, spec, this.overlaySectionHost())
+    }
+  }
+
+  /** 数据层控件那一节要的读写入口（**面板版**：改完请求面板重绘） */
+  private overlaySectionHost(): OverlaySectionHost {
+    return {
+      getOverlayStyles: () => this.deps.getOverlayStyles(),
+      setOverlayStyle: (field, patch) => {
+        this.lastSignature = null
+        this.deps.onSetOverlayStyle(field, patch)
+        this.requestRender()
+      },
+      resetOverlayRamp: (field) => {
+        this.lastSignature = null
+        this.deps.onResetOverlayRamp(field)
+        this.requestRender()
+      },
+      setOverlayCategoryColor: (field, categoryId, color) => {
+        this.lastSignature = null
+        this.deps.onSetOverlayCategoryColor(field, categoryId, color)
+        this.requestRender()
+      },
+      getCategoryUsage: (spec) => this.deps.getCategoryUsage(spec),
+      // 面板这一节已经挂在「数据层参数」折叠组下面，再写一个标题就是重复的
+      heading: false,
+      requestRerender: () => {
+        this.lastSignature = null
+        this.requestRender()
+      },
     }
   }
 

@@ -19,6 +19,8 @@ import {
   DEFAULT_OVERLAY_STYLES,
   OVERLAY_FIELDS,
   formatFieldReading,
+  isCategoryField,
+  isNumericField,
   overlayUnitSuffix,
   overlayUnitTitle,
   type OverlayFieldSpec,
@@ -51,7 +53,13 @@ export interface LegendRampInfo {
 }
 
 export interface LegendEntry {
-  kind: 'terrain' | 'path' | 'region' | 'ramp'
+  /**
+   * 条目类型（决定**画成什么样**：`ramp` 是渐变条，其余都是一个色块 + 名字 + 次数）。
+   *
+   * `biome` 与 `terrain` 在画法上同形，但**刻意分开**：它们是两类不同的东西
+   * （"地形"是底图，生物群系是数据层），合成一个 kind 之后就没法只列其中一类。
+   */
+  kind: 'terrain' | 'biome' | 'path' | 'region' | 'ramp'
   /** 图例上显示的短标签（地形名 / 路径类型名 / 区域名 / 数据层名） */
   label: string
   color: string
@@ -78,6 +86,14 @@ export interface LegendDeps {
    * 图例这里只负责把两者都递过去，不替它猜。
    */
   resolveRegion: (color: string, type: string) => { label: string }
+  /**
+   * 生物群系 ID → 样式（内置目录 + 用户自定义；由 `biomeCatalog` 决定）。
+   *
+   * 分类字段的图例条目要**取目录里那一条自己的颜色**（`BIOMES.md` §3 决定三），
+   * 所以这里必须按 ID 解析，而不是从"样式的 categoryColors"里反查
+   * （那里面只有用户改过的几条）。
+   */
+  resolveBiome?: (id: string) => { label: string; color: string }
   /**
    * 数据层（温度 / 深度…）的样式（色带 / 越界两端）。
    *
@@ -167,6 +183,11 @@ export function buildLegendEntries(
    * 越界计数与画布同源（同一个 `colorForValue`）—— 这里绝不另写一套"值比大小"的比较。
    */
   const overlaySection = (spec: OverlayFieldSpec): void => {
+    // 分类字段（生物群系）**不是一条色带**：它的图例是"逐个群系一行"
+    if (!isNumericField(spec)) {
+      biomeSection(spec)
+      return
+    }
     const style = (deps.overlayStyles ?? DEFAULT_OVERLAY_STYLES)[spec.id]
     let count = 0
     let under = 0
@@ -209,6 +230,38 @@ export function buildLegendEntries(
     // 越界两项**只在真的有越界格时**才出现（同"图例只列实际有的东西"的口径）
     if (under > 0 || over > 0) entry.outOfRange = { under, over }
     entries.push(entry)
+  }
+
+  /**
+   * **分类字段**（生物群系）的图例：出现过的群系各一行（色块 + 名字 + 格数）。
+   *
+   * 三条口径与别的段一致：扫地图（只列真有格的那些）、颜色取自**目录里那一条**
+   * （用户逐条改过的优先）、顺序**确定**（按显示名排序 —— 用遍历顺序会让"改一格"就重排）。
+   *
+   * 认不出的 ID 也照列（显示名就是 ID 本身、颜色是中性灰）：图例是用户唯一能核对
+   * "这格到底是什么"的地方，藏掉它等于让人对着灰块猜（§5.11）。
+   */
+  const biomeSection = (spec: OverlayFieldSpec): void => {
+    if (!isCategoryField(spec)) return
+    const style = (deps.overlayStyles ?? DEFAULT_OVERLAY_STYLES)[spec.id]
+    const counts = new Map<string, number>()
+    for (const cell of Object.values(document.terrain)) {
+      const id = spec.readCategory(cell)
+      if (id === undefined) continue
+      counts.set(id, (counts.get(id) ?? 0) + 1)
+    }
+    if (counts.size === 0) return
+    const rows = [...counts.entries()].map(([id, count]) => {
+      const resolved = deps.resolveBiome?.(id) ?? { label: id, color: spec.resolveColor(id, style) }
+      // 逐条配色覆盖优先（与画布同一条：`categoryColors` 只装用户改过的那些）
+      const override = style.categoryColors?.[id]
+      const color = typeof override === 'string' && override.length > 0 ? override : resolved.color
+      return { label: resolved.label, color, count }
+    })
+    rows.sort((a, b) => a.label.localeCompare(b.label, 'zh'))
+    for (const row of rows) {
+      entries.push({ kind: 'biome', label: row.label, color: row.color, count: row.count })
+    }
   }
 
   /**

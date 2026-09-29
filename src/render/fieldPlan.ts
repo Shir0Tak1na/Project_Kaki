@@ -19,7 +19,7 @@
  */
 
 import { axialToWorld, hexCorners, type GridSpec } from '../core/hex.ts'
-import { colorForValue, parseHexColor, textColorOf, type RampSpec } from './colorRamp.ts'
+import { colorForValue, oppositeTextColor, parseHexColor, textColorOf, type RampSpec } from './colorRamp.ts'
 
 /* ------------------------------------------------------------------ 图元 IR */
 
@@ -41,15 +41,29 @@ export type FieldPrimitive =
       y: number
       text: string
       color: string
-      /** 白色描边（压在彩色场与线上时要看得见） */
-      halo?: boolean
+      /**
+       * **描边色**（缺省 = 不描边）。
+       *
+       * 为什么是颜色而不是 `halo: boolean`：描边**必须与字色相反**（白字配深边 / 深字配浅边），
+       * 否则"黑字 + 白边"压在浅色场上等于看不见（用户实测报的"还是黑色的"）。
+       * 画布 `strokeText` 打底、SVG 用 `paint-order="stroke"`，两边都照着这个颜色描。
+       */
+      haloColor?: string
       /**
        * 旋转角（**弧度**，绕 `(x, y)`；缺省 0 = 水平）。
        *
-       * 等值线的数值按工程图的惯例**沿着线走**（见 `cutPolyline`）——
+       * 等值线的数值按工程图的惯例**沿着线走**（见 `cutPolylineAt`）——
        * 于是断线位置、角度、文字宽度三件事必须一起算，也就只能在这里算。
        */
       rotation?: number
+      /**
+       * 字号（**世界单位**；缺省 = 由后端按图层默认比例算）。
+       *
+       * 为什么字号要进 IR：它同时决定"沿线挖多长一段"（几何）与"画多大"（渲染）——
+       * 两边各算一次必然分叉（挖的缝比字窄，数字就压到线上）。等值线标签用它取
+       * `CONTOUR_LABEL_SCALE`（比格心读数小一档），格心读数不写这一项、走老口径。
+       */
+      size?: number
     }
   | {
       /**
@@ -132,6 +146,14 @@ export interface FieldPlanInput {
    * 两边各算一次必然分叉（挖的缝比字窄，数字就会压到线上）。缺省取 `格半径 × 0.5`（同值，给直接调用的测试用）。
    */
   labelSize?: number
+  /**
+   * 数字之间的**重复间隔**（世界单位；缺省 = 格半径 × `DEFAULT_CONTOUR_LABEL_SPACING_FACTOR`）。
+   *
+   * 用户追加要求："还要考虑每隔多少距离重复一次数字。" —— 它是**世界距离**，
+   * 于是"把间隔调小"在任何缩放下都是同样的地图距离，不会"放大以后才变密"。
+   * 实际间距还会被"文字宽度 × 6"抬起来（见 `contourLabelPositions`）：间隔给得再小也不会挤成一团。
+   */
+  labelSpacing?: number
   /** `field` 模式：采样间距（世界单位）；缺省取六边形外接圆半径 */
   sampleStep?: number
   /** `field` 模式：插值影响半径（世界单位）；缺省 `step × 3` */
@@ -178,20 +200,42 @@ export const DEFAULT_MAX_CONTOURS = 12
 /** 等值线线宽（世界单位） */
 const CONTOUR_WIDTH = 1.5
 /**
- * **每一层等值线最多标几个数字**。
+ * 等值线数字的**字号比例**（相对格半径，世界单位）。
  *
- * 工程图上一条长等值线会标好几处，但"每层十几条线全标"会糊成一片；
- * 取 3 是"看得见、又不吵"的折中（按线长取前几名，短的本来就被"4×文字宽度"那条门槛挡掉了）。
+ * 用户实测："很大" —— 旧口径沿用格心读数的 0.5 倍格半径，压在线上太抢眼。
+ * 0.35 是"读得清、又不比格心读数大"的一档（施工文件 §A.4 / ISSUES-001 的建议值）。
+ * 它同时是**挖缝宽度**的来源，所以只能有一个来源：`overlayPlan` 从这里取、传进几何。
  */
-const MAX_CONTOUR_LABELS_PER_LEVEL = 3
+export const CONTOUR_LABEL_SCALE = 0.35
 /**
- * 一条等值线要**多长**才配标数字：`长度 ≥ 文字宽度 × 这个系数`。
+ * **每一层**最多标几个数字（防糊）。
  *
- * 取 4 的理由是"挖掉文字宽度之后还剩得下一条线" —— 缝宽 = 文字宽度，两侧各留
- * 1.5 倍文字宽度的实线，看得出这是"一条被数字打断的等值线"；取 2 时两侧只剩半个字宽，
- * 看着就是两截碎片（设计草案 §A.5 定的口径）。
+ * 旧口径是 3（每层只标最长的三条、各一个），用户追加要求"每隔多少距离重复一次"之后
+ * 3 显然不够（一条长线自己就要好几个）；12 是"层内够用、又不至于铺满"的一档。
+ * 超限时**沿线均匀抽样**（见 `sampleEvenly`），不是"只留最长的几条"。
  */
-const CONTOUR_LABEL_LENGTH_FACTOR = 4
+export const MAX_CONTOUR_LABELS_PER_LEVEL = 12
+/** **全局**（所有层合计）最多标几个数字 —— 巨大地图上不让数字总量爆炸 */
+export const MAX_CONTOUR_LABELS_TOTAL = 200
+/**
+ * 数字之间的**最小间距**（= 文字宽度 × 这个系数）：保证数字永远不挤在一起。
+ * 用户可调的"重复间隔"只在这个下限之上起作用（见 `contourLabelPositions`）。
+ */
+const CONTOUR_LABEL_MIN_SPACING_FACTOR = 6
+/**
+ * 一条等值线**两端各留的边**（= 文字宽度 × 这个系数）：数字不贴端头。
+ *
+ * 于是"整条线短于 文字宽度 × 4"（= 两端留边之和）时一个数字都放不下 ——
+ * 这与"挖掉文字宽度之后还剩得下实线"是同一条门槛（施工文件 §A.5 的验收式）。
+ */
+const CONTOUR_LABEL_MARGIN_FACTOR = 2
+/**
+ * 出厂**重复间隔**（= 格半径 × 这个系数，世界单位）。
+ *
+ * 取 6：一个数字占 6 个格半径的距离 ≈ 等距反复读到读数，又不会密到糊。
+ * 设置项以"格"为单位（用户看到的就是 6），改小立刻变密。
+ */
+export const DEFAULT_CONTOUR_LABEL_SPACING_FACTOR = 6
 /** 判定两个插值端点是否同一个点时的容差（浮点安全网；同一格边算出来的点本来就是同一个） */
 const JOIN_EPSILON = 1e-6
 
@@ -619,31 +663,28 @@ function keepUpright(angle: number): number {
   return value
 }
 
-export interface PolylineCut {
-  /** 数字要落的位置（弧长中点） */
+export interface ContourCut {
+  /** 数字要落的位置 */
   position: [number, number]
   /** 该处的切线角（已收进 ±90°） */
   angle: number
-  /** 挖缝之前的那一段（可能不足两个点 → 调用方丢弃） */
-  before: Array<[number, number]>
-  /** 挖缝之后的那一段 */
-  after: Array<[number, number]>
 }
 
-/**
- * 在折线上**沿弧长挖掉 `gap` 宽的一段**，给数字让位（工程图的画法）。
- *
- * 为什么几何必须在这里算（而不是让渲染层"先画线再拿文字盖住"）：
- * 用背景色盖是**假断线** —— 数字底下压着的还是那条线，换个背景色/导出成 SVG 就露馅；
- * 而且文字宽度只有这里知道（字号是外部给的），断点位置与文字位置必须一起算。
- *
- * `gap <= 0` 时行为退化成"只取中点与切线"（不挖缝）。
- * 折线太短、缝把整条线吃掉（任一侧退化成零长度的点）时返回 `null`，调用方**不标**
- * （半截线比不标更难看，而"一个点"根本不是线段）。
- */
-export function cutPolyline(points: readonly [number, number][], gap: number): PolylineCut | null {
-  if (points.length < 2) return null
-  const segments: Array<{ from: [number, number]; to: [number, number]; length: number; start: number }> = []
+export interface PolylineCutResult {
+  /** 挖完缝之后的**各段**折线（N 个数字 ⇒ N+1 段；每段都是真的线段） */
+  segments: Array<Array<[number, number]>>
+  /** 每个数字的位置与角度（与传入的 `positions` 一一对应） */
+  cuts: ContourCut[]
+}
+
+/** 折线的弧长表：每段的方向、长度与起点弧长（挖缝与取切线角共用这一份） */
+interface ArcTable {
+  segments: Array<{ from: [number, number]; to: [number, number]; length: number; start: number }>
+  total: number
+}
+
+function arcTable(points: readonly [number, number][]): ArcTable {
+  const segments: ArcTable['segments'] = []
   let total = 0
   for (let index = 1; index < points.length; index += 1) {
     const from = points[index - 1]!
@@ -652,70 +693,180 @@ export function cutPolyline(points: readonly [number, number][], gap: number): P
     segments.push({ from, to, length, start: total })
     total += length
   }
-  if (!(total > 0)) return null
+  return { segments, total }
+}
 
-  const half = Math.max(0, gap) / 2
-  const middle = total / 2
-  const cutStart = Math.max(0, middle - half)
-  const cutEnd = Math.min(total, middle + half)
-
-  const at = (distance: number): [number, number] => {
-    for (const segment of segments) {
-      if (distance <= segment.start + segment.length + JOIN_EPSILON || segment === segments[segments.length - 1]) {
-        const ratio = segment.length === 0 ? 0 : (distance - segment.start) / segment.length
-        const clamped = Math.max(0, Math.min(1, ratio))
-        return [
-          segment.from[0] + (segment.to[0] - segment.from[0]) * clamped,
-          segment.from[1] + (segment.to[1] - segment.from[1]) * clamped,
-        ]
-      }
+/** 弧长 → 点（超出末端时取末点） */
+function pointAt(table: ArcTable, distance: number, last: [number, number]): [number, number] {
+  for (const segment of table.segments) {
+    if (distance <= segment.start + segment.length + JOIN_EPSILON || segment === table.segments[table.segments.length - 1]) {
+      const ratio = segment.length === 0 ? 0 : (distance - segment.start) / segment.length
+      const clamped = Math.max(0, Math.min(1, ratio))
+      return [
+        segment.from[0] + (segment.to[0] - segment.from[0]) * clamped,
+        segment.from[1] + (segment.to[1] - segment.from[1]) * clamped,
+      ]
     }
-    return points[points.length - 1]!
   }
+  return last
+}
 
-  const before: Array<[number, number]> = []
-  const after: Array<[number, number]> = []
-  // 逐点归入前后两段（按**这一点自己的弧长位置**判断，而不是比坐标 —— 折线可能自交）。
-  // 判据必须是"这个顶点在不在缝里"：早先写成"上一个顶点在缝外就收下"，
-  // 顶点间距大于缝宽时会把缝**另一侧**的顶点也收进前段，于是线段从缝上折回去、把数字压在线上。
+/** 弧长 → 该处的切线角（已收进 ±90°；工程图的数字不许倒着看） */
+function angleAt(table: ArcTable, distance: number): number {
+  for (const segment of table.segments) {
+    if (distance >= segment.start && distance <= segment.start + segment.length) {
+      return keepUpright(Math.atan2(segment.to[1] - segment.from[1], segment.to[0] - segment.from[0]))
+    }
+  }
+  const last = table.segments[table.segments.length - 1]
+  return last === undefined ? 0 : keepUpright(Math.atan2(last.to[1] - last.from[1], last.to[0] - last.from[0]))
+}
+
+/**
+ * 取折线上 `[from, to]` 这一段弧长对应的**子折线**（端点是插值出来的，中间顶点原样保留）。
+ *
+ * 判据是"**这个顶点自己的弧长位置**落在区间里"，而不是"上一个顶点在区间外就收下" ——
+ * 后者在顶点间距大于区间长度时会把区间外的顶点也收进来，线段于是折回去、把数字压在线上
+ * （这条真缺陷在 §A 轮写测试时撞到过）。
+ */
+function subPolyline(
+  points: readonly [number, number][],
+  table: ArcTable,
+  from: number,
+  to: number,
+): Array<[number, number]> {
+  const last = points[points.length - 1]!
+  const out: Array<[number, number]> = [pointAt(table, from, last)]
   let walked = 0
-  for (let index = 0; index < points.length; index += 1) {
-    const point = points[index]!
-    if (index > 0) {
-      walked += Math.hypot(point[0] - points[index - 1]![0], point[1] - points[index - 1]![1])
-    }
-    if (walked <= cutStart) before.push(point)
-    else if (walked >= cutEnd) after.push(point)
+  for (let index = 1; index < points.length; index += 1) {
+    walked += Math.hypot(points[index]![0] - points[index - 1]![0], points[index]![1] - points[index - 1]![1])
+    if (walked > from + JOIN_EPSILON && walked < to - JOIN_EPSILON) out.push(points[index]!)
   }
-  if (half > 0) {
-    before.push(at(cutStart))
-    after.unshift(at(cutEnd))
-  }
+  out.push(pointAt(table, to, last))
+  return out
+}
 
-  // 切线角取"中点所在那一段"的方向
-  let angle = 0
-  for (const segment of segments) {
-    if (middle >= segment.start && middle <= segment.start + segment.length) {
-      angle = Math.atan2(segment.to[1] - segment.from[1], segment.to[0] - segment.from[0])
-      break
-    }
-  }
+/**
+ * 在折线上**沿弧长挖掉若干段**（每段宽 `gap`，中心在 `positions` 里），给数字让位（工程图的画法）。
+ *
+ * 为什么几何必须在这里算（而不是让渲染层"先画线再拿文字盖住"）：
+ * 用背景色盖是**假断线** —— 数字底下压着的还是那条线，换个背景色/导出成 SVG 就露馅；
+ * 而且文字宽度只有这里知道（字号是外部给的），断点位置与文字位置必须一起算。
+ *
+ * **一次算完所有切点**（用户追加要求"每隔多少距离重复一次数字"）：
+ * 一条线上 N 个数字要切成 N+1 段，如果只支持单切点就得反复切、段段拼接，
+ * 每接一次都可能接错（本项目已经因为"两处各算一遍几何"吃过多轮亏）。
+ *
+ * `positions` 必须**升序且互不重叠**（调用方按弧长排好），返回的 `cuts` 与它一一对应。
+ * 折线太短 / 没有可切的点 / 有切点会让某一段退化成零长度时返回 `null`，调用方**不标**。
+ */
+export function cutPolylineAt(
+  points: readonly [number, number][],
+  positions: readonly number[],
+  gap: number,
+): PolylineCutResult | null {
+  if (points.length < 2 || positions.length === 0) return null
+  const table = arcTable(points)
+  if (!(table.total > 0)) return null
+  const last = points[points.length - 1]!
+  const half = Math.max(0, gap) / 2
 
-  // 两截都要是**真的线段**：缝把整条线吃掉时两边退化成零长度的点（≥2 个坐标但长度 0），
-  // 那既不是"断成两截"、也没地方写数字 —— 按文档的口径返回 `null`，调用方不标。
-  if (polylineLength(before) <= JOIN_EPSILON || polylineLength(after) <= JOIN_EPSILON) return null
+  // 缝区间（按弧长；夹在 [0, total] 内），相邻两缝之间就是"要留下的段"
+  const windows = positions
+    .map((position) => ({ start: Math.max(0, position - half), end: Math.min(table.total, position + half) }))
+    .sort((a, b) => a.start - b.start)
+  const keep: Array<[number, number]> = []
+  let cursor = 0
+  for (const window of windows) {
+    if (window.start > cursor + JOIN_EPSILON) keep.push([cursor, window.start])
+    cursor = Math.max(cursor, window.end)
+  }
+  if (table.total > cursor + JOIN_EPSILON) keep.push([cursor, table.total])
+  if (keep.length !== positions.length + 1) return null
+
+  const segments = keep.map(([from, to]) => subPolyline(points, table, from, to))
+  // 每一段都必须是真的线段：退化成零长度时整条线不标（半截线比不标更难看）
+  if (segments.some((segment) => polylineLength(segment) <= JOIN_EPSILON)) return null
 
   return {
-    position: at(middle),
-    angle: keepUpright(angle),
-    before,
-    after,
+    segments,
+    cuts: positions.map((position) => ({ position: pointAt(table, position, last), angle: angleAt(table, position) })),
   }
+}
+
+/**
+ * 一条等值线上要放几个数字、分别放在哪（弧长）。
+ *
+ * 口径（施工文件 §A.5 / 用户追加要求）：
+ * - 两端各留 `文字宽度 × 2`（数字不贴端头）；
+ * - 间距 = `max(重复间隔, 文字宽度 × 6)` —— 前者是**世界距离**（地图事实，不随缩放变），
+ *   后者保证数字不会挤在一起；
+ * - 整条线短于 `文字宽度 × 4`（= 两端留边之和）时**一个都不标**。
+ *
+ * 于是"长度 L 的线上数字个数 = floor((L − 4w) / 间距) + 1"，与施工文件里的验收式一致
+ * （间距减半 ⇒ 个数约翻倍）。
+ */
+export function contourLabelPositions(length: number, labelWidth: number, spacing: number): number[] {
+  if (!Number.isFinite(length) || length <= 0) return []
+  const margin = labelWidth * CONTOUR_LABEL_MARGIN_FACTOR
+  const usable = length - margin * 2
+  if (usable < 0) return []
+  const step = Math.max(spacing, labelWidth * CONTOUR_LABEL_MIN_SPACING_FACTOR)
+  if (!(step > 0)) return []
+  const count = Math.floor(usable / step + 1e-9) + 1
+  const out: number[] = []
+  for (let index = 0; index < count; index += 1) out.push(margin + index * step)
+  return out
+}
+
+/**
+ * 均匀抽样：把一个候选列表压到 `limit` 个，**沿列表均匀取**（保留首尾）。
+ *
+ * 为什么不"只留最长的几条"（旧口径）：那会让长线密集、短线全无 ——
+ * 用户要的是"沿等值线每隔一段就有读数"，而不是"只有最长的三条有"。均匀抽样与输入顺序无关，
+ * 所以同一份数据永远得到同一批数字（逐帧不抖、缓存不失效）。
+ */
+function sampleEvenly<T>(items: readonly T[], limit: number): T[] {
+  if (limit <= 0) return []
+  if (items.length <= limit) return [...items]
+  if (limit === 1) return [items[0]!]
+  const out: T[] = []
+  for (let index = 0; index < limit; index += 1) {
+    out.push(items[Math.round((index * (items.length - 1)) / (limit - 1))]!)
+  }
+  return out
 }
 
 /** 文字在世界坐标下的宽度：等宽字体下 = 字数 × 字号 × 0.6（`0.6` 是等宽字形的典型宽高比） */
 function labelWorldWidth(text: string, labelSize: number): number {
   return [...text].length * labelSize * 0.6
+}
+
+/**
+ * 数字的**字色与描边色**：按**数字底下那一块场**的颜色来定，而不是按线色。
+ *
+ * 为什么不能用线色（§A 轮的旧口径，用户实测否掉了）：线的颜色与它**旁边**的场色是两回事 ——
+ * 浅色场上的浅色线（绿 / 橙 / 青）按线色判出"深字"，而描边当时写死白色 ⇒
+ * **深字 + 白边**压在浅色场上，看起来就是"一坨黑"（用户原话："还是黑色的"）。
+ *
+ * 两条新口径（施工文件 §A.4 已同步）：
+ * 1. **字色**与"字底下的场色"对比（取不到场值时退回按线色判，保证边缘不空）；
+ * 2. **描边色与字色相反**（白字配深边 / 深字配浅边）—— 描边的作用是"把字从背景里抠出来"，
+ *    跟字色同色等于没描边。
+ */
+function labelColorsUnder(
+  field: FieldGrid,
+  ramp: RampSpec,
+  position: readonly [number, number],
+  lineColor: string,
+): { color: string; haloColor: string } {
+  const index = Math.round((position[0] - field.originX) / field.step)
+  const row = Math.round((position[1] - field.originY) / field.step)
+  const inside = index >= 0 && index < field.cols && row >= 0 && row < field.rows
+  const value = inside ? fieldValue(field, index, row) : null
+  const under = value === null ? null : colorForValue(value, ramp)
+  const base = under === null ? lineColor : under.color
+  return { color: textColorOf(base), haloColor: oppositeTextColor(base) }
 }
 
 /* ------------------------------------------------------------------ 主入口 */
@@ -742,45 +893,112 @@ export function buildFieldPlan(input: FieldPlanInput): FieldPlan {
       })
     if (field === null) return { primitives: [], field: null }
     const primitives: FieldPrimitive[] = [fieldRaster(field, input.ramp, opacity)]
-    const labelSize = Number.isFinite(input.labelSize) && (input.labelSize ?? 0) > 0 ? input.labelSize! : input.grid.size * 0.5
+    const labelSize =
+      Number.isFinite(input.labelSize) && (input.labelSize ?? 0) > 0
+        ? input.labelSize!
+        : input.grid.size * CONTOUR_LABEL_SCALE
+    const labelSpacing =
+      Number.isFinite(input.labelSpacing) && (input.labelSpacing ?? 0) > 0
+        ? input.labelSpacing!
+        : input.grid.size * DEFAULT_CONTOUR_LABEL_SPACING_FACTOR
+
+    // ① 先把每一层的"线 + 每条线上的切点"算出来（**先不算图元**）。
+    //    为什么要分两趟：全局上限要按"所有层合计"抽稀，得先知道总量。
+    interface PlannedLine {
+      points: Array<[number, number]>
+      /** 这条线上数字的弧长位置（空 = 这条线不标） */
+      positions: number[]
+      color: string
+      text: string
+      gap: number
+    }
+    const levels: Array<{ level: number; lines: PlannedLine[] }> = []
     for (const level of contourLevels(input.ramp, input.contourInterval ?? null, input.maxContours)) {
       const style = colorForValue(level, input.ramp)
       if (style === null) continue
       const text = formatValue(level)
       const gap = labelWorldWidth(text, labelSize)
-      const lines = contourPolylines(field, level).filter((points) => points.length >= 2)
-      // 只给**够长**的线标：挖掉文字宽度后两侧各要留下 ≥1.5 倍文字宽度，线才不会被切成两截碎片
-      // （这是设计草案 §A.5 的口径："长度 ≥ 文字宽度 × 4 的线都标"）
-      const candidates = lines
-        .map((points, index) => ({ points, index, length: polylineLength(points) }))
-        .filter((entry) => entry.length >= gap * CONTOUR_LABEL_LENGTH_FACTOR)
+      // 线序**先定死**（长度降序 → 起点坐标字典序，见 `compareContourCandidates`）：
+      // 抽稀与"先画谁"都跟着它走，于是同一份数据永远得到同一批数字（逐帧不抖、缓存不失效）
+      const lines = contourPolylines(field, level)
+        .filter((points) => points.length >= 2)
+        .map((points, index): ContourCandidate & { points: Array<[number, number]> } => ({
+          points,
+          index,
+          length: polylineLength(points),
+        }))
         .sort(compareContourCandidates)
-        .slice(0, MAX_CONTOUR_LABELS_PER_LEVEL)
-      const cutIndexes = new Map(candidates.map((entry) => [entry.index, entry]))
-      lines.forEach((points, index) => {
-        const candidate = cutIndexes.get(index)
-        if (candidate === undefined) {
-          primitives.push({ kind: 'polyline', points, color: style.color, width: CONTOUR_WIDTH, opacity })
-          return
-        }
-        const cut = cutPolyline(points, gap)
-        if (cut === null) {
-          primitives.push({ kind: 'polyline', points, color: style.color, width: CONTOUR_WIDTH, opacity })
-          return
-        }
-        // 线在数字处**真的断开**（两截）—— 不是"拿背景色盖住"
-        primitives.push({ kind: 'polyline', points: cut.before, color: style.color, width: CONTOUR_WIDTH, opacity })
-        primitives.push({ kind: 'polyline', points: cut.after, color: style.color, width: CONTOUR_WIDTH, opacity })
-        primitives.push({
-          kind: 'text',
-          x: cut.position[0],
-          y: cut.position[1],
+        .map((candidate) => ({
+          points: candidate.points,
+          positions: contourLabelPositions(candidate.length, gap, labelSpacing),
+          color: style.color,
           text,
-          // 对比色：取**这条线自己**的对比色（按亮度选黑/白），线的颜色改了它自动跟着改
-          color: textColorOf(style.color),
-          halo: true,
-          rotation: cut.angle,
-        })
+          gap,
+        }))
+      levels.push({ level, lines })
+    }
+
+    // ② 每层最多 12 个数字：把"线 × 切点"摊平后**沿线均匀抽样**（不是只留最长的几条）
+    interface PlannedLabel {
+      level: number
+      lineIndex: number
+      line: PlannedLine
+      position: number
+    }
+    const perLevel: PlannedLabel[][] = levels.map((entry) =>
+      sampleEvenly(
+        entry.lines.flatMap((line, lineIndex) =>
+          line.positions.map((position) => ({ level: entry.level, lineIndex, line, position })),
+        ),
+        MAX_CONTOUR_LABELS_PER_LEVEL,
+      ),
+    )
+    // ③ 全局上限：所有层合计不超过 200（巨大地图上不让数字总量爆炸）
+    const all = perLevel.flat()
+    const kept = sampleEvenly(all, MAX_CONTOUR_LABELS_TOTAL)
+    const keptByLine = new Map<string, PlannedLabel[]>()
+    for (const label of kept) {
+      const key = `${label.level}:${label.lineIndex}`
+      const list = keptByLine.get(key)
+      if (list === undefined) keptByLine.set(key, [label])
+      else list.push(label)
+    }
+
+    // ④ 按层的顺序把图元画出来（线在数字处**真的断开**，不是"拿背景色盖住"）
+    for (const entry of levels) {
+      entry.lines.forEach((line, lineIndex) => {
+        const labels = (keptByLine.get(`${entry.level}:${lineIndex}`) ?? []).sort((a, b) => a.position - b.position)
+        if (labels.length === 0) {
+          primitives.push({ kind: 'polyline', points: line.points, color: line.color, width: CONTOUR_WIDTH, opacity })
+          return
+        }
+        const cut = cutPolylineAt(
+          line.points,
+          labels.map((label) => label.position),
+          line.gap,
+        )
+        if (cut === null) {
+          // 切不动（线太短 / 缝会吃掉某一段）→ 整条线照画不标，半个数字都不写
+          primitives.push({ kind: 'polyline', points: line.points, color: line.color, width: CONTOUR_WIDTH, opacity })
+          return
+        }
+        for (const segment of cut.segments) {
+          primitives.push({ kind: 'polyline', points: segment, color: line.color, width: CONTOUR_WIDTH, opacity })
+        }
+        for (const piece of cut.cuts) {
+          // 字色按**字底下的场色**取、描边与字色相反（见 `labelColorsUnder`）
+          const colors = labelColorsUnder(field, input.ramp, piece.position, line.color)
+          primitives.push({
+            kind: 'text',
+            x: piece.position[0],
+            y: piece.position[1],
+            text: line.text,
+            color: colors.color,
+            haloColor: colors.haloColor,
+            rotation: piece.angle,
+            size: labelSize,
+          })
+        }
       })
     }
     return { primitives, field }

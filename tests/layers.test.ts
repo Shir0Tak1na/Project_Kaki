@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 图层开关与图例的单元测试。
  *
  * 两条最值钱的断言在这里：
@@ -31,14 +31,15 @@ import type { MapDocument } from '../src/data/mapDocument.ts'
 
 /* ------------------------------------------------------------ 图层开关 */
 
-test('出厂默认：键集合就是 LAYER_KEYS，且数据层（温度 / 深度）默认隐藏', () => {
+test('出厂默认：键集合就是 LAYER_KEYS，且数据层（温度 / 深度 / 生物群系）默认隐藏', () => {
   assert.deepEqual(Object.keys(DEFAULT_LAYER_VISIBILITY).sort(), [...LAYER_KEYS].sort())
-  assert.equal(LAYER_KEYS.length, 8)
+  assert.equal(LAYER_KEYS.length, 9)
   for (const spec of LAYER_TABLE) assert.equal(DEFAULT_LAYER_VISIBILITY[spec.id], spec.defaultVisible, spec.id)
   assert.equal(isLayerVisible(DEFAULT_LAYER_VISIBILITY, 'terrain'), true)
   // 数据层默认关：新功能不该在用户没要求时改变现有画面（设计草案 §4.1）
   assert.equal(DEFAULT_LAYER_VISIBILITY.temperature, false)
   assert.equal(DEFAULT_LAYER_VISIBILITY.depth, false)
+  assert.equal(DEFAULT_LAYER_VISIBILITY.biome, false)
 })
 
 test('归一化：坏输入按"显示"补齐，而不是把地图变成空白', () => {
@@ -71,9 +72,9 @@ test('切换图层返回新对象（不原地改），且值相同时复用原�
 test('隐藏清单：给状态命令一个可读答案', () => {
   const visibility = withLayerVisibility(withLayerVisibility(DEFAULT_LAYER_VISIBILITY, 'paths', false), 'labels', false)
   // 顺序取自表的行序（两条数据层在路径之前）
-  assert.deepEqual(hiddenLayerLabels(visibility), ['温度', '深度', '路径', '名称'])
+  assert.deepEqual(hiddenLayerLabels(visibility), ['温度', '深度', '生物群系', '路径', '名称'])
   // 出厂状态：只有数据层被隐着（它们不是"坏了"，是"还没打开"）
-  assert.deepEqual(hiddenLayerLabels(DEFAULT_LAYER_VISIBILITY), ['温度', '深度'])
+  assert.deepEqual(hiddenLayerLabels(DEFAULT_LAYER_VISIBILITY), ['温度', '深度', '生物群系'])
   assert.equal(allLayersHidden(DEFAULT_LAYER_VISIBILITY), false)
   let all = DEFAULT_LAYER_VISIBILITY
   for (const key of LAYER_KEYS) all = withLayerVisibility(all, key, false)
@@ -86,7 +87,7 @@ test('层描述表：id 唯一、键集合与表一致（加一层 = 加一行�
   const ids = LAYER_TABLE.map((spec) => spec.id)
   assert.equal(new Set(ids).size, ids.length, `id 有重复：${ids.join(',')}`)
   assert.deepEqual([...LAYER_KEYS], ids, 'LAYER_KEYS 必须由表派生（不许另有第二份清单）')
-  assert.equal(LAYER_TABLE.length, 8, '当前八层（温度 / 深度是两份数据层模板，见 §5.45 / §5.48）；加层时这一条要跟着改')
+  assert.equal(LAYER_TABLE.length, 9, '当前九层（温度 / 深度 / 生物群系是三份数据层；分类字段见 §D）；加层时这一条要跟着改')
 })
 
 test('每一行都写清"叫什么 / 管什么 / 关掉会怎样"：三个给人看的字段都不许空', () => {
@@ -104,7 +105,7 @@ test('绘制次序是显式的（自下而上）：钉住整条叠加序列，�
   assert.deepEqual(
     LAYERS_BY_DRAW_ORDER.map((spec) => spec.id),
     // 数据层压在地形之上、网格与矢量对象之下（设计草案 §4.1）
-    ['terrain', 'temperature', 'depth', 'grid', 'regions', 'labels', 'paths', 'markers'],
+    ['terrain', 'temperature', 'depth', 'biome', 'grid', 'regions', 'labels', 'paths', 'markers'],
     '改这张表的 order 等于改画面层次，必须是有意识的一步',
   )
   const orders = LAYER_TABLE.map((spec) => spec.order)
@@ -122,7 +123,7 @@ test('出厂默认与表一一对应，且"是否数据层"的界线写清（表
   assert.deepEqual(displayLayers, ['grid', 'labels'], '网格与名称是纯表现：地图文件里没有它们的实体')
   const dataLayers = LAYER_TABLE.filter((spec) => spec.isDataLayer).map((spec) => spec.id)
   // 数据层 = 地图文件里有对应实体：格上的地形 / 温度 / 深度，文档里的区域 / 路径 / 标记
-  assert.deepEqual(dataLayers, ['terrain', 'temperature', 'depth', 'regions', 'paths', 'markers'])
+  assert.deepEqual(dataLayers, ['terrain', 'temperature', 'depth', 'biome', 'regions', 'paths', 'markers'])
 })
 
 /* ---------------------------------------------------------------- 图例 */

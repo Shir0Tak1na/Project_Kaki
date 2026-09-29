@@ -56,6 +56,13 @@ export interface OverlayDrawContext {
    * 而不是抛异常把整帧带塌。
    */
   createCanvas?: (width: number, height: number) => HTMLCanvasElement | null
+  /**
+   * **分类字段**的"分类 ID → 颜色"（现读目录：内置 + 自定义）。
+   *
+   * 这里只是**转交**给 `buildOverlayPlan`：颜色属于目录（`BIOMES.md` §3 决定三），
+   * 而目录住在插件设置里 —— 本模块不碰设置，规矩与 `createCanvas` 完全相同。
+   */
+  categoryColors?: ReadonlyMap<string, string>
 }
 
 export interface OverlayDrawResult {
@@ -159,6 +166,7 @@ export function drawOverlayLayer(context: OverlayDrawContext): OverlayDrawResult
     style,
     bounds: visible,
     ...(context.fieldCache !== undefined ? { cache: context.fieldCache } : {}),
+    ...(context.categoryColors !== undefined ? { categoryColors: context.categoryColors } : {}),
   })
 
   // 文字状态只在真的要画数值时改一次，循环结束后还原（canvas 状态是全局的，不许留给下一帧）
@@ -183,9 +191,18 @@ export function drawOverlayLayer(context: OverlayDrawContext): OverlayDrawResult
     if (!primitiveIntersects(primitive, visible)) continue
     if (primitive.kind === 'text') {
       const center = context.toRaster(primitive.x, primitive.y)
-      const baseline = labelSize * OVERLAY_LABEL_BASELINE_RATIO
+      // 字号优先取图元自己带的（等值线标签比格心读数小一档）；缺省 = 格心读数那条老口径。
+      // 这一项必须来自 IR：它同时决定"沿线挖多长一段"，两边各算一次必然分叉（缝比字窄）。
+      const size =
+        primitive.size !== undefined && primitive.size > 0
+          ? Math.max(8, primitive.size * layer.deviceScale)
+          : labelSize
+      const baseline = size * OVERLAY_LABEL_BASELINE_RATIO
+      // 同一帧里两种字号并存（格心读数 / 等值线标签），而 `font` 是画布状态 —— 逐条设一次最省心
+      // （值没变时重复赋值不花钱，比"记住上一次设的是哪种"少一个出错的地方）
+      ctx.font = `${size.toFixed(1)}px ${OVERLAY_LABEL_FONT}`
       // 等值线的数字**沿着线走**（工程图画法）：绕落点旋转 `primitive.rotation`。
-      // 角度是在 `fieldPlan.cutPolyline` 里按切线算好的（已收进 ±90°，所以数字不会倒着看）——
+      // 角度是在 `fieldPlan.cutPolylineAt` 里按切线算好的（已收进 ±90°，所以数字不会倒着看）——
       // 这里只负责照着画，几何在那边只有一份。
       const rotation = primitive.rotation ?? 0
       if (rotation !== 0) {
@@ -195,10 +212,11 @@ export function drawOverlayLayer(context: OverlayDrawContext): OverlayDrawResult
       }
       const drawX = rotation !== 0 ? 0 : center.x
       const drawY = rotation !== 0 ? baseline : center.y + baseline
-      // 等值线的数字压在彩色场与线上：先描一圈白边（halo）再写字，否则浅色区域里彻底看不见
-      if (primitive.halo === true) {
-        ctx.lineWidth = Math.max(2, labelSize * 0.3)
-        ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+      // 数字压在彩色场与线上：先描一圈**与字色相反**的边（haloColor）再写字。
+      // 描边色不能写死白色：白字配白边等于没描边（用户实测报过"一坨黑"，§A.4 口径已改）。
+      if (primitive.haloColor !== undefined) {
+        ctx.lineWidth = Math.max(2, size * 0.3)
+        ctx.strokeStyle = primitive.haloColor
         ctx.strokeText(primitive.text, drawX, drawY)
       }
       ctx.fillStyle = primitive.color

@@ -12,9 +12,13 @@
  * 现在的做法：
  * 1. 在**视图容器**（`view.containerEl`，比 `wrapperEl` 和 canvas 元素都高）上，
  *    用**捕获阶段**监听 `pointerdown` —— 捕获阶段自外向内，因此我们的处理先于 Obsidian；
- * 2. 绘制模式下对左键 `stopPropagation()`：原生框选/拖拽一启动就被拦下；
+ * 2. **插件工具激活时**（绘制模式，或选择模式的左键）对左键 `stopPropagation()`：
+ *    原生框选/拖拽一启动就被拦下；
  * 3. 用 `setPointerCapture` 把整条手势交给自己，拖动中的 `pointermove` 稳定到达；
- * 4. 其余按键（中键/右键）**不拦**，原生平移照旧；滚轮也完全不碰。
+ * 4. 其余按键（中键/右键）**不拦**，原生平移照旧；滚轮也完全不碰 ——
+ *    选择模式同样如此（§C.1 硬纪律：插件永不接管右键 / 中键 / 滚轮 / 空格拖动）；
+ * 5. **标记 / 名称元素上的左键放行**（它们排在 `getUiExclusions` 里）：那一层自己有
+ *    打开笔记 / 拖动移动的手势，在捕获阶段吞掉它会让"点标记"彻底失灵。
  *
  * 覆盖层的 `pointer-events` 始终保持 `none`，它只负责画。
  *
@@ -29,6 +33,7 @@ import { Scope, type App } from 'obsidian'
 import { pointerToWorld, readScale, type CanvasHandle } from '../canvas/CanvasAdapter.ts'
 import { TERRAIN_TYPES, type TerrainType } from '../data/mapDocument.ts'
 import { isClickGesture } from '../render/markerPlacement.ts'
+import type { SelectionOperation } from '../render/selectionSet.ts'
 import type { EditorTool, MapEditor } from './MapEditor.ts'
 
 export interface MapInteractionOptions {
@@ -69,6 +74,13 @@ const DOUBLE_CLICK_MS = 350
 const DOUBLE_CLICK_SLOP_PX = 8
 /** 右键命中形状的容差（屏幕像素） */
 const SHAPE_HIT_TOLERANCE_PX = 6
+/**
+ * "按下 → 抬起"移动多少像素才算**拖动**（而不是点击）。
+ *
+ * 用**屏幕像素**而不是世界单位：手指/鼠标的抖动是屏幕上的事，与地图缩放无关。
+ * 拖动才走框选，没超过阈值就走单击（选中对象 / 加选单格）。
+ */
+const DRAG_SLOP_PX = 4
 
 /**
  * Obsidian 画布自带的 UI：它们位于 `wrapperEl` 内（与我们的捕获宿主重叠），
@@ -115,6 +127,17 @@ export class MapInteraction {
   /** 上一次点击（用于双击判定） */
   private lastClickAt: number | null = null
   private lastClickClient: { x: number; y: number } | null = null
+  /**
+   * 选择模式下的左键手势（按下 → 抬起）。
+   *
+   * 与绘制手势一样用 `setPointerCapture` 把整条手势握在手里：拖动中才能稳定收到 `pointermove`
+   * 并连续更新框选范围（否则指针一离开起始格就没有后续事件了）。
+   * `selectDragged` 决定抬手时是"框选"还是"点击"——阈值按**屏幕像素**（见 `DRAG_SLOP_PX`）。
+   */
+  private selectPointerId: number | null = null
+  private selectStartClient: { x: number; y: number } | null = null
+  private selectOperation: SelectionOperation = 'replace'
+  private selectDragged = false
   private disposed = false
 
   constructor(options: MapInteractionOptions) {
@@ -184,40 +207,56 @@ export class MapInteraction {
         return
       }
 
-      // ---- 选择模式：不拦常规点击（原生框选/拖动照常），
-      //      但"双击形状"要接管——它是重命名的入口 ----
+      // ---- 选择模式：**左键归我们**（拖动 = 框选 / 笔迹选择；点击 = 选中对象、加选、取消单格）。
+      //      中键 / 右键 / 滚轮 / 空格拖动一概不碰 —— 那是 Canvas 的平移与菜单手势（§C.1 硬纪律）。
+      //      双击形状仍然接管：它是重命名的入口 ----
       if (editor.mode === 'select') {
         // 只接管左键：中键留给原生平移
         if (event.button !== 0) return
         if (!world) return
         const now = Date.now()
+        /**
+         * 双击判定读的是**上一次"完整的点击"**（在 `finish` 里才记），不是"上一次按下"。
+         *
+         * 为什么必须在抬手时才记：拖动是以 `pointerdown` 开始的，如果按下就记时间，
+         * 那么"刚拖完一片、马上又从同一点拖"会被当成双击 → 走进改名分支，
+         * 这一次拖动**整段丢失**（画面上看起来就是"拖不动了"）。
+         */
         const isDoubleClick =
           this.lastClickAt !== null &&
           now - this.lastClickAt <= DOUBLE_CLICK_MS &&
           this.lastClickClient !== null &&
           Math.hypot(event.clientX - this.lastClickClient.x, event.clientY - this.lastClickClient.y) <= DOUBLE_CLICK_SLOP_PX
-        this.lastClickAt = now
-        this.lastClickClient = { x: event.clientX, y: event.clientY }
-        if (!isDoubleClick) {
-          /**
-           * 单击 = 选中"这一点下面的对象"（命中顺序见 `selection.ts`）。
-           *
-           * 刻意**不** `swallow`：原生的框选 / 平移照常工作。用户抱怨的是
-           * "每个操作都由快捷键包揽"，所以这一层是**新增一个入口**，
-           * 不是把画布原有的能力换掉 —— 一旦拦下，平移画布就会在"起点落在某条路径上"时失灵。
-           */
+        if (isDoubleClick) {
           const scale = readScale(this.options.handle.canvas).scale ?? 1
-          editor.selectAt(world, SHAPE_HIT_TOLERANCE_PX / scale)
+          const hit = editor.hitTestShape(world, SHAPE_HIT_TOLERANCE_PX / scale)
+          if (!hit) return
+          this.lastClickAt = null
+          this.lastClickClient = null
+          swallow(event)
+          this.options.onShapeRenameRequest?.(hit)
           return
         }
 
-        const scale = readScale(this.options.handle.canvas).scale ?? 1
-        const hit = editor.hitTestShape(world, SHAPE_HIT_TOLERANCE_PX / scale)
-        if (!hit) return
-        this.lastClickAt = null
-        this.lastClickClient = null
+        /**
+         * 按下即接管（`swallow` + `setPointerCapture`）。
+         *
+         * 这里与"绘制模式"同一条理由：拖动过程中要靠 `pointermove` 连续更新框选范围，
+         * 而原生画布的框选一旦启动就会把 `pointermove` 吃掉。
+         * **代价是 Obsidian 原生的"左键拉框选卡片"在插件激活时不可用** ——
+         * 这是 §C.1 那张表明确选的（左键拖动 = 框选格），不是遗漏。
+         */
         swallow(event)
-        this.options.onShapeRenameRequest?.(hit)
+        this.selectPointerId = event.pointerId
+        this.selectStartClient = { x: event.clientX, y: event.clientY }
+        this.selectOperation = event.altKey ? 'remove' : event.shiftKey ? 'add' : 'replace'
+        this.selectDragged = false
+        editor.beginCellDrag(world, this.selectOperation)
+        try {
+          host.setPointerCapture(event.pointerId)
+        } catch {
+          // 某些环境下指针已被回收，忽略即可（后续靠 pointerup 兜底）
+        }
         return
       }
 
@@ -269,6 +308,29 @@ export class MapInteraction {
 
     const onPointerMove = (event: PointerEvent): void => {
       const editor = this.options.editor
+
+      // 选择模式：拖动 = 框选（矩形 / 笔迹）。只有"这次手势的指针"才处理，
+      // 别的指针（例如另一个手指、或原生平移）一律不管。
+      // ⚠️ 必须同时确认**还在选择模式**：手势进行中用户可能按了 D 切到绘制模式
+      // （或者指针在手势中途被系统回收），这时残留的手势状态会把绘制手势整段吃掉。
+      if (this.selectPointerId !== null && this.selectPointerId === event.pointerId) {
+        if (editor.mode !== 'select') {
+          this.resetSelectGesture()
+          return
+        }
+        const start = this.selectStartClient
+        if (start === null) return
+        if (!this.selectDragged) {
+          if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < DRAG_SLOP_PX) return
+          this.selectDragged = true
+        }
+        const world = this.worldFromEvent(event)
+        if (!world) return
+        event.preventDefault()
+        editor.updateCellDrag(world)
+        return
+      }
+
       if (editor.mode !== 'paint') return
       if (!insideHost(event)) return
 
@@ -294,9 +356,51 @@ export class MapInteraction {
       this.options.onHover({ x: world.x, y: world.y, radius: editor.getBrushRadius() })
     }
 
-    const finish = (event: PointerEvent): void => {
+    const finish = (event: PointerEvent, cancelled = false): void => {
       const down = this.downClient
       this.downClient = null
+
+      // 选择模式的左键手势收尾
+      if (this.selectPointerId !== null && this.selectPointerId === event.pointerId) {
+        const editor = this.options.editor
+        const dragged = editor.endCellDrag()
+        this.resetSelectGesture()
+        try {
+          host.releasePointerCapture?.(event.pointerId)
+        } catch {
+          // 忽略
+        }
+        // 取消（pointercancel / 焦点丢了）时**不做**单击语义：那会把"误触"变成一次改动。
+        // 模式在手势中途变了（按了 D）时同样不做 —— 单击语义只属于选择模式。
+        //
+        // ⚠️ 拖动结束要**清掉双击基准**：双击的意思是"两次点击"，一次拖动不算。
+        // 不清的话，"点一下 → 拖两下 → 又从同一点按下"会被判成双击，走进改名分支，
+        // 那一次拖动整段丢失（冒烟场景 48 就是被这条卡住的）。
+        if (dragged || cancelled) {
+          this.lastClickAt = null
+          this.lastClickClient = null
+        }
+        if (!cancelled && !dragged && editor.mode === 'select') {
+          const world = this.worldFromEvent(event)
+          if (world) {
+            // 到这里才算"一次完整的点击"：双击判定的时间基准就在这里更新
+            this.lastClickAt = Date.now()
+            this.lastClickClient = { x: event.clientX, y: event.clientY }
+            if (this.selectOperation === 'replace') {
+              /**
+               * 单击 = 选中"这一点下面的对象"（命中顺序见 `selection.ts`），
+               * 命中地块时顺带把它设为唯一的格选择（见 `MapEditor.selectAtPoint`）。
+               */
+              const scale = readScale(this.options.handle.canvas).scale ?? 1
+              editor.selectAtPoint(world, SHAPE_HIT_TOLERANCE_PX / scale)
+            } else {
+              // Shift / Alt 的单击形态：只作用于"这一格"，不是拖动
+              editor.toggleCellAt(world, this.selectOperation)
+            }
+          }
+        }
+        return
+      }
 
       if (this.paintingPointerId !== null && this.paintingPointerId === event.pointerId) {
         this.paintingPointerId = null
@@ -337,7 +441,8 @@ export class MapInteraction {
     add('pointerdown', onPointerDown as EventListener, true)
     add('pointermove', onPointerMove as EventListener, true)
     add('pointerup', finish as EventListener, true)
-    add('pointercancel', finish as EventListener, true)
+    // 取消手势（系统抢走指针 / 触摸被系统打断）：与抬手同样收尾，但**不**执行单击语义
+    add('pointercancel', ((event: Event) => finish(event as PointerEvent, true)) as EventListener, true)
     add('pointerleave', onPointerLeave as EventListener, true)
     // 丢焦点时收尾，避免"卡在按住状态"
     const onBlur = (): void => {
@@ -345,6 +450,8 @@ export class MapInteraction {
         this.paintingPointerId = null
         this.options.editor.endStroke()
       }
+      // 框选也要收尾：留着它会让下一次 pointermove 继续改选择
+      this.resetSelectGesture()
     }
     add('blur', onBlur as EventListener, true)
 
@@ -356,12 +463,14 @@ export class MapInteraction {
     for (const remove of this.listeners) remove()
     this.listeners = []
     this.paintingPointerId = null
+    this.resetSelectGesture()
     this.popScope()
     this.options.onHover(null)
   }
 
-  /** 模式变化：退出绘制时清掉悬停高亮 */
+  /** 模式变化：退出选择模式时丢掉进行中的框选；退出绘制时清掉悬停高亮 */
   notifyModeChanged(mode: 'select' | 'paint'): void {
+    if (mode !== 'select') this.resetSelectGesture()
     if (mode === 'select') this.options.onHover(null)
     this.options.onModeChanged(mode)
   }
@@ -410,8 +519,9 @@ export class MapInteraction {
     register([], 'Escape', () => {
       // 选中优先：按 Esc 的第一意图通常是"取消选中"。
       // 有草稿时先清选中、再按一次才取消草稿 —— 顺序写死在这里，避免"有时取消草稿、有时清选中"
-      if (editor.getSelection() !== null) {
-        editor.clearSelection()
+      // 「选中」= 对象选中 + 格选择（§C.1：Esc 先清空选择；选择已空时再退出工具）
+      if (editor.hasSelection()) {
+        editor.clearAllSelection()
         return false
       }
       // 先取消进行中的草稿，再退出绘制模式：Esc 的语义是"退出当前这一步"
@@ -500,5 +610,19 @@ export class MapInteraction {
   private worldFromEvent(event: PointerEvent): { x: number; y: number } | null {
     const result = pointerToWorld(this.options.handle.canvas, event as unknown as MouseEvent)
     return result?.point ?? null
+  }
+
+  /**
+   * 丢掉进行中的**选择手势**（指针状态 + 编辑器里的框选状态）。
+   *
+   * 三处会用到：手势正常收尾、丢焦点/取消、**模式在手势中途变了**。
+   * 最后一种最阴：按 D 切到绘制模式后，残留的 `selectPointerId` 会让后续的
+   * `pointermove` 全部走进框选分支，于是"笔刷刷不动"，而画面上看不出任何异常。
+   */
+  private resetSelectGesture(): void {
+    this.selectPointerId = null
+    this.selectStartClient = null
+    this.selectDragged = false
+    this.options.editor.cancelCellDrag()
   }
 }

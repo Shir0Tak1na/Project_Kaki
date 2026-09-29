@@ -13,13 +13,17 @@ import assert from 'node:assert/strict'
 
 import type { GridSpec } from '../src/core/hex.ts'
 import { DEFAULT_OVER, DEFAULT_UNDER, defaultTemperatureRamp, textColorOf } from '../src/render/colorRamp.ts'
+import { OVERLAY_LABEL_SCALE } from '../src/render/overlayFields.ts'
 import {
+  CONTOUR_LABEL_SCALE,
+  MAX_CONTOUR_LABELS_PER_LEVEL,
   MAX_FIELD_DIMENSION,
   buildFieldPlan,
+  compareContourCandidates,
+  contourLabelPositions,
   contourLevels,
   contourPolylines,
-  compareContourCandidates,
-  cutPolyline,
+  cutPolylineAt,
   hashFieldSamples,
   sampleField,
   type FieldGrid,
@@ -27,6 +31,18 @@ import {
 
 const GRID: GridSpec = { kind: 'hex', orientation: 'pointy', size: 40, origin: [0, 0] }
 const RAMP = defaultTemperatureRamp()
+/** 与 `colorRamp` 内部那两个对比色同值（测试里用来断言"描边与字色相反"） */
+const DARK_TEXT = '#111827'
+const LIGHT_TEXT = '#ffffff'
+
+/** 折线长度（断言"每一段都是真线段"用） */
+function polylineLengthOf(points: readonly [number, number][]): number {
+  let total = 0
+  for (let index = 1; index < points.length; index += 1) {
+    total += Math.hypot(points[index]![0] - points[index - 1]![0], points[index]![1] - points[index - 1]![1])
+  }
+  return total
+}
 
 /** 一个"值只随 x 变"的 3×3 采样网格：x = 0/10/20，值 = 0/10/20 */
 function linearField(): FieldGrid {
@@ -243,81 +259,139 @@ test('buildFieldPlan（field）：产出采样网格 + **一张连续的栅格**
   }
   for (const primitive of texts) {
     if (primitive.kind === 'text') {
-      assert.equal(primitive.halo, true, '压在彩色场与线上的数字必须有白边，否则浅色区域里看不见')
+      // 等值线数字的描边**与字色相反**（白字配深边 / 深字配浅边）：写死白边会让浅色场上的深字糊成一坨
+      assert.equal(typeof primitive.haloColor, 'string', '压在彩色场与线上的数字必须有描边，否则浅色区域里看不见')
+      assert.notEqual(primitive.haloColor, primitive.color, '描边颜色不能与字色相同')
       assert.match(primitive.text, /^-?\d+(\.\d+)?$/, `标注是数值：${primitive.text}`)
     }
   }
 })
 
-test('cutPolyline：沿弧长挖掉"文字宽度"那一段 —— 断口居中、角度取切线、倒着看的线被翻正', () => {
-  // 一条水平线：(0,0)→(100,0)，挖 36 宽 → 断口 32–68，数字落在 (50,0)、角度 0
-  const horizontal = cutPolyline(
+test('cutPolylineAt：一次挖多个缝 —— N 个数字切出 N+1 段、每个缝居中且角度取该处切线', () => {
+  // 一条 300 长的水平线，3 个数字（弧长 50 / 150 / 250），缝宽 30
+  const cut = cutPolylineAt(
     [
       [0, 0],
-      [100, 0],
+      [300, 0],
     ],
-    36,
+    [50, 150, 250],
+    30,
   )
-  assert.ok(horizontal !== null)
-  assert.equal(horizontal.angle, 0)
-  assert.deepEqual(horizontal.position, [50, 0])
-  const gapStart = horizontal.before[horizontal.before.length - 1]!
-  const gapEnd = horizontal.after[0]!
-  assert.ok(Math.abs(gapEnd[0] - gapStart[0] - 36) < 1e-9, `断口宽度应等于文字宽度：${gapEnd[0] - gapStart[0]}`)
-  assert.equal(horizontal.before.length, 2, '前段：起点 → 断口')
-  assert.equal(horizontal.after.length, 2, '后段：断口 → 终点')
+  assert.ok(cut !== null)
+  assert.equal(cut.cuts.length, 3)
+  assert.equal(cut.segments.length, 4, 'N 个数字 ⇒ N+1 段（这是"沿线重复"的几何前提）')
+  // 数字落点与角度
+  assert.deepEqual(
+    cut.cuts.map((piece) => piece.position),
+    [
+      [50, 0],
+      [150, 0],
+      [250, 0],
+    ],
+  )
+  assert.deepEqual(
+    cut.cuts.map((piece) => piece.angle),
+    [0, 0, 0],
+    '水平线的切线角是 0',
+  )
+  // 每一段的端点：缝宽恰好 30，段与段之间没有重叠、也没有折回去
+  const spans = cut.segments.map((segment) => [segment[0]![0], segment[segment.length - 1]![0]])
+  assert.deepEqual(spans, [
+    [0, 35],
+    [65, 135],
+    [165, 235],
+    [265, 300],
+  ])
+  for (const segment of cut.segments) {
+    assert.ok(polylineLengthOf(segment) > 0, '每一段都必须是真线段（不是零长度的点）')
+  }
 
-  // 竖线：切线角 ≈ +90°（数字跟着立起来）
-  const vertical = cutPolyline(
+  // 竖直线上三个数字：每个都立起来（+90°）
+  const vertical = cutPolylineAt(
     [
       [0, 0],
-      [0, 100],
+      [0, 300],
     ],
-    36,
+    [50, 150, 250],
+    30,
   )!
-  assert.ok(Math.abs(vertical.angle - Math.PI / 2) < 1e-9, `竖直线的切线角应为 +90°，实际 ${vertical.angle}`)
+  assert.ok(
+    vertical.cuts.every((piece) => Math.abs(piece.angle - Math.PI / 2) < 1e-9),
+    `竖线的每个数字都应立起来：${vertical.cuts.map((piece) => piece.angle).join(',')}`,
+  )
 
-  // 从左下往右上的线：切线 -135° → 翻正成 +45°（工程图的数字不许倒着看）
-  const flipped = cutPolyline(
+  // 倒着看的线要翻正：从左下往右上（切线 -135°）→ +45°
+  const flipped = cutPolylineAt(
     [
       [0, 0],
-      [-100, -100],
+      [-300, -300],
     ],
-    36,
+    [150],
+    30,
   )!
-  assert.ok(Math.abs(flipped.angle - Math.PI / 4) < 1e-9, `倒着看的线要翻正成 45°，实际 ${flipped.angle}`)
+  assert.ok(Math.abs(flipped.cuts[0]!.angle - Math.PI / 4) < 1e-9, `倒着看的线要翻正，实际 ${flipped.cuts[0]!.angle}`)
 
   // 顶点间距大于缝宽时，缝**另一侧**的顶点不许被收进前段（否则线段从缝上折回去、把数字压住）
-  const straddling = cutPolyline(
+  const straddling = cutPolylineAt(
     [
       [0, 0],
       [30, 0],
       [70, 0],
       [100, 0],
     ],
+    [50],
     36,
   )!
-  const beforeMax = Math.max(...straddling.before.map(([x]) => x))
-  const afterMin = Math.min(...straddling.after.map(([x]) => x))
-  assert.equal(beforeMax, 32, `前段应止于断口起点：${JSON.stringify(straddling.before)}`)
-  assert.equal(afterMin, 68, `后段应从断口终点开始：${JSON.stringify(straddling.after)}`)
+  const first = straddling.segments[0]!
+  const second = straddling.segments[1]!
+  assert.equal(first[first.length - 1]![0], 32, `前段应止于断口起点：${JSON.stringify(first)}`)
+  assert.equal(second[0]![0], 68, `后段应从断口终点开始：${JSON.stringify(second)}`)
 
-  // 缝把整条线吃掉（\(40\) 的点退化不成线段）时返回 null：调用方退回整条线，而不是画一个点
+  // 退化情形：缝把整条线吃掉 / 没有切点 / 不足两个点 → null（调用方退回整条线，不标）
   assert.equal(
-    cutPolyline(
+    cutPolylineAt(
       [
         [0, 0],
         [40, 0],
       ],
+      [20],
       1000,
     ),
     null,
-    '缝比线还长时不挖（两截都退化成零长度的点）',
+    '缝比线还长时整条线不标',
   )
-  assert.equal(cutPolyline([[0, 0]], 10), null, '不足两个点的折线不挖缝')
+  assert.equal(cutPolylineAt([[0, 0], [100, 0]], [], 10), null, '没有切点就没有断线可言')
+  assert.equal(cutPolylineAt([[0, 0]], [10], 10), null, '不足两个点的折线不挖缝')
 })
 
-test('buildFieldPlan（field）：等值线标注按工程图样式 —— 沿线旋转、数字处**真的断开**、用线的对比色', () => {
+test('contourLabelPositions：两端留边、按间距重复；间距减半 ⇒ 数量约翻倍（ISSUES-001 §5.5）', () => {
+  const width = 10 // 文字宽度
+  // 长度 = 4×文字宽度：刚好只放得下一个（两端各留 2×文字宽度）
+  assert.deepEqual(contourLabelPositions(40, width, 1000), [20])
+  // 验收式：个数 = floor((L − 4w) / 间距) + 1
+  const length = 500
+  for (const spacing of [60, 120, 240]) {
+    const positions = contourLabelPositions(length, width, spacing)
+    assert.equal(positions.length, Math.floor((length - 40) / spacing) + 1, `间距 ${spacing} 的个数`)
+    assert.ok(positions[0]! >= 20 - 1e-9, '第一个数字不贴端头')
+    assert.ok(positions[positions.length - 1]! <= length - 20 + 1e-9, '最后一个数字不贴端头')
+    // 单调升序（切点必须升序，否则 `cutPolylineAt` 的窗口会重叠）
+    for (let index = 1; index < positions.length; index += 1) {
+      assert.ok(positions[index]! > positions[index - 1]!, '切点必须严格升序')
+    }
+  }
+  // 间距减半 ⇒ 数量约翻倍（单调性：用户把"重复间隔"调小，数字就该变密）
+  const dense = contourLabelPositions(length, width, 60).length
+  const sparse = contourLabelPositions(length, width, 120).length
+  assert.ok(dense > sparse * 1.5, `间距减半应明显变密：${dense} vs ${sparse}`)
+  // 间距给得再小也不会挤：实际间距有"文字宽度 × 6"的下限
+  assert.deepEqual(contourLabelPositions(500, width, 1), contourLabelPositions(500, width, width * 6))
+  // 短于 4×文字宽度：一个都不标
+  assert.deepEqual(contourLabelPositions(39, width, 60), [])
+  assert.deepEqual(contourLabelPositions(0, width, 60), [])
+})
+
+test('buildFieldPlan（field）：等值线标注 —— 沿线旋转、数字处真断开、字色按字底场色且描边相反', () => {
   const plan = buildFieldPlan({
     // ⚠️ 样本要**相邻**：IDW 的影响半径是"采样步长 × 3"，隔 4 格以上会留空洞（那里本来就没有等值线）
     samples: [
@@ -360,18 +434,112 @@ test('buildFieldPlan（field）：等值线标注按工程图样式 —— 沿�
     assert.equal(crossed, false, `数字处必须断开，但有线穿过了 (${text.x}, ${text.y})`)
   }
 
-  // 对比色：标注色 = 某条线色的对比色（不是线自己的颜色 —— 那样数字会与线糊在一起）
+  // 描边色必须与字色**相反**（白字配深边 / 深字配浅边）——
+  // 旧口径写死白边，于是"深字 + 白边"压在浅色场上等于看不见（用户实测报的"还是黑色的"）
   for (const text of texts) {
-    const matched = lines.some((line) => line.kind === 'polyline' && textColorOf(line.color) === text.color)
-    assert.equal(matched, true, `标注要用线色的对比色，实际 ${text.color}`)
+    assert.equal(typeof text.haloColor, 'string', '等值线数字必须有描边（否则浅色场上糊成一坨）')
+    assert.notEqual(text.haloColor, text.color, `描边必须与字色相反：${text.color} / ${text.haloColor}`)
+    assert.equal(
+      text.haloColor,
+      text.color === DARK_TEXT ? LIGHT_TEXT : DARK_TEXT,
+      '描边只能是白 / 近黑里的另一个',
+    )
   }
 
-  // 每层最多 3 个（每层十几条线全标会糊成一片）
+  // 字号进 IR（比格心读数小一档）：它同时决定挖缝宽度，两个后端不能各算一次。
+  // ⚠️ 这里断言的是**两个比例之间的关系**（0.7 = 0.35 / 0.5），不是"等于常量自己" ——
+  // 后者是自指的：把常量改成 0.5（回到旧口径）它也照样绿
+  for (const text of texts) {
+    assert.equal(
+      text.size,
+      GRID.size * CONTOUR_LABEL_SCALE,
+      '等值线数字字号 = 格半径 × CONTOUR_LABEL_SCALE',
+    )
+    assert.equal(
+      text.size! / (GRID.size * OVERLAY_LABEL_SCALE),
+      0.7,
+      '等值线数字要比格心读数小一档（0.35 / 0.5）',
+    )
+  }
+
+  // 每层最多 12 个（超了沿线均匀抽样，不是"只留最长的几条"）
   for (const level of contourLevels(RAMP, 20)) {
     const label = String(Math.round(level * 10) / 10)
     const count = texts.filter((text) => text.kind === 'text' && text.text === label).length
-    assert.ok(count <= 3, `每一层最多标 3 个：${label} 标了 ${count} 个`)
+    assert.ok(count <= MAX_CONTOUR_LABELS_PER_LEVEL, `每一层最多标 12 个：${label} 标了 ${count} 个`)
   }
+})
+
+test('buildFieldPlan（field）：压在**深色场**上的数字是白字 + 深边（旧口径写死白边 ⇒ 白配白看不见）', () => {
+  // 列值 -60 / -30 / 0：level -30 正好落在色带最低锚点上（纯蓝 #0000ff，很暗）——
+  // 那里的字色必须是白的，而描边必须是**深色**。旧口径写死白边时，这一帧就是"白字 + 白边"（用户报的"一坨黑"）
+  const cold: FieldGrid = {
+    originX: 0,
+    originY: 0,
+    step: 10,
+    cols: 3,
+    rows: 31,
+    values: new Array(3 * 31).fill(0).map((_, index) => [-60, -30, 0][index % 3]!),
+  }
+  const plan = buildFieldPlan({
+    samples: [],
+    grid: GRID,
+    ramp: RAMP,
+    mode: 'field',
+    opacity: 1,
+    precomputedField: cold,
+    contourInterval: 10,
+  })
+  const texts = plan.primitives.filter((primitive) => primitive.kind === 'text')
+  const onDark = texts.filter((text) => text.kind === 'text' && text.color === LIGHT_TEXT)
+  assert.ok(onDark.length > 0, '前提：这一帧里确实有压在深色场上的数字（否则这条断言测不到东西）')
+  for (const text of onDark) {
+    assert.equal(
+      text.kind === 'text' ? text.haloColor : null,
+      DARK_TEXT,
+      '白字必须配深边 —— 写死白边就是"白配白"，等于没描边',
+    )
+  }
+})
+
+test('buildFieldPlan（field）：重复间隔进几何 —— 调小 ⇒ 数字变多；同一输入两次结果逐项相同', () => {
+  // 手造一张"值只随 x 变"的直场（step=10，rows=61 ⇒ 等值线是 600 长的竖线），
+  // 用它把"沿线重复"的计数钉死（IDW 出来的场太短，数字根本放不下）。
+  // 列值取 0 / 10 / 20 且**间距取 15**：整段里只有 level 15 穿过去一次 ⇒ 恰好一条线，
+  // 于是"数字数 vs 折线数"的关系是干净的 N / N+1
+  const straight: FieldGrid = {
+    originX: 0,
+    originY: 0,
+    step: 10,
+    cols: 3,
+    rows: 61,
+    values: new Array(3 * 61).fill(0).map((_, index) => (index % 3) * 10),
+  }
+  const options = {
+    samples: [],
+    grid: GRID,
+    ramp: RAMP,
+    mode: 'field' as const,
+    opacity: 1,
+    precomputedField: straight,
+    contourInterval: 15,
+  }
+  const sparse = buildFieldPlan({ ...options, labelSpacing: 240 })
+  const dense = buildFieldPlan({ ...options, labelSpacing: 120 })
+  const countOf = (plan: ReturnType<typeof buildFieldPlan>) =>
+    plan.primitives.filter((primitive) => primitive.kind === 'text').length
+  assert.ok(countOf(sparse) > 0, '前提：这条长线确实会被标')
+  assert.ok(countOf(dense) > countOf(sparse), `间隔减半应更密：${countOf(dense)} vs ${countOf(sparse)}`)
+
+  // 确定性：同一输入连算两次，切点坐标逐项相等（否则逐帧抖动、缓存失效）
+  const again = buildFieldPlan({ ...options, labelSpacing: 120 })
+  const positionsOf = (plan: ReturnType<typeof buildFieldPlan>) =>
+    plan.primitives.filter((primitive) => primitive.kind === 'text').map((primitive) => [primitive.x, primitive.y, primitive.text])
+  assert.deepEqual(positionsOf(again), positionsOf(dense))
+
+  // 一条线上 N 个数字 ⇒ N+1 段折线（多切点的几何后果）
+  const segments = dense.primitives.filter((primitive) => primitive.kind === 'polyline').length
+  assert.equal(segments, countOf(dense) + 1, `N 个数字要切出 N+1 段：${segments} / ${countOf(dense)}`)
 })
 
 test('compareContourCandidates：最长优先；并列时按起点坐标字典序（不许依赖输入顺序）', () => {

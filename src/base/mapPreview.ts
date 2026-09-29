@@ -411,19 +411,23 @@ export function buildMapPreviewSvgWithReport(
         const [textX, textY] = point.split(',')
         // 字号与居中口径与画布**同一条式子**（`OVERLAY_LABEL_*`），
         // 用等宽字体、`dy=0.35em` 把数字真正放到格心 / 线中（用户实机提的"不在正中间"）。
-        const fontSize = Math.max(4, document.grid.size * projection.scale * OVERLAY_LABEL_SCALE).toFixed(2)
+        // 等值线标签的字号**来自图元自己**（比格心读数小一档）——两边各算一次必然分叉（缝比字窄）。
+        const labelScale = primitive.size !== undefined && primitive.size > 0 ? primitive.size : document.grid.size * OVERLAY_LABEL_SCALE
+        const fontSize = Math.max(4, labelScale * projection.scale).toFixed(2)
         const labelStyle =
           ` font-family="${OVERLAY_LABEL_FONT}" font-size="${fontSize}" text-anchor="middle"` +
           ` dy="${OVERLAY_LABEL_BASELINE_RATIO}em"`
-        // 等值线的数字**沿着线走**（工程图画法）：绕落点旋转。角度由 `fieldPlan.cutPolyline`
+        // 等值线的数字**沿着线走**（工程图画法）：绕落点旋转。角度由 `fieldPlan.cutPolylineAt`
         // 按切线算好（已收进 ±90°，数字不会倒着看），两个后端只是各自照着画 —— 几何只有一份。
         const rotation =
           typeof primitive.rotation === 'number' && primitive.rotation !== 0
             ? ` transform="rotate(${((primitive.rotation * 180) / Math.PI).toFixed(3)} ${textX} ${textY})"`
             : ''
+        // 描边**与字色相反**（白字配深边 / 深字配浅边）：写死白色会让浅色场上的深色数字糊成一坨
+        // （用户实测报过"还是黑色的"，§A.4 口径已改）。
         const halo =
-          primitive.halo === true
-            ? ` stroke="#ffffff" stroke-width="${(Number(fontSize) * 0.3).toFixed(2)}" stroke-opacity="0.9" paint-order="stroke"`
+          primitive.haloColor !== undefined
+            ? ` stroke="${primitive.haloColor}" stroke-width="${(Number(fontSize) * 0.3).toFixed(2)}" stroke-opacity="0.9" paint-order="stroke"`
             : ''
         content.push(
           `<text data-fc-primitive="text" x="${textX}" y="${textY}"${rotation}${labelStyle}${halo} fill="${primitive.color}">${escapeSvgText(primitive.text)}</text>`,

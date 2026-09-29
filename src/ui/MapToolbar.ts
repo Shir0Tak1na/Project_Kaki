@@ -10,7 +10,7 @@
 
 import { setIcon } from 'obsidian'
 import type { MarkerIcon, MarkerId, PathType } from '../data/mapDocument.ts'
-import type { EditorStatus, EditorTool, MapEditor } from '../editor/MapEditor.ts'
+import type { BrushOp, EditorStatus, EditorTool, MapEditor } from '../editor/MapEditor.ts'
 import type { GeometryMode } from '../core/hexEdges.ts'
 import { listResolvedTerrainStyles, terrainCatalogSignature, type CustomTerrain } from '../render/terrainCatalog.ts'
 import { listResolvedMarkerStyles, markerCatalogSignature, type CustomMarker } from '../render/markerCatalog.ts'
@@ -31,6 +31,8 @@ import {
   type RegionTypeEntry,
 } from '../render/regionTypeCatalog.ts'
 import { ToolbarDropdown, type ToolbarDropdownItem } from './ToolbarDropdown.ts'
+import { OVERLAY_FIELDS, type FieldId } from '../render/overlayFields.ts'
+import { biomeCatalogSignature, listResolvedBiomeStyles, resolveBiomeStyle, type CustomBiome } from '../render/biomeCatalog.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
 
 export interface MapToolbarOptions {
@@ -92,7 +94,35 @@ export interface MapToolbarOptions {
   getShowLegend: () => boolean
   /** 切换图例显示（写设置） */
   onToggleLegend: () => void
+  /**
+   * 打开「按规则筛选选择…」对话框。
+   *
+   * 缺省时**不渲染**这个按钮（而不是渲染一个点了没反应的按钮）：工具条本身是可选组件，
+   * 只有插件层接上了这个回调才有意义。
+   */
+  onOpenSelectionFilter?: () => void
+  /**
+   * 自定义生物群系目录（笔刷那一节的"设为哪个群系"下拉用）。
+   *
+   * 与 `getCustomTerrains` 同理：选项数量会随设置变化，所以签名变了要重建那一组。
+   */
+  getCustomBiomes?: () => readonly CustomBiome[]
 }
+
+/** 数据层笔刷那一节的"层"选项：地形 + 每个数据层字段（**从字段表派生**，加字段自动多一项） */
+const BRUSH_FIELD_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '', label: '地形' },
+  ...OVERLAY_FIELDS.map((spec) => ({ value: spec.id, label: spec.label })),
+]
+
+/** 数值字段的算法按钮（顺序就是界面上的顺序） */
+const BRUSH_OPS: ReadonlyArray<{ value: BrushOp; label: string; hint: string }> = [
+  { value: 'set', label: '＝', hint: '这一笔把这些格直接设成这个数（分类字段只有这一种）' },
+  { value: '+', label: '＋', hint: '在原来的数上加：**没有值的格从「每格默认值」起算**（没有就 0）——会把默认值固化进这些格' },
+  { value: '-', label: '−', hint: '在原来的数上减：**没有值的格从「每格默认值」起算**（没有就 0）——会把默认值固化进这些格' },
+  { value: '×', label: '×', hint: '乘一个系数：**没有值的格跳过**（拿"没量过"去乘没有意义）' },
+  { value: '÷', label: '÷', hint: '除以一个系数：**没有值的格跳过**；除以 0 不生效' },
+]
 
 const TOOL_LABELS: Record<EditorTool, { label: string; hint: string }> = {
   brush: { label: '地形', hint: '地形笔刷（B）' },
@@ -165,7 +195,46 @@ export class MapToolbar {
   private readonly redoButton: HTMLButtonElement
   private readonly nameButton: HTMLButtonElement
   private readonly legendButton: HTMLButtonElement
+  /**
+   * 选择模式那一组：矩形框选 / 笔迹框选 / 筛选… / 连通扩展。
+   *
+   * 只在**选择模式**下显示（绘制模式下左键归绘制手势）。框选/笔迹两个按钮切换
+   * `editor.selectionMode` —— 两者都是"左键拖动"，只能靠一个可选状态区分（§C.1）。
+   * 「筛选…」按钮只在插件层接上了回调时才创建（缺省 = 不渲染，而不是点了没反应）。
+   */
+  private readonly selectGroup: HTMLElement
+  private readonly rectButton: HTMLButtonElement
+  private readonly brushSelectButton: HTMLButtonElement
+  private filterButton: HTMLButtonElement | null = null
+  private expandButton: HTMLButtonElement | null = null
+  /**
+   * 状态条（施工文件 §F.3）：`空闲` / `编辑：地形笔刷 · 森林` / `选择：矩形框选 · 12 格`。
+   *
+   * 工具浮窗**降级成状态显示**之后，这一行是用户判断"我现在处在什么状态"的唯一入口 ——
+   * 只读的详情（选中了哪些字段、统计）全在右上角的信息卡里，不在这里重复。
+   */
+  private readonly statusEl: HTMLElement
   private readonly hintEl: HTMLElement
+  /**
+   * 数据层笔刷那一组（施工文件 §E）：层（地形 / 温度 / 深度 / 生物群系）+ 算法 + 数值 / 群系。
+   *
+   * 三条硬口径都长在这里：**数值框初始为空**（不预填）、**没确认时笔刷不生效**（状态条说原因）、
+   * 换层或换算法时**不静默沿用**（数字保留但标成"未确认"，回车才算数）。
+   */
+  private readonly brushFieldGroup: HTMLElement
+  private readonly brushFieldSelect: HTMLSelectElement
+  private readonly brushOpButtons = new Map<BrushOp, HTMLButtonElement>()
+  private readonly brushOpGroup: HTMLElement
+  private readonly brushValueInput: HTMLInputElement
+  private readonly brushBiomeSelect: HTMLSelectElement
+  /**
+   * 上一次重建"群系下拉"时的目录签名：变了才重建选项。
+   *
+   * ⚠️ 初值是 `null`（而不是 `''`）：一个自定义群系都没有时签名正是空串 ——
+   * 用 `''` 当初值会让**第一次**刷新判定为"没变"，于是下拉里一个选项都没有
+   * （内置 34 条全在 `listResolvedBiomeStyles` 里，本该列出来的）。
+   */
+  private biomeSignature: string | null = null
 
   constructor(container: HTMLElement, options: MapToolbarOptions) {
     this.options = options
@@ -200,6 +269,52 @@ export class MapToolbar {
       toolGroup.appendChild(button)
     }
     this.root.appendChild(toolGroup)
+
+    // 选择模式那一组（施工文件 §C.3 第 2、3、9 条）：矩形框选 / 笔迹框选 / 筛选… / 连通扩展。
+    // 只在选择模式下显示 —— 绘制模式下左键归绘制手势，摆着这些按钮只会误导。
+    this.selectGroup = doc.createElement('div')
+    this.selectGroup.className = 'fc-toolbar-group fc-toolbar-select-group'
+
+    this.rectButton = doc.createElement('button')
+    this.rectButton.className = 'fc-toolbar-button fc-toolbar-select-rect'
+    this.rectButton.textContent = '矩形框选'
+    this.rectButton.title = '按住左键拉出一个矩形：选中框里的格（Shift 加选、Alt 取消）'
+    this.rectButton.addEventListener('click', () => {
+      options.editor.setSelectionMode('rect')
+      this.refresh()
+    })
+    this.selectGroup.appendChild(this.rectButton)
+
+    this.brushSelectButton = doc.createElement('button')
+    this.brushSelectButton.className = 'fc-toolbar-button fc-toolbar-select-brush'
+    this.brushSelectButton.textContent = '笔迹框选'
+    this.brushSelectButton.title = '按住左键划过去：笔迹扫过的格被选中（范围跟"笔刷大小"同一个半径）'
+    this.brushSelectButton.addEventListener('click', () => {
+      options.editor.setSelectionMode('brush')
+      this.refresh()
+    })
+    this.selectGroup.appendChild(this.brushSelectButton)
+
+    if (options.onOpenSelectionFilter) {
+      this.filterButton = doc.createElement('button')
+      this.filterButton.className = 'fc-toolbar-button fc-toolbar-select-filter'
+      this.filterButton.textContent = '筛选…'
+      this.filterButton.title = '按规则筛选选择（地形 / 温度 / 深度…，子句可叠加）'
+      this.filterButton.addEventListener('click', () => options.onOpenSelectionFilter?.())
+      this.selectGroup.appendChild(this.filterButton)
+
+      this.expandButton = doc.createElement('button')
+      this.expandButton.className = 'fc-toolbar-button fc-toolbar-select-expand'
+      this.expandButton.textContent = '连通扩展'
+      this.expandButton.title = '以当前选择为种子，按同一种地形扩到整片连通区'
+      this.expandButton.addEventListener('click', () => {
+        options.editor.expandSelectionByTerrain()
+        this.refresh()
+      })
+      this.selectGroup.appendChild(this.expandButton)
+    }
+
+    this.root.appendChild(this.selectGroup)
 
     // 地形选择（仅笔刷工具下显示）：内置 9 种 + 用户自定义（排在后面）
     this.terrainGroup = doc.createElement('div')
@@ -296,6 +411,83 @@ export class MapToolbar {
     this.brushGroup.append(smaller, this.brushLabel, larger)
     this.root.appendChild(this.brushGroup)
 
+    // 数据层笔刷（§E）：层 + 算法 + 数值 / 群系。
+    // 与"笔刷大小"同一组条件（绘制模式 + 笔刷工具），因为半径对两者都生效。
+    this.brushFieldGroup = doc.createElement('div')
+    this.brushFieldGroup.className = 'fc-toolbar-group fc-toolbar-brushfield-group'
+
+    const fieldLabel = doc.createElement('span')
+    fieldLabel.className = 'fc-toolbar-mini-label'
+    fieldLabel.textContent = '刷'
+    this.brushFieldSelect = doc.createElement('select')
+    this.brushFieldSelect.className = 'fc-toolbar-brushfield-select'
+    this.brushFieldSelect.dataset.fcBrushField = '1'
+    for (const option of BRUSH_FIELD_OPTIONS) {
+      const item = doc.createElement('option')
+      item.value = option.value
+      item.textContent = option.label
+      this.brushFieldSelect.appendChild(item)
+    }
+    this.brushFieldSelect.addEventListener('change', () => {
+      const value = this.brushFieldSelect.value
+      options.editor.setBrushField(value === '' ? null : (value as FieldId))
+      this.refresh()
+    })
+    this.brushFieldGroup.append(fieldLabel, this.brushFieldSelect)
+
+    this.brushOpGroup = doc.createElement('div')
+    this.brushOpGroup.className = 'fc-toolbar-brushop-group'
+    for (const op of BRUSH_OPS) {
+      const button = doc.createElement('button')
+      button.className = 'fc-toolbar-button fc-toolbar-brushop'
+      button.textContent = op.label
+      button.title = op.hint
+      button.dataset.fcBrushOp = op.value
+      button.addEventListener('click', () => {
+        options.editor.setBrushOp(op.value)
+        this.refresh()
+      })
+      this.brushOpButtons.set(op.value, button)
+      this.brushOpGroup.appendChild(button)
+    }
+    this.brushFieldGroup.appendChild(this.brushOpGroup)
+
+    this.brushValueInput = doc.createElement('input')
+    this.brushValueInput.type = 'number'
+    this.brushValueInput.className = 'fc-toolbar-brushvalue'
+    this.brushValueInput.dataset.fcBrushValue = '1'
+    this.brushValueInput.placeholder = '数值'
+    this.brushValueInput.title = '填一个数并按回车（或点开别处）确认 —— 没确认时笔刷不生效'
+    // 只认 `change`（回车 / 失焦）：`input` 每次击键都提交就等于"边打边刷"，
+    // 与 §E 的"回车 = 确认"相反。键入时**把笔刷打回未确认**（值不同就清掉）——
+    // 否则笔上还带着上一次的旧值，而输入框里显示的是新数字。
+    this.brushValueInput.addEventListener('input', () => {
+      const text = this.brushValueInput.value.trim()
+      const parsed = text.length === 0 ? null : Number(text)
+      const value = parsed !== null && Number.isFinite(parsed) ? parsed : null
+      if (value !== options.editor.getStatus().brushValue) options.editor.setBrushValue(null)
+    })
+    const commitValue = (): void => {
+      const text = this.brushValueInput.value.trim()
+      const parsed = text.length === 0 ? null : Number(text)
+      options.editor.setBrushValue(parsed !== null && Number.isFinite(parsed) ? parsed : null)
+      this.refresh()
+    }
+    this.brushValueInput.addEventListener('change', commitValue)
+    this.brushValueInput.addEventListener('blur', commitValue)
+    this.brushFieldGroup.appendChild(this.brushValueInput)
+
+    this.brushBiomeSelect = doc.createElement('select')
+    this.brushBiomeSelect.className = 'fc-toolbar-brushbiome-select'
+    this.brushBiomeSelect.dataset.fcBrushBiome = '1'
+    this.brushBiomeSelect.addEventListener('change', () => {
+      options.editor.setBrushBiome(this.brushBiomeSelect.value)
+      this.refresh()
+    })
+    this.brushFieldGroup.appendChild(this.brushBiomeSelect)
+
+    this.root.appendChild(this.brushFieldGroup)
+
     // 撤销 / 重做
     const historyGroup = doc.createElement('div')
     historyGroup.className = 'fc-toolbar-group'
@@ -347,6 +539,11 @@ export class MapToolbar {
     this.hintEl = doc.createElement('div')
     this.hintEl.className = 'fc-toolbar-hint'
     this.root.appendChild(this.hintEl)
+
+    this.statusEl = doc.createElement('div')
+    this.statusEl.className = 'fc-toolbar-status'
+    this.statusEl.dataset.fcToolbarStatus = '1'
+    this.root.appendChild(this.statusEl)
 
     container.appendChild(this.root)
     this.refresh()
@@ -552,6 +749,110 @@ export class MapToolbar {
     }
   }
 
+  /**
+   * 刷新"数据层笔刷"那一组（§E）。
+   *
+   * 三件事：**只显示当前字段用得上的控件**（分类字段没有算法与数值，数值字段没有群系下拉）、
+   * **数值框的显示与实际生效的值一致**（未确认时标出来）、状态条在笔刷不可用时**说清原因**。
+   */
+  private refreshBrushField(status: EditorStatus, painting: boolean): void {
+    const isBrush = status.tool === 'brush'
+    this.brushFieldGroup.style.display = painting && isBrush ? '' : 'none'
+    if (!painting || !isBrush) return
+
+    this.brushFieldSelect.value = status.brushField ?? ''
+    const isField = status.brushField !== null
+    const spec = isField ? OVERLAY_FIELDS.find((item) => item.id === status.brushField) : undefined
+    const numeric = spec !== undefined && spec.numeric
+    const category = spec !== undefined && !spec.numeric
+
+    // 数值框：只在数值字段下出现。**输入框有焦点时不去改它的文字** ——
+    // 否则 refresh（选中变化 / 状态变化都会触发）会把用户正打的字冲掉。
+    const doc = this.root.ownerDocument ?? globalThis.document
+    this.brushValueInput.style.display = numeric ? '' : 'none'
+    if (numeric) {
+      const isFocused = doc.activeElement === this.brushValueInput
+      if (!isFocused) {
+        this.brushValueInput.value = status.brushValue === null ? '' : String(status.brushValue)
+      }
+      // 未确认（换层 / 换算法之后）灰掉：数字还留着，但要点一次回车才算数
+      this.brushValueInput.classList.toggle('is-unconfirmed', status.brushValue !== null && !status.brushValueConfirmed)
+      this.brushValueInput.placeholder = status.brushValue === null ? '数值（空着不生效）' : '回车确认'
+    }
+
+    // 算法：分类字段只有"设为"，所以整组藏起来（摆着点不动只会让人以为坏了）
+    this.brushOpGroup.style.display = numeric ? '' : 'none'
+    for (const [op, button] of this.brushOpButtons) {
+      button.classList.toggle('is-active', status.brushOp === op)
+      button.disabled = !numeric
+    }
+
+    // 群系下拉：只在生物群系字段下出现；选项由**现读的目录**决定（内置 34 条 + 自定义）
+    this.brushBiomeSelect.style.display = category ? '' : 'none'
+    if (category) {
+      const custom = this.options.getCustomBiomes?.() ?? []
+      const signature = biomeCatalogSignature(custom)
+      if (signature !== this.biomeSignature) {
+        this.biomeSignature = signature
+        this.brushBiomeSelect.empty?.()
+        this.brushBiomeSelect.textContent = ''
+        const placeholder = doc.createElement('option')
+        placeholder.value = ''
+        placeholder.textContent = '选择生物群系…'
+        this.brushBiomeSelect.appendChild(placeholder)
+        for (const entry of listResolvedBiomeStyles(custom)) {
+          const option = doc.createElement('option')
+          option.value = entry.id
+          option.textContent = entry.label
+          this.brushBiomeSelect.appendChild(option)
+        }
+      }
+      this.brushBiomeSelect.value = status.brushBiome
+    }
+
+    // 状态条：笔刷不可用时把**原因**写在状态里（§E 第 2 条：用户不该靠猜"为什么刷不动"）
+    if (isField && !status.brushReady.ok) {
+      this.statusEl.textContent = `编辑：数据层笔刷 · ${status.brushReady.reason}`
+    }
+  }
+
+  /**
+   * 状态条那一行（§F.3）。
+   *
+   * 三种状态各有明确的说法：
+   * - 绘制模式 → `编辑：地形笔刷 · 森林`（把"正在用什么工具、什么值"说出来）；
+   * - 选择模式且有选择 → `选择：矩形框选 · 12 格`；
+   * - 选择模式且没有选择 → `空闲`。
+   *
+   * 地形显示名从**当前目录**现取（自定义地形也有名字），取不到就退回 ID —— 不显示空白。
+   */
+  private statusLine(status: EditorStatus, painting: boolean): string {
+    if (painting) {
+      // 数据层笔刷（§E）：把"刷哪一层、怎么刷"说出来（不可用时由 `refreshBrushField` 换成原因）
+      if (status.tool === 'brush' && status.brushField !== null) {
+        const spec = OVERLAY_FIELDS.find((item) => item.id === status.brushField)
+        const label = spec?.label ?? status.brushField
+        if (spec !== undefined && !spec.numeric) {
+          const entry = status.brushBiome.length > 0 ? resolveBiomeStyle(status.brushBiome, []).label : '（未选）'
+          return `编辑：${label}笔刷 · ${entry}`
+        }
+        const op = status.brushOp === 'set' ? '＝' : status.brushOp
+        const value = status.brushValue === null ? '（未填）' : status.brushValue
+        return `编辑：${label}笔刷 · ${op}${value}`
+      }
+      const tool = TOOL_LABELS[status.tool].label
+      if (status.tool !== 'brush') return `编辑：${tool}`
+      const terrain =
+        listResolvedTerrainStyles(this.options.getCustomTerrains?.() ?? []).find(
+          (style) => style.id === status.terrainType,
+        )?.label ?? status.terrainType
+      return `编辑：地形笔刷 · ${terrain}`
+    }
+    const count = status.cellSelection.length
+    if (count === 0) return '空闲'
+    return `选择：${status.selectionMode === 'rect' ? '矩形框选' : '笔迹框选'} · ${count} 格`
+  }
+
   /** 按编辑器当前状态刷新按钮文案与可用性 */
   refresh(): void {
     // 地形目录变了（用户增删自定义地形）→ 按钮数量本身变了，只能重建这一组
@@ -576,6 +877,10 @@ export class MapToolbar {
     this.modeButton.classList.toggle('is-active', painting)
     this.modeButton.title = painting ? '退出绘制模式（Esc）' : '进入绘制模式（D）'
 
+    // 状态条：一行说清"现在是什么状态"（§F.3）。详情不在这一层 —— 那在右上角的信息卡里
+    this.statusEl.textContent = this.statusLine(status, painting)
+    this.refreshBrushField(status, painting)
+
     for (const [tool, button] of this.toolButtons) {
       button.classList.toggle('is-active', painting && tool === status.tool)
       button.disabled = !painting
@@ -588,6 +893,9 @@ export class MapToolbar {
     }
 
     // 只有当前工具相关的那一组才显示，避免工具条过长
+    this.selectGroup.style.display = painting ? 'none' : ''
+    this.rectButton.classList.toggle('is-active', status.selectionMode === 'rect')
+    this.brushSelectButton.classList.toggle('is-active', status.selectionMode === 'brush')
     this.terrainGroup.style.display = painting && status.tool === 'brush' ? '' : 'none'
     this.brushGroup.style.display = painting && status.tool === 'brush' ? '' : 'none'
     this.iconGroup.style.display = painting && status.tool === 'marker' ? '' : 'none'
@@ -627,8 +935,15 @@ export class MapToolbar {
     this.undoButton.textContent = `撤销${status.undo > 0 ? ` (${status.undo})` : ''}`
     this.redoButton.textContent = `重做${status.redo > 0 ? ` (${status.redo})` : ''}`
 
-    if (!painting) this.hintEl.textContent = '按 D 进入绘制模式 · 双击已有路径/区域可重命名'
-    else if (status.tool === 'brush') this.hintEl.textContent = '左键描绘地形 · 1-9 换地形 · [ ] 调笔刷 · Esc 退出'
+    if (!painting) {
+      // 选择模式：把"当前选中多少格、拖动会做什么"直接说出来 ——
+      // 这几种手势的差别只有修饰键，不写出来用户只能靠试
+      const count = status.cellSelection.length
+      this.hintEl.textContent =
+        count > 0
+          ? `已选 ${count} 格 · 左键拖动=${status.selectionMode === 'rect' ? '矩形框选' : '笔迹框选'} · Shift 加选 / Alt 取消 · Esc 清空`
+          : '按 D 进入绘制模式 · 左键拖动框选一片格 · 双击已有路径/区域可重命名'
+    } else if (status.tool === 'brush') this.hintEl.textContent = '左键描绘地形 · 1-9 换地形 · [ ] 调笔刷 · Esc 退出'
     else if (status.tool === 'marker') this.hintEl.textContent = '左键点击放置标记 · 选择模式下可点击打开笔记 / 拖动移动 / 右键删除'
     else if (status.tool === 'label') this.hintEl.textContent = '左键点击放置文字标注 · 选择模式下可拖动移动 / 右键删除'
     else {

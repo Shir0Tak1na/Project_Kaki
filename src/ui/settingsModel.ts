@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 设置的**数据模型**：接口、出厂默认、以及"把任何输入收敛成一份可用设置"的纯函数。
  *
  * 为什么它必须和设置界面分开（`SettingsTab.ts`）：
@@ -14,6 +14,7 @@
 
 import type { CustomTerrain } from '../render/terrainCatalog.ts'
 import { normalizeCustomTerrains } from '../render/terrainCatalog.ts'
+import { normalizeCustomBiomes, type CustomBiome } from '../render/biomeCatalog.ts'
 import type { CustomMarker } from '../render/markerCatalog.ts'
 import { normalizeCustomMarkers } from '../render/markerCatalog.ts'
 import type { PathTypeEntry } from '../render/pathTypeCatalog.ts'
@@ -90,6 +91,17 @@ export interface CartographerSettings {
    */
   customMarkers: CustomMarker[]
   /**
+   * 用户自定义生物群系（内置 34 条之外的）。
+   *
+   * 与 `customTerrains` / `customMarkers` 完全同构：`id`（形如 `custom:xxx`）就是写进地图文件的
+   * `terrain[].biome` 的值；**颜色与标签也在这里**（`BIOMES.md` §3 决定三：每条自带颜色，
+   * 组内只提供默认值）。删掉定义不会删掉格上的值（它们退化成"未知"并按中性灰画出来）。
+   *
+   * ⚠️ 本轮的**设置页还没有增删改的界面**（分类表是可整表替换的配置，编辑 UI 待做）——
+   * 但目录工厂、规范化与"值 → 颜色"的整条通路都已就位，加 UI 只是接线。
+   */
+  customBiomes: CustomBiome[]
+  /**
    * 图层可见性（地形 / 网格 / 区域 / 路径 / 标记 / 名称）。
    *
    * 为什么放在设置里而不是写进地图文件：图层是"我现在想看到什么"，
@@ -137,6 +149,7 @@ export const DEFAULT_SETTINGS: CartographerSettings = {
   labelFontFamily: '',
   customTerrains: [],
   customMarkers: [],
+  customBiomes: [],
   layers: DEFAULT_LAYER_VISIBILITY,
   // 出厂色带 / 透明度：每次新对象，避免与 DEFAULT_SETTINGS 共用同一份引用
   overlays: defaultOverlayStyles(),
@@ -202,6 +215,7 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     customTerrains: normalizeCustomTerrains(source.customTerrains),
     // 同上：自定义标记也逐条独立校验
     customMarkers: normalizeCustomMarkers(source.customMarkers),
+    customBiomes: normalizeCustomBiomes(source.customBiomes),
     // 图层：**只有这一份状态**（网格也在里面，不再有并列的 showGrid 字段）。
     // `source.showGrid` 只作为**迁移输入**读一次：早期只有这一个开关，
     // 老用户把它关掉过的话必须变成"隐藏网格"，不能因为换代就把他的选择丢掉。

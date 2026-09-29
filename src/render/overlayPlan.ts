@@ -13,7 +13,7 @@
  * 依赖方向：本模块 → `fieldPlan`（图元 IR）→ `colorRamp`；**不反向**。
  */
 
-import { parseCellKey } from '../core/hex.ts'
+import { hexCorners, parseCellKey } from '../core/hex.ts'
 import type { BBox } from '../core/viewport.ts'
 import type { MapDocument } from '../data/mapDocument.ts'
 import { colorForValue } from './colorRamp.ts'
@@ -21,15 +21,25 @@ import { defaultFor } from './dataDefaults.ts'
 import { DEFAULT_ELEVATION_CALIBRATION } from './elevationUnits.ts'
 import {
   buildFieldPlan,
+  CONTOUR_LABEL_SCALE,
   DEFAULT_MAX_FIELD_CELLS,
   hashFieldSamples,
   sampleField,
   type FieldGrid,
   type FieldPlan,
+  type FieldPrimitive,
   type FieldSample,
 } from './fieldPlan.ts'
 import { cellIntersectsBBox } from './hexGrid.ts'
-import { formatFieldReading, OVERLAY_LABEL_SCALE, type OverlayFieldSpec, type OverlayStyle } from './overlayFields.ts'
+import {
+  formatFieldReading,
+  isCategoryField,
+  isNumericField,
+  type CategoryOverlayFieldSpec,
+  type NumericOverlayFieldSpec,
+  type OverlayFieldSpec,
+  type OverlayStyle,
+} from './overlayFields.ts'
 
 /** 一条数据层这一帧到底画了什么（可断言的数字，而不是"看起来有颜色"） */
 export interface OverlayPlanStats {
@@ -74,6 +84,14 @@ export interface OverlayPlanInput {
    * 逐格模式不走缓存：它天然被视口裁着，而且没有逐点上色那种贵活儿。
    */
   cache?: OverlayFieldCache
+  /**
+   * **分类字段**的"值 → 颜色"覆盖（来自**现读**的分类目录：内置 + 自定义）。
+   *
+   * 为什么要从外面传：自定义生物群系的颜色住在插件设置里，而本模块是纯函数层。
+   * 缺省时用字段自带的回退（只认内置目录）—— 于是导出侧、单测、没有设置上下文时
+   * 也能画出一份**颜色正确**的图，只是不含用户自定义的那几条。
+   */
+  categoryColors?: ReadonlyMap<string, string>
 }
 
 export interface OverlayPlanResult {
@@ -95,7 +113,7 @@ export interface OverlayPlanResult {
  */
 export function collectOverlaySamples(
   document: MapDocument,
-  spec: OverlayFieldSpec,
+  spec: NumericOverlayFieldSpec,
   bounds?: BBox,
 ): FieldSample[] {
   const samples: FieldSample[] = []
@@ -115,6 +133,60 @@ export function collectOverlaySamples(
     )
   }
   return samples
+}
+
+/** 全零统计（"这一层这一帧什么都没画"） */
+function emptyStats(): OverlayPlanStats {
+  return { mode: 'cell', primitives: 0, drawn: 0, outOfRange: 0, labels: 0, contours: 0, sampled: 0 }
+}
+
+/**
+ * **分类字段**的计划：每一格一个**纯色六边形**。
+ *
+ * 三条口径（与数值字段不同的地方）：
+ * 1. **不插值、不画等值线、不写数值文字** —— 分类值之间没有"高低"（`"森林" > "沙漠"` 是胡说）；
+ * 2. **没填的格不画**（与数值字段同一条："没有数据"不是"某个颜色"）；
+ * 3. **认不出的 ID 用中性灰** —— "未知"必须看得见（§5.11），而不是消失或变成透明。
+ *
+ * 几何仍然只有一份：六边形顶点来自 `core/hex.ts` 的 `hexCorners`，
+ * 与 `fieldPlan` 的逐格分支**同一个函数**。
+ */
+function buildCategoryPlan(
+  input: OverlayPlanInput & { spec: CategoryOverlayFieldSpec },
+): OverlayPlanResult {
+  const { document, spec, style, bounds, categoryColors } = input
+  const primitives: FieldPrimitive[] = []
+  const opacity = style.opacity
+  for (const [key, cell] of Object.entries(document.terrain)) {
+    const id = spec.readCategory(cell)
+    if (id === undefined) continue
+    const axial = parseCellKey(key)
+    if (axial === null) continue
+    if (bounds !== undefined && !cellIntersectsBBox(document.grid, axial.q, axial.r, bounds)) continue
+    // 现读的自定义目录优先；没有就用字段自带的回退（内置目录 / 中性灰）
+    const color = categoryColors?.get(id) ?? spec.resolveColor(id, style)
+    if (typeof color !== 'string' || color.length === 0) continue
+    const corners = hexCorners(document.grid, axial.q, axial.r)
+    primitives.push({
+      kind: 'polygon',
+      points: corners.map((point) => [point.x, point.y] as [number, number]),
+      color,
+      opacity,
+    })
+  }
+  return {
+    plan: { primitives, field: null },
+    stats: {
+      mode: 'cell',
+      primitives: primitives.length,
+      drawn: primitives.length,
+      // 分类字段没有"越界"这个概念（也就没有纯色兜底那一说）
+      outOfRange: 0,
+      labels: 0,
+      contours: 0,
+      sampled: 0,
+    },
+  }
 }
 
 /** 数一数这些值里有多少个落在色带之外（与画布同一个 `colorForValue`，绝不另写比较） */
@@ -142,6 +214,15 @@ function fieldValues(field: FieldGrid): number[] {
  */
 export function buildOverlayPlan(input: OverlayPlanInput): OverlayPlanResult {
   const { document, spec, style } = input
+  // **分类字段走完全不同的那条路**：分类值之间没有高低，插值 / 等值线 / 数值文字都没有意义。
+  // 放在最前面而不是"在数值那条路里加分支"：后者的每一段都要多写一个"分类怎么办"，
+  // 而答案永远是"不适用"——那种分支会一路烂进 `fieldPlan`。
+  if (isCategoryField(spec)) return buildCategoryPlan({ ...input, spec })
+  if (!isNumericField(spec)) {
+    // 既不是数值也不是分类：只可能是字段表被改坏了。返回空计划（渲染层照常继续画别的层）
+    return { plan: { primitives: [], field: null }, stats: emptyStats() }
+  }
+
   const mode: 'cell' | 'field' = style.mode === 'field' ? 'field' : 'cell'
   const calibration = document.elevation ?? DEFAULT_ELEVATION_CALIBRATION
   const withLabels = input.labels !== false
@@ -161,8 +242,10 @@ export function buildOverlayPlan(input: OverlayPlanInput): OverlayPlanResult {
         contourInterval: style.contourInterval,
         maxFieldCells: DEFAULT_MAX_FIELD_CELLS,
         formatValue: (value: number) => formatFieldReading(spec, value, style, calibration),
-        // 标注字号进几何：它决定"在线上挖多长一段"（挖的缝比字窄，数字就会压到线上）
-        labelSize: document.grid.size * OVERLAY_LABEL_SCALE,
+        // 标注字号与重复间隔都进几何：前者决定"在线上挖多长一段"，后者决定"每隔多远放一个"
+        // （挖的缝比字窄、或间隔没进几何，数字就会压到线上 / 密到糊）
+        labelSize: document.grid.size * CONTOUR_LABEL_SCALE,
+        labelSpacing: document.grid.size * style.contourLabelSpacing,
       }),
     )
     return { plan, stats: statsOf(plan, mode, style.ramp, samples) }
@@ -186,7 +269,8 @@ export function buildOverlayPlan(input: OverlayPlanInput): OverlayPlanResult {
           contourInterval: style.contourInterval,
           maxFieldCells: DEFAULT_MAX_FIELD_CELLS,
           formatValue: (value: number) => formatFieldReading(spec, value, style, calibration),
-          labelSize: document.grid.size * OVERLAY_LABEL_SCALE,
+          labelSize: document.grid.size * CONTOUR_LABEL_SCALE,
+          labelSpacing: document.grid.size * style.contourLabelSpacing,
           ...(input.precomputedField !== undefined ? { precomputedField: input.precomputedField } : {}),
         }),
   })
@@ -276,6 +360,9 @@ export function overlayFieldCacheKey(
     style.mode,
     style.opacity,
     style.contourInterval ?? '',
+    // 数字的重复间隔也进键：它是**几何**（决定沿线上有几个数字）——
+    // 漏掉它就会表现成"在设置里把间隔调小了，画面要等下次数据变化才变密"（用户验收项之一）
+    style.contourLabelSpacing,
     // 展示单位与地图标定也要进键：它们**不改变几何**，但改变等值线上的数字
     // （"5" 与 "5 km" 是同一层线）。漏掉这两项就会表现成"在设置里换了单位，
     // 线还在、数字要等下次数据变化才更新" —— 比"改了颜色不刷新"更隐蔽。

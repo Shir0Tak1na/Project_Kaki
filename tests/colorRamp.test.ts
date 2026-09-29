@@ -19,6 +19,7 @@ import {
   mixColors,
   normalizeRampSpec,
   oklabToSrgb,
+  oppositeTextColor,
   parseHexColor,
   relativeLuminance,
   rgbToHex,
@@ -89,6 +90,17 @@ test('textColorOf 按对比度选字色（浅黄底必须用深色字，这是"�
   // #f59e0b 的相对亮度约 0.44 < 0.5，朴素写法会选白字 —— 但那对比度只有 2.1，读不清
   assert.equal(textColorOf('#f59e0b'), DARK_TEXT)
   assert.equal(textColorOf('#0000ff'), '#ffffff')
+})
+
+test('oppositeTextColor：与字色**相反**（白字配深边 / 深字配浅边），且与 textColorOf 恒不相等', () => {
+  // 等值线数字的描边口径就靠这一条：写死白边会让"深字 + 白边"压在浅色场上糊成一坨（用户实测报过）
+  assert.equal(oppositeTextColor('#0000ff'), DARK_TEXT, '深底白字 → 描边必须是深色')
+  assert.equal(oppositeTextColor('#ffffff'), '#ffffff', '白底深字 → 描边必须是白色')
+  assert.equal(oppositeTextColor('#f59e0b'), '#ffffff')
+  // 不变量：描边色永远与字色不同（这一条对任何颜色都成立，包括解析不了的坏值）
+  for (const color of ['#0000ff', '#ffffff', '#f59e0b', '#1e3a8a', 'not-a-color', '']) {
+    assert.notEqual(oppositeTextColor(color), textColorOf(color), color)
+  }
 })
 
 test('colorForValue：端点取锚点原色，带内插值，越界给纯色并标明方向', () => {

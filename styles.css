@@ -142,17 +142,17 @@
   font-style: italic;
 }
 
-/* ---- 工具条 ---- */
+/* ---- 工具条（施工文件 §F.3：搬到左上角，降级成**状态显示**）---- */
 .fc-toolbar {
   position: absolute;
   top: 8px;
-  right: 76px;
+  left: 8px;
   z-index: 20;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  max-width: min(460px, calc(100% - 120px));
+  max-width: min(460px, calc(100% - 300px));
   padding: 6px 8px;
   border-radius: 8px;
   background: var(--background-secondary);
@@ -166,12 +166,158 @@
 @media (max-width: 700px) {
   .fc-toolbar {
     top: 8px;
-    right: 8px;
     left: 8px;
+    right: 8px;
     max-width: none;
     max-height: 38vh;
     overflow: auto;
   }
+}
+
+/* 状态条：整条工具条的最后一行，占满宽度（它说的是"整体状态"，不属于任何一组按钮） */
+.fc-toolbar-status {
+  flex-basis: 100%;
+  padding-top: 4px;
+  margin-top: 2px;
+  border-top: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* ---- 选择信息卡（右上角，占原工具浮窗的位置；施工文件 §C.4 / §F.3）---- */
+.fc-selection-card {
+  position: absolute;
+  top: 8px;
+  right: 76px;
+  z-index: 20;
+  width: min(280px, calc(100% - 120px));
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+/* 没有选择时整张卡片不显示（§F.3）—— 用 class 切换而不是删元素 */
+.fc-selection-card.is-empty {
+  display: none;
+}
+
+.fc-selection-card-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.fc-selection-card-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 0;
+}
+
+.fc-selection-card-label {
+  flex: 0 0 auto;
+  min-width: 72px;
+  color: var(--text-muted);
+}
+
+.fc-selection-card-value {
+  flex: 1 1 auto;
+  word-break: break-all;
+}
+
+.fc-selection-card-clear {
+  margin-top: 8px;
+  width: 100%;
+}
+
+/* ---- 数据层笔刷（§E）：层 / 算法 / 数值 / 群系 ---- */
+.fc-toolbar-mini-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.fc-toolbar-brushfield-select,
+.fc-toolbar-brushbiome-select {
+  max-width: 150px;
+}
+
+.fc-toolbar-brushop-group {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.fc-toolbar-brushvalue {
+  width: 76px;
+}
+
+/* 未确认的数值（换层 / 换算法之后）：字变灰、边框虚线 —— 数字还留着，但要回车才算数 */
+.fc-toolbar-brushvalue.is-unconfirmed {
+  color: var(--text-faint);
+  border-style: dashed;
+}
+
+/* ---- 选择筛选器对话框（规则子句构建器）---- */
+.fc-filter-clauses {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.fc-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* 非法 / 没填完的那一行标红，并把原因写在旁边（§C.2 第 4 条：即时校验） */
+.fc-filter-row.is-invalid {
+  border-color: var(--text-error);
+}
+
+.fc-filter-problem {
+  color: var(--text-error);
+  font-size: 11px;
+}
+
+.fc-filter-problem:empty {
+  display: none;
+}
+
+.fc-filter-number {
+  width: 84px;
+}
+
+.fc-filter-multi {
+  min-width: 120px;
+  max-width: 220px;
+  min-height: 54px;
+}
+
+.fc-filter-remove {
+  margin-left: auto;
+}
+
+.fc-filter-echo {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-height: 1.2em;
+}
+
+.fc-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
 }
 
 .fc-toolbar-group {
@@ -360,10 +506,10 @@
   padding: 2px;
 }
 
-/* ---- 面板里的图层开关（六层：地形/网格/区域/路径/标记/名称） ---- */
+/* ---- 面板里的图层开关（九层：底图 5 + 地物 4，见 LAYER_TABLE 的 displayGroup） ---- */
 
 .fc-panel-layers {
-  /* 两列网格：六个开关占三行，侧边栏再窄也不至于把动作列表挤到屏幕外 */
+  /* 两列网格：开关占几行由图层表决定，侧边栏再窄也不至于把动作列表挤到屏幕外 */
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px 6px;
@@ -375,7 +521,11 @@
   grid-column: 1 / -1;
 }
 
-.fc-layer-toggle {
+.fc-layer-toggle,
+/* 「显示图例」与图层开关同一套视觉语言（它也是"看不看"这一类），
+   但**刻意用另一个 class**：它不是图层，"九个图层开关"那条断言按 class 数数，
+   混进来会让"加了第十层却发现断言还是 9"这种错误看不出来 */
+.fc-legend-toggle {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -392,31 +542,54 @@
   overflow: hidden;
 }
 
-.fc-layer-toggle:hover {
+.fc-layer-toggle:hover,
+.fc-legend-toggle:hover {
   background: var(--background-modifier-hover);
   border-color: var(--background-modifier-border);
 }
 
 /* 打开的那一层：读得出来（颜色 + 圆点实心），不能只靠圆点形状 */
-.fc-layer-toggle.is-active {
+.fc-layer-toggle.is-active,
+.fc-legend-toggle.is-active {
   color: var(--text-normal);
   background: var(--background-modifier-active-hover, var(--background-secondary));
   border-color: var(--background-modifier-border);
 }
 
-.fc-layer-toggle-mark {
+.fc-layer-toggle-mark,
+.fc-legend-toggle-mark {
   flex: 0 0 auto;
   font-size: 9px;
   color: var(--text-faint);
 }
 
-.fc-layer-toggle.is-active .fc-layer-toggle-mark {
+.fc-layer-toggle.is-active .fc-layer-toggle-mark,
+.fc-legend-toggle.is-active .fc-legend-toggle-mark {
   color: var(--text-accent);
 }
 
-.fc-layer-toggle-label {
+.fc-layer-toggle-label,
+.fc-legend-toggle-label {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ---- 面板「显示」第三组：数据层参数（与设置页共用同一份控件渲染） ---- */
+
+/* 面板很窄：把这一节里的控件压紧一点，并把每行的标题与控件改成上下排列 */
+.fc-panel-data {
+  display: block;
+}
+
+.fc-panel-data .fc-panel-field-title {
+  margin: 8px 0 2px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.fc-panel-data .fc-panel-data-field {
+  padding: 0 2px;
 }
 
 /* ---- 画布上的图例（默认隐藏，由工具条按钮切换） ---- */

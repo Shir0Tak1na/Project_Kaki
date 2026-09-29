@@ -16,12 +16,14 @@
  */
 
 import type { TerrainCell } from '../data/mapDocument.ts'
+import { DEFAULT_CONTOUR_LABEL_SPACING_FACTOR } from './fieldPlan.ts'
 import { defaultDepthRamp, defaultTemperatureRamp, normalizeRampSpec, type RampSpec } from './colorRamp.ts'
 import { formatDepthReading, type DepthDisplayUnit, type ElevationCalibration } from './elevationUnits.ts'
+import { BIOME_UNKNOWN_COLOR, builtinBiomeColor } from './biomeCatalog.ts'
 import type { LayerKey } from './layerVisibility.ts'
 
 /** 数据字段的 ID：它同时是设置键、图例 kind（`temperature` 对应图层 id 也是它） */
-export type FieldId = 'temperature' | 'depth'
+export type FieldId = 'temperature' | 'depth' | 'biome'
 
 /** 数据层的渲染参数（插件设置，**不是**地图文件里的东西） */
 export interface OverlayStyle {
@@ -63,6 +65,27 @@ export interface OverlayStyle {
    * 逐格模式下这一项无意义（界面上也不显示），但仍然存着 —— 切回来时用户上次填的值还在。
    */
   contourInterval: number | null
+  /**
+   * 连续场：等值线上数字的**重复间隔**（单位：**格半径的倍数**）。
+   *
+   * 用户追加要求："还要考虑每隔多少距离重复一次数字。" 等高线图的常规画法是"读数随处可读"，
+   * 所以沿每条线每隔一段就重复标一次。它是**世界距离**（= 这个数 × 格半径），
+   * 于是"调小"在任何缩放下都是同样的地图距离，不会"放大以后才变密"。
+   *
+   * 数字之间还有一条"至少 6 倍字宽"的下限（防挤），所以调得再小也不会糊成一团。
+   * 逐格模式下这一项无意义（界面上也不显示），但仍然存着 —— 切回来时用户上次填的值还在。
+   */
+  contourLabelSpacing: number
+  /**
+   * **分类字段**（生物群系）的逐条配色覆盖：分类 ID → 颜色。
+   *
+   * 三条口径（`BIOMES.md` §3 决定三）：
+   * - 颜色**属于目录条目**（每条自带），这里只存**用户逐条改过**的那些；
+   * - 没改过的走目录里的颜色 —— 于是"换一份分类表 = 换一批颜色"，不必改代码；
+   * - 与 `unit` 一样：**只有分类字段写这一项**，数值字段写了就是无意义的第二份状态
+   *   （`normalizeOverlayStyles` 会按 `numeric` 决定收不收）。
+   */
+  categoryColors?: Record<string, string>
 }
 
 /** 数据层的两种显示方式（下拉选项的顺序就是这里的顺序） */
@@ -116,13 +139,13 @@ export interface OverlayFieldUnits {
   suffixOf: (unit: DepthDisplayUnit) => string
 }
 
-export interface OverlayFieldSpec {
+export interface OverlayFieldSpecBase {
   /** 字段 ID（设置键 / 图例用） */
   id: FieldId
   /** 对应的**图层 id**（`LAYER_TABLE` 里那一行；可见性只由它决定） */
   layerId: LayerKey
   /** 一格上挂这个值的键名（写进地图文件的那一个） */
-  cellKey: 'temp' | 'depth'
+  cellKey: string
   /**
    * 这个字段的值是不是**一个数**。
    *
@@ -130,6 +153,10 @@ export interface OverlayFieldSpec {
    * 只对数值字段成立 —— 生物群系（§D）的值是一个**分类 ID**，没有"平均值"也没有"乘 2"。
    * 于是弹窗与笔刷遍历字段表时按这一位筛行，**不必在各处各写一份"哪几个字段是数值"的清单**。
    * 刻意写成**必填**（没有缺省）：加字段的人必须正面回答"它是数值还是分类"，漏写会被 tsc 拦住。
+   *
+   * ⚠️ 它同时是**判别属性**：`isNumericField` / `isCategoryField` 两个守卫据此把
+   * `OverlayFieldSpec` 收窄成下面两个接口之一 —— 于是"分类字段没有 `read`"这件事
+   * **在类型上就成立**，不必靠 `spec.read?.(cell)` 那种"到处记得加问号"的写法。
    */
   numeric: boolean
   /** 给人看的名字（设置页、图例） */
@@ -138,6 +165,13 @@ export interface OverlayFieldSpec {
   unit: string
   /** 这个字段有没有"展示单位"（深度有；温度没有）。有则 `OverlayStyle.unit` 生效 */
   units?: OverlayFieldUnits
+  /** 这一层的出厂样式（每次调用返回新对象） */
+  defaultStyle: () => OverlayStyle
+}
+
+/** 数值字段（温度 / 深度…）：值是一个有限数，能插值、能算等值线、能做加减乘除 */
+export interface NumericOverlayFieldSpec extends OverlayFieldSpecBase {
+  numeric: true
   /** 从一格读出这个字段的值；**没有数据时返回 `undefined`**（绝不返回 0 冒充） */
   read: (cell: TerrainCell | undefined) => number | undefined
   /**
@@ -147,8 +181,39 @@ export interface OverlayFieldSpec {
    * 标定从**地图文件**的 `elevation` 段现取 —— 于是"换成千米"只是换个读法，文件不动。
    */
   format?: (value: number, style: OverlayStyle, calibration: ElevationCalibration) => string
-  /** 这一层的出厂样式（每次调用返回新对象） */
-  defaultStyle: () => OverlayStyle
+}
+
+/**
+ * **分类字段**（生物群系…）：值是一个分类 ID，没有数值语义。
+ *
+ * 渲染上它走**完全不同的那条路**（逐格纯色，没有渐变、没有等值线、没有数值文字）——
+ * 见 `overlayPlan` 里的分类分支。这一点的意义不只是"少画点东西"：
+ * 对一个分类 ID 做插值是**没有意义的**，所以这里根本不提供 `read`。
+ */
+export interface CategoryOverlayFieldSpec extends OverlayFieldSpecBase {
+  numeric: false
+  /** 从一格读出分类 ID；**没有值时返回 `undefined`**（"未填"与"填了一个认不出的 ID"是两件事） */
+  readCategory: (cell: TerrainCell | undefined) => string | undefined
+  /**
+   * **值 → 颜色**的解析：`undefined` = 这一格没有填。
+   *
+   * 认不出的 ID（别的库写的）必须返回一个**可见的**回退色，而不是抛错或空白（§5.11）。
+   * 自定义条目的颜色来自插件设置，所以绘制层会把现读的那份目录**覆盖**进来
+   * （见 `OverlayPlanInput.categoryColors`）；缺省实现只认内置目录。
+   */
+  resolveColor: (id: string | undefined, style: OverlayStyle) => string
+}
+
+export type OverlayFieldSpec = NumericOverlayFieldSpec | CategoryOverlayFieldSpec
+
+/** 这个字段是不是数值字段（**唯一**的收窄入口：需要 `read` 的地方都先过它） */
+export function isNumericField(spec: OverlayFieldSpec): spec is NumericOverlayFieldSpec {
+  return spec.numeric === true && typeof (spec as NumericOverlayFieldSpec).read === 'function'
+}
+
+/** 这个字段是不是分类字段（需要 `readCategory` 的地方都先过它） */
+export function isCategoryField(spec: OverlayFieldSpec): spec is CategoryOverlayFieldSpec {
+  return spec.numeric === false && typeof (spec as CategoryOverlayFieldSpec).readCategory === 'function'
 }
 
 /**
@@ -176,7 +241,7 @@ export function formatOverlayValue(value: number): string {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
 }
 
-const TEMPERATURE_FIELD: OverlayFieldSpec = {
+const TEMPERATURE_FIELD: NumericOverlayFieldSpec = {
   id: 'temperature',
   layerId: 'temperature',
   cellKey: 'temp',
@@ -184,7 +249,14 @@ const TEMPERATURE_FIELD: OverlayFieldSpec = {
   label: '温度',
   unit: '℃',
   read: (cell) => readFinite(cell?.temp),
-  defaultStyle: () => ({ opacity: 0.5, showValues: false, ramp: defaultTemperatureRamp(), mode: 'cell', contourInterval: null }),
+  defaultStyle: () => ({
+    opacity: 0.5,
+    showValues: false,
+    ramp: defaultTemperatureRamp(),
+    mode: 'cell',
+    contourInterval: null,
+    contourLabelSpacing: DEFAULT_CONTOUR_LABEL_SPACING_FACTOR,
+  }),
 }
 
 /**
@@ -194,7 +266,7 @@ const TEMPERATURE_FIELD: OverlayFieldSpec = {
  * 米与千米不需要标定，相对值需要地图的 `elevation` 段（未标定时读数显示"未标定"，
  * 而不是拿一个编造的尺度凑数）。
  */
-const DEPTH_FIELD: OverlayFieldSpec = {
+const DEPTH_FIELD: NumericOverlayFieldSpec = {
   id: 'depth',
   layerId: 'depth',
   cellKey: 'depth',
@@ -205,16 +277,77 @@ const DEPTH_FIELD: OverlayFieldSpec = {
   read: (cell) => readFinite(cell?.depth),
   // 归一化保证 `style.unit` 一定是三个合法值之一，所以这里的兜底只是类型上的需要
   format: (value, style, calibration) => formatDepthReading(value, style.unit ?? 'm', calibration),
-  defaultStyle: () => ({ opacity: 0.5, showValues: false, ramp: defaultDepthRamp(), unit: 'm', mode: 'cell', contourInterval: null }),
+  defaultStyle: () => ({
+    opacity: 0.5,
+    showValues: false,
+    ramp: defaultDepthRamp(),
+    unit: 'm',
+    mode: 'cell',
+    contourInterval: null,
+    contourLabelSpacing: DEFAULT_CONTOUR_LABEL_SPACING_FACTOR,
+  }),
+}
+
+/**
+ * **生物群系**：数据层的第三个字段，也是**字段表的第一次真正扩展** —— 它是一个**分类字段**。
+ *
+ * 与温度 / 深度的差别不是"少一个单位"，而是**整个渲染路径不同**：
+ * 分类值之间没有"高低"，所以既不插值、也不画等值线、也不写数值文字 ——
+ * 每一格直接取分类目录里那条自己的颜色，**逐格纯色**（见 `overlayPlan` 的分类分支）。
+ *
+ * 配色三条（`BIOMES.md` §3 决定三）：颜色属于**目录条目**（每条自带），
+ * `style.categoryColors` 只存用户**逐条改过**的那些；认不出的 ID 用中性灰（可见的"未知"）。
+ *
+ * `cellKey` 是 `biome`：它已经在 `mapDocument.ts` 的 `KNOWN_CELL_KEYS` 与写盘固定顺序里
+ * （§D 数据那一行），所以这里的值和文件里的值**同一个键**，没有第二份映射。
+ */
+const BIOME_FIELD: CategoryOverlayFieldSpec = {
+  id: 'biome',
+  layerId: 'biome',
+  cellKey: 'biome',
+  numeric: false,
+  label: '生物群系',
+  unit: '',
+  readCategory: (cell) => {
+    const value = cell?.biome
+    return typeof value === 'string' && value.length > 0 ? value : undefined
+  },
+  resolveColor: (id, style) => {
+    // 认不出的 ID（别的库写的、或用户刚把定义删了）→ **中性灰**：
+    // "未知"必须看得见（§5.11），而不是变成透明或空白。
+    // ⚠️ `undefined`（这一格**没填**）根本走不到这里 —— 计划层会直接跳过它（与数值字段同一条口径：
+    // "没有数据"不画，而不是画成某个颜色）。
+    if (id === undefined) return BIOME_UNKNOWN_COLOR
+    // 用户逐条改过的优先（`categoryColors` 只装改过的那些）
+    const override = style.categoryColors?.[id]
+    if (typeof override === 'string' && override.length > 0) return override
+    return builtinBiomeColor(id)
+  },
+  defaultStyle: () => ({
+    opacity: 0.5,
+    showValues: false,
+    // 分类字段不用色带；这一项只为让 `OverlayStyle` 的形状统一，界面上**不显示**它的控件
+    // （设置页按 `isNumericField` 筛掉色带 / 越界色 / 单位 / 显示方式那几个控件）。
+    ramp: defaultTemperatureRamp(),
+    mode: 'cell',
+    contourInterval: null,
+    contourLabelSpacing: DEFAULT_CONTOUR_LABEL_SPACING_FACTOR,
+    categoryColors: {},
+  }),
 }
 
 /**
  * 字段登记表。**加一个字段 = 加一行**（外加 `LAYER_TABLE` 里对应的一行图层）。
  *
  * 温度是第一份模板：它的形状就是后面深度 / 生物群系要照抄的形状。
- * 深度是第二份 —— 多出来的只有 `units` 与 `format`（"值怎么读"），渲染 / 图例 / 设置页都不用改。
+ * 深度是第二份 —— 多出来的只有 `units` 与 `format`（"值怎么读"）。
+ * 生物群系是第三份，也是**形状上真正多出一条路的那一份**：它是分类字段，
+ * 于是"数值字段"与"分类字段"在类型上就是两个接口（见 `isNumericField` / `isCategoryField`）。
  */
-export const OVERLAY_FIELDS: readonly OverlayFieldSpec[] = [TEMPERATURE_FIELD, DEPTH_FIELD]
+export const OVERLAY_FIELDS: readonly OverlayFieldSpec[] = [TEMPERATURE_FIELD, DEPTH_FIELD, BIOME_FIELD]
+
+/** 只要数值字段（"每格默认值"、加减乘除笔刷、数值筛选规则都用它 —— **唯一**的筛法） */
+export const NUMERIC_OVERLAY_FIELDS: readonly NumericOverlayFieldSpec[] = OVERLAY_FIELDS.filter(isNumericField)
 
 /** 这一层当前的展示单位（没有 `units` 的字段是 `undefined`） */
 export function overlayUnitOf(spec: OverlayFieldSpec, style: OverlayStyle): DepthDisplayUnit | undefined {
@@ -247,6 +380,8 @@ export function formatFieldReading(
   style: OverlayStyle,
   calibration: ElevationCalibration,
 ): string {
+  // 分类字段没有"读数"（它的值不是数）—— 这一支只可能是调用方搞错了；给一个空串而不是抛异常
+  if (!isNumericField(spec)) return ''
   if (spec.format) return spec.format(value, style, calibration)
   return formatOverlayValue(value)
 }
@@ -338,6 +473,14 @@ export function normalizeOverlayStyles(raw: unknown): OverlayStyles {
         typeof record.contourInterval === 'number' && Number.isFinite(record.contourInterval) && record.contourInterval > 0
           ? record.contourInterval
           : fallback.contourInterval,
+      // 数字重复间隔：正的有限数才算（0 / 负数 / 非数字一律回出厂 6）——
+      // 与等值线间距同一条口径：拒绝，而不是悄悄夹到某个"看起来合理"的值
+      contourLabelSpacing:
+        typeof record.contourLabelSpacing === 'number' &&
+        Number.isFinite(record.contourLabelSpacing) &&
+        record.contourLabelSpacing > 0
+          ? record.contourLabelSpacing
+          : fallback.contourLabelSpacing,
     }
     // 展示单位只对有 `units` 的字段生效；别的字段**不写这一项**（写了就是无意义的第二份状态）
     if (spec.units) {
@@ -346,7 +489,31 @@ export function normalizeOverlayStyles(raw: unknown): OverlayStyles {
         ? (unit as DepthDisplayUnit)
         : spec.units.defaultUnit
     }
+    // 逐条配色覆盖只对**分类字段**生效（数值字段写了就是第二份状态，直接不收）
+    if (isCategoryField(spec)) {
+      style.categoryColors = normalizeCategoryColors(record.categoryColors)
+    }
     out[spec.id] = style
+  }
+  return out
+}
+
+/**
+ * 逐条配色覆盖的规范化：只收"非空字符串键 + 颜色写法正确"的那些。
+ *
+ * 坏项**跳过**（而不是整体回退出厂）：用户手改 `data.json` 改坏了一条颜色，
+ * 不该让**整层**的配色都回到出厂 —— 少一条覆盖的后果只是那一格用目录色。
+ * 空对象**不留键**（与"清空默认值要删键"同一条口径：空表与"没有这一段"是同一件事）。
+ */
+function normalizeCategoryColors(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key.length === 0) continue
+    if (typeof value !== 'string') continue
+    const color = value.trim()
+    if (!/^#[0-9a-fA-F]{3,8}$/.test(color)) continue
+    out[key] = color
   }
   return out
 }

@@ -178,6 +178,13 @@ export interface TerrainCell {
    */
   depth?: number
   /**
+   * **生物群系 ID**（分类字段，不是数）：值来自生物群系分类表（见 `docs/BIOMES.md`）。
+   *
+   * 为什么不设范围：分类表是"可整表替换"的配置（§D），写死一份枚举会在用户换表后把数据判成非法。
+   * 认不出的 ID 一律**原样保留**（与地形 / 图标同一条承诺），只由绘制层回退视觉。
+   */
+  biome?: string
+  /**
    * 格上**不认识的字段**（原样保留，序列化时摊平写回，不是嵌套的 `extra`）。
    *
    * 为什么要留这一手：以后会往格上加值（温度带、深度分层…）。如果解析层只认 `t/f/c`，
@@ -411,7 +418,7 @@ function isStorableTerrainId(value: unknown): value is string {
 }
 
 /** 格上"我们认识"的键：其余一律进 `extra` 原样保留（见 `TerrainCell.extra`） */
-const KNOWN_CELL_KEYS = new Set(['t', 'f', 'c', 'temp', 'depth', 'extra'])
+const KNOWN_CELL_KEYS = new Set(['t', 'f', 'c', 'temp', 'depth', 'biome', 'extra'])
 
 // 这里曾经有 `TEMP_RANGE` / `DEPTH_RANGE`（-100~100 / -12000~12000）—— **已删除**（2026-09-28）。
 // 它们只被侧栏检查器拿去**拒绝**超范围的输入，而那是设计上不存在的限制：
@@ -472,6 +479,8 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
     // 温度 / 深度：合法（有限数）就进正式字段；0 是合法值（0 ℃ / 海平面），所以**不**像 `f` 那样把 0 当缺省
     if (isFiniteNumber(raw.temp)) cell.temp = raw.temp
     if (isFiniteNumber(raw.depth)) cell.depth = raw.depth
+    // 生物群系：**非空字符串**才进正式字段；认不出的 ID 由绘制层回退（分类表可整表替换，见 TerrainCell.biome）
+    if (isNonEmptyString(raw.biome)) cell.biome = raw.biome
     // 不认识的键**原样留下**（只记名字，最后统一告警一次）
     const extra: Record<string, unknown> = {}
     for (const [unknownKey, unknownValue] of Object.entries(raw)) {
@@ -487,6 +496,11 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
       if (value === undefined || isFiniteNumber(value)) continue
       extra[field] = value
       invalidNumericFields.add(field)
+    }
+    // 生物群系给的不是非空字符串（数字 / 空串…）同样**不丢**：原值留在同名键里
+    if (raw.biome !== undefined && !isNonEmptyString(raw.biome)) {
+      extra.biome = raw.biome
+      invalidNumericFields.add('biome')
     }
     if (Object.keys(extra).length > 0) cell.extra = extra
     out[key] = cell
@@ -506,7 +520,7 @@ function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string
       path: 'terrain',
       message: `格上的 ${names
         .map((name) => JSON.stringify(name))
-        .join('、')} 不是有限数，已原样保留（这一版按"没有数据"处理：不参与颜色与统计，值本身一个字符都不改）`,
+        .join('、')} 不是可用的值（温度 / 深度要有限数、生物群系要非空字符串），已原样保留（这一版按"没有数据"处理：不参与颜色与统计，值本身一个字符都不改）`,
     })
   }
   return out
@@ -945,6 +959,9 @@ export function canonicalCellJson(cell: TerrainCell): string {
     const value = cell[field] !== undefined ? cell[field] : cell.extra?.[field]
     if (value !== undefined) out[field] = value
   }
+  // 生物群系：同上（正式字段优先；坏值按原键名写回）—— 位置固定在温度 / 深度之后
+  if (cell.biome !== undefined) out.biome = cell.biome
+  else if (cell.extra !== undefined && 'biome' in cell.extra) out.biome = cell.extra.biome
   if (cell.extra !== undefined) {
     for (const key of Object.keys(cell.extra).sort()) {
       if (KNOWN_CELL_KEYS.has(key)) continue

@@ -47,6 +47,22 @@ import {
   type SelectionInfo,
   type SelectionLabelResolvers,
 } from './selection.ts'
+import {
+  applyRuleToSelection,
+  applySelectionOperation,
+  cellsInRect,
+  expandSelectionByTerrain as expandByTerrain,
+  intersectSelection,
+  normalizeSelection,
+  sameCellSelection,
+  summarizeSelection,
+  type CellSelection,
+  type RuleApplyMode,
+  type SelectionOperation,
+  type SelectionSummary,
+} from '../render/selectionSet.ts'
+import { matchesGroup, type RuleGroup, type SelectionRuleContext } from '../render/selectionRules.ts'
+import { isNumericField, OVERLAY_FIELDS, type FieldId } from '../render/overlayFields.ts'
 import { nextLabelId, nextMarkerId, snapToCellCenter } from '../render/markerPlacement.ts'
 import { hitTestPolygon, hitTestPolyline, shapeBounds, visiblePolyline } from '../render/shapeGeometry.ts'
 import {
@@ -73,6 +89,40 @@ import {
   type RegionTypeEntry,
   type ResolvedRegionStyle,
 } from '../render/regionTypeCatalog.ts'
+
+/**
+ * 数据层笔刷的**逐格算法**（施工文件 §E 那张表的唯一实现）。
+ *
+ * 返回 `undefined` = **这一格不动**。三种"不动"：
+ * - `× / ÷` 遇到没有值的格（拿"没量过"去乘没有意义）；
+ * - 结果不是有限数（`÷ 0` 已在 `brushReadiness` 整笔拦下，这里是最后一道保险）；
+ * - 上游已经有"值相同就不动"的判断。
+ *
+ * `+ / −` 的**无值格从 `fallback`（每格默认值）起算，没有就 0**：
+ * 这是刻意行为（§E 写明"会把默认值固化进这一格"），所以 UI 上必须说明 —— 见 `MapPanel`/工具条。
+ */
+function applyBrushOp(
+  op: BrushOp,
+  previous: number | undefined,
+  value: number,
+  fallback: number | undefined,
+): number | undefined {
+  if (op === 'set') return Number.isFinite(value) ? value : undefined
+  if (op === '×' || op === '÷') {
+    if (previous === undefined) return undefined
+    const next = op === '×' ? previous * value : previous / value
+    return Number.isFinite(next) ? next : undefined
+  }
+  const base = previous ?? fallback ?? 0
+  const next = op === '+' ? base + value : base - value
+  return Number.isFinite(next) ? next : undefined
+}
+
+/** 地图级"每格默认值"里这个字段的兜底值（没有 / 不是有限数 → `undefined`） */
+function defaultValueOf(defaults: DataDefaults | null, key: string): number | undefined {
+  const value = defaults?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
 
 /** 选中项比较：同 kind 同 id 才算没变（`null` 与 `null` 相等） */
 function sameSelection(a: MapSelection | null, b: MapSelection | null): boolean {
@@ -133,6 +183,31 @@ export type EditorMode = 'select' | 'paint'
  * 区别只在于按下时做什么：铺地形 / 放标记 / 放文字 / 画路径与区域。
  */
 export type EditorTool = 'brush' | 'marker' | 'label' | 'path' | 'region'
+
+/**
+ * 选择模式下"左键拖动"的两种含义（施工文件 §C.1 / §C.3 第 2、3 条）。
+ *
+ * - `rect`：拉出一个矩形，收"格心落在矩形里"的格；
+ * - `brush`：沿笔迹圈选（复用笔刷的采样口径 `cellsAlongSegment`，笔迹扫过哪些格就选哪些格）。
+ *
+ * 两者都是"左键拖动"，所以必须有一个可选的状态来区分 —— 而不是靠修饰键
+ * （修饰键已经被"加选 / 取消"占用，§C.1 那张表里写死了）。
+ */
+export type SelectionMode = 'rect' | 'brush'
+
+/**
+ * 数据层笔刷的算法（施工文件 §E）。
+ *
+ * `set` 是给**分类字段**（生物群系）与"我想直接写这个数"用的；`+ - × ÷` 只对数值字段成立
+ * （对分类 ID 做乘法是没有意义的）。
+ */
+export type BrushOp = 'set' | '+' | '-' | '×' | '÷'
+
+/** 这条算法要不要一个"当前值"（`set` 也要 —— 它就是"设成这个数 / 这个 ID"） */
+export const BRUSH_OPS_FOR_NUMERIC: readonly BrushOp[] = ['set', '+', '-', '×', '÷']
+
+/** 笔刷能不能作画的结果：不能时**必须给一句人话**（状态条要显示它，§E 第 2 条） */
+export type BrushReadiness = { ok: true } | { ok: false; reason: string }
 
 /** 进行中的多点多边形/折线（还没提交到文档） */
 export interface MapDraft {
@@ -240,6 +315,32 @@ export interface EditorStatus {
   geometryMode: GeometryMode
   /** 当前选中的对象（`null` = 没选中）—— 侧栏检查器与高亮都读它 */
   selection: MapSelection | null
+  /**
+   * 当前**格选择**（有序去重的格键）。
+   *
+   * 与 `selection` 并存：`selection` 是"侧栏检查器在编辑哪一个对象"（单选），
+   * 它是"我正在看哪些格"（可多格）。两者在恰好一格时重合（见 `setCellSelection`）。
+   */
+  cellSelection: CellSelection
+  /** 选择模式下左键拖动是矩形框选还是笔迹框选 */
+  selectionMode: SelectionMode
+  /** 笔刷作用的**字段**：`null` = 地形（既有行为），否则是数据层字段（§E） */
+  brushField: FieldId | null
+  /** 数值字段的算法（对分类字段恒为 `set`） */
+  brushOp: BrushOp
+  /** 数值字段的当前值（`null` = 还没填 → 笔刷不生效，状态条写明原因） */
+  brushValue: number | null
+  /**
+   * 这个值**确认过**没有（§E 第 3 条："不静默沿用"）。
+   *
+   * 换字段 / 换算法 / 换地形时回到 `false`：数字**保留**（不用重打），但笔刷要等一次"确认"
+   * （回车或失焦）才生效 —— 于是"换到温度层，笔上还带着上一次深度用的 +200"这种事故不会发生。
+   */
+  brushValueConfirmed: boolean
+  /** 生物群系笔刷要设的 ID（只有 `brushField === 'biome'` 时用） */
+  brushBiome: string
+  /** 这个笔刷现在能不能作画（不能时给原因，见 §E 第 2 条） */
+  brushReady: BrushReadiness
 }
 
 export class MapEditor {
@@ -276,12 +377,38 @@ export class MapEditor {
   private strokeCells: Axial[] = []
   private strokeLastPoint: Point | null = null
   /**
+   * 数据层笔刷的状态（§E）。**字段为 `null` 时走既有的地形笔刷**（一行都不改）。
+   */
+  brushField: FieldId | null = null
+  brushOp: BrushOp = 'set'
+  brushValue: number | null = null
+  brushValueConfirmed = false
+  brushBiome = ''
+  /**
    * 当前选中的对象（用户要的"先选中，再决定操作"）。
    *
    * 刻意**不**进历史栈：选中是"看哪里"，不是对文档的修改 ——
    * 撤销一次却把选中也换掉，用户会觉得 Ctrl+Z"撤歪了"。
    */
   private selection: MapSelection | null = null
+  /**
+   * 格选择（多格）。**同样不进撤销栈**（施工文件 §C.3：撤销/重做、切画布、重载地图后
+   * **按 key 保留**选择）——所以它只活在这里，不产生 op，也不碰 history。
+   */
+  private cellSelection: CellSelection = []
+  /** 选择模式下左键拖动是矩形框选还是笔迹框选（默认矩形） */
+  selectionMode: SelectionMode = 'rect'
+  /** 进行中的框选手势（矩形起点 / 笔迹上一点 / 按下时的原选择 / 修饰键决定的集合运算） */
+  private cellDrag: {
+    mode: SelectionMode
+    operation: SelectionOperation
+    start: Point
+    last: Point
+    base: CellSelection
+    /** 笔迹模式已扫过的格（累积，抬手才算完） */
+    brushKeys: string[]
+    moved: boolean
+  } | null = null
   /** 选中那一刻撤销栈的深度（算"本次选中改了几处"的基准，见 `editsSinceSelection`） */
   private selectionUndoBaseline = 0
   /** 进行中的拖动移动（标记 / 文字标注） */
@@ -312,7 +439,103 @@ export class MapEditor {
       draftPoints: this.draft?.clickCount ?? 0,
       geometryMode: this.geometryMode,
       selection: this.selection,
+      cellSelection: this.cellSelection,
+      selectionMode: this.selectionMode,
+      brushField: this.brushField,
+      brushOp: this.brushOp,
+      brushValue: this.brushValue,
+      brushValueConfirmed: this.brushValueConfirmed,
+      brushBiome: this.brushBiome,
+      brushReady: this.brushReadiness(),
     }
+  }
+
+  // ------------------------------------------------- 数据层笔刷（§E）
+
+  /**
+   * 换笔刷作用的字段。`null` = 回地形笔刷。
+   *
+   * ⚠️ 换字段时把"确认过没有"**打回未确认**（§E 第 3 条）：值保留（不用重打），
+   * 但笔刷要等一次回车 / 失焦才生效 —— 否则"换到温度层，笔上还带着上一次给深度填的 +200"。
+   */
+  setBrushField(field: FieldId | null): void {
+    if (this.brushField === field) return
+    this.cancelStroke()
+    this.brushField = field
+    // 分类字段只有 `set`（对分类 ID 做加减乘除没有意义）
+    if (field !== null && !this.brushFieldIsNumeric()) this.brushOp = 'set'
+    this.brushValueConfirmed = false
+    this.options.onStateChanged?.()
+  }
+
+  /** 换算法（＋ − × ÷ / 设为）：同样打回未确认 */
+  setBrushOp(op: BrushOp): void {
+    if (this.brushOp === op) return
+    this.cancelStroke()
+    this.brushOp = op
+    this.brushValueConfirmed = false
+    this.options.onStateChanged?.()
+  }
+
+  /**
+   * 填笔刷的数值。
+   *
+   * `null` = 留空（笔刷**不生效**，状态条会说"请先填一个数值"）。
+   * 传一个有限数 = **确认**（§E：回车或失焦即确认）；非有限数一律当作"没填"。
+   */
+  setBrushValue(value: number | null): void {
+    const next = value !== null && Number.isFinite(value) ? value : null
+    if (this.brushValue === next && next !== null) {
+      // 同一个数再确认一次（用户回车）也要把"未确认"变成"已确认"
+      if (!this.brushValueConfirmed) {
+        this.brushValueConfirmed = true
+        this.options.onStateChanged?.()
+      }
+      return
+    }
+    this.cancelStroke()
+    this.brushValue = next
+    this.brushValueConfirmed = next !== null
+    this.options.onStateChanged?.()
+  }
+
+  /** 生物群系笔刷要设的 ID（空串 = 还没选，笔刷不生效） */
+  setBrushBiome(id: string): void {
+    if (this.brushBiome === id) return
+    this.cancelStroke()
+    this.brushBiome = id
+    this.brushValueConfirmed = id.length > 0
+    this.options.onStateChanged?.()
+  }
+
+  /** 非地形的笔刷就是"数据层笔刷"（§E 的那一套） */
+  isFieldBrush(): boolean {
+    return this.brushField !== null
+  }
+
+  private brushFieldIsNumeric(): boolean {
+    const field = this.brushField
+    if (field === null) return false
+    const spec = OVERLAY_FIELDS.find((candidate) => candidate.id === field)
+    return spec !== undefined && isNumericField(spec)
+  }
+
+  /**
+   * 这个笔刷现在能不能作画（§E 第 2 条）。
+   *
+   * 三种"不能"各有各的话：没填数值 / 没选群系 / 除以 0。
+   * 状态条直接把 `reason` 显示出来 —— 用户不该靠猜"为什么刷不动"。
+   */
+  brushReadiness(): BrushReadiness {
+    const field = this.brushField
+    if (field === null) return { ok: true }
+    if (!this.brushFieldIsNumeric()) {
+      return this.brushBiome.length > 0 ? { ok: true } : { ok: false, reason: '请先选一个生物群系' }
+    }
+    if (this.brushValue === null) return { ok: false, reason: '请先填一个数值' }
+    if (!this.brushValueConfirmed) return { ok: false, reason: '按回车确认这个数值后笔刷才生效' }
+    if (this.brushOp === '÷' && this.brushValue === 0) return { ok: false, reason: '不能除以 0' }
+    return { ok: true }
   }
 
   // ---------------------------------------------------------------- 选中
@@ -332,10 +555,15 @@ export class MapEditor {
     this.selection = selection
     // 记下"选中那一刻撤销栈有多深"：面板用「已改 N 处 / 撤销这些改动」就靠它
     this.selectionUndoBaseline = this.history.size().undo
+    this.notifySelectionChanged()
+    return true
+  }
+
+  /** 选中变了：侧栏检查器与覆盖层高亮都靠它重画（对象选中与格选择共用这一条通知） */
+  private notifySelectionChanged(): void {
     if (this.options.onSelectionChanged) this.options.onSelectionChanged()
     else this.options.onChanged()
     this.options.onStateChanged?.()
-    return true
   }
 
   /** 本次选中之后一共改了几处（一次提交 = 一条历史，所以直接数撤销栈） */
@@ -378,6 +606,237 @@ export class MapEditor {
       hitShape: (point, tolerance) => this.hitTestShape(point, tolerance),
     })
     return this.setSelection(hit)
+  }
+
+  // ------------------------------------------------- 格选择（多格；施工文件 §C）
+
+  getCellSelection(): CellSelection {
+    return this.cellSelection
+  }
+
+  /** 有没有任何选择（对象或格）—— Esc 的第一步与"清空"按钮据此判断 */
+  hasSelection(): boolean {
+    return this.selection !== null || this.cellSelection.length > 0
+  }
+
+  /**
+   * 直接替换格选择，**不同步对象选中**（同步的规则见 `setCellSelection`）。
+   *
+   * 返回是否真的变了：框选拖动时每帧都会调用它，没变就不该重绘。
+   */
+  private assignCellSelection(next: CellSelection): boolean {
+    if (sameCellSelection(this.cellSelection, next)) return false
+    this.cellSelection = next
+    this.notifySelectionChanged()
+    return true
+  }
+
+  /**
+   * 设置格选择（侧栏 / 规则筛选 / 连通扩展都走它）。
+   *
+   * 顺带把**对象选中**对齐到格选择，让侧栏检查器有确定的含义：
+   * - 恰好 1 格 → 选中该格（检查器显示它的字段）；
+   * - 多格 → 清掉对象选中（侧栏改显「整批编辑」，见 §C.5）；
+   * - 0 格 → **不动**对象选中（用户可能刚点中一个标记；清空走 `clearAllSelection`）。
+   */
+  setCellSelection(keys: readonly string[]): boolean {
+    const next = normalizeSelection(keys)
+    const changed = this.assignCellSelection(next)
+    if (next.length === 1) {
+      const only = next[0]!
+      // 只有"这一格真的在地图里"才同步对象选中，否则检查器会指向一个不存在的对象
+      const exists = this.options.getDocument()?.terrain[only] !== undefined
+      return this.setSelection(exists ? { kind: 'cell', id: only } : null) || changed
+    }
+    if (next.length > 1) return this.setSelection(null) || changed
+    return changed
+  }
+
+  clearCellSelection(): boolean {
+    return this.assignCellSelection([])
+  }
+
+  /** 一键清空（对象 + 格）：Esc 的第一步、卡片/面板上的"清空选择" */
+  clearAllSelection(): boolean {
+    const cells = this.assignCellSelection([])
+    const object = this.setSelection(null)
+    return cells || object
+  }
+
+  /** 切换到矩形框选 / 笔迹框选（§C.3 第 2、3 条） */
+  setSelectionMode(mode: SelectionMode): void {
+    if (this.selectionMode === mode) return
+    this.cancelCellDrag()
+    this.selectionMode = mode
+    this.options.onStateChanged?.()
+  }
+
+  /** 这一点属于哪一格（只做坐标换算，不看文档里有没有这一格） */
+  cellKeyAt(world: Point): string | null {
+    const grid = this.grid()
+    if (!grid) return null
+    const axial = worldToAxial(grid, world)
+    return cellKey(axial.q, axial.r)
+  }
+
+  /**
+   * 选择模式下"点一下"的完整语义：先按命中顺序选中**对象**（既有行为：标记 → 名称 → 形状 → 地块），
+   * 命中地块时把它设为**唯一的**格选择；命中别的对象或空处则清空格选择。
+   */
+  selectAtPoint(world: Point, toleranceWorld: number): boolean {
+    const changedObject = this.selectAt(world, toleranceWorld)
+    const hit = this.selection
+    const changedCells = this.assignCellSelection(hit !== null && hit.kind === 'cell' ? [hit.id] : [])
+    return changedObject || changedCells
+  }
+
+  /** Shift / Alt 的**单击**形态：把"这一格"并入选择 / 移出选择（不是拖动） */
+  toggleCellAt(world: Point, operation: SelectionOperation): boolean {
+    const key = this.cellKeyAt(world)
+    if (key === null) return false
+    if (this.options.getDocument()?.terrain[key] === undefined) return false
+    return this.setCellSelection(applySelectionOperation(this.cellSelection, [key], operation))
+  }
+
+  // ---- 拖动框选（矩形 / 笔迹）：手势状态住在编辑器里，交互层只转发生命周期 ----
+
+  /**
+   * 按下开始框选。`operation` 由修饰键决定（`Shift` 加选 / `Alt` 取消 / 默认替换）。
+   *
+   * 为什么手势状态不放在交互层：笔迹框选要复用 `cellsAlongSegment`（笔刷那一套采样口径），
+   * 而它住在编辑器里；放到交互层就得把采样几何再写一遍 —— 那是两份一定会漂移的几何。
+   */
+  beginCellDrag(world: Point, operation: SelectionOperation): void {
+    this.cellDrag = {
+      mode: this.selectionMode,
+      operation,
+      start: { x: world.x, y: world.y },
+      last: { x: world.x, y: world.y },
+      // 按下时的原选择：加选 / 移出都以它为底（拖动中反复重算，避免把自己越叠越多）
+      base: this.cellSelection,
+      brushKeys: [],
+      moved: false,
+    }
+  }
+
+  isCellDragging(): boolean {
+    return this.cellDrag !== null
+  }
+
+  /**
+   * 拖动中：重算框选范围内的格并更新选择。返回是否真的变了。
+   *
+   * ⚠️ **"算不算拖动"由交互层按屏幕像素判定**（客户端坐标，4 px 阈值）：世界坐标里
+   * 一个格宽是 40 世界单位，阈值换算会随缩放漂移 —— 那是"手感"的事，只该由屏幕像素说话。
+   */
+  updateCellDrag(world: Point): boolean {
+    const drag = this.cellDrag
+    const document_ = this.options.getDocument()
+    if (!drag || !document_) return false
+    const grid = document_.grid
+    drag.moved = true
+
+    let keys: readonly string[]
+    if (drag.mode === 'brush') {
+      const { cells } = cellsAlongSegment(grid, drag.last, world, this.clampedRadius())
+      for (const cell of cells) {
+        const key = cellKey(cell.q, cell.r)
+        if (document_.terrain[key] === undefined) continue
+        if (!drag.brushKeys.includes(key)) drag.brushKeys.push(key)
+      }
+      keys = drag.brushKeys
+    } else {
+      keys = cellsInRect(document_, grid, drag.start, world)
+    }
+    drag.last = { x: world.x, y: world.y }
+    return this.assignCellSelection(applySelectionOperation(drag.base, keys, drag.operation))
+  }
+
+  /** 抬手：结束框选。返回这次手势**是否拖动过**（没拖动 = 点击，交互层改走单击语义） */
+  endCellDrag(): boolean {
+    const drag = this.cellDrag
+    this.cellDrag = null
+    return drag?.moved === true
+  }
+
+  cancelCellDrag(): void {
+    this.cellDrag = null
+  }
+
+  // ---- 规则筛选与连通扩展（§C.2 / §C.3 第 5–9 条）：逻辑全在纯函数里，这里只做接线 ----
+
+  /** 把一组规则应用到选择（替换 / 并入 / 移出）。返回应用后的格数 */
+  applySelectionRule(group: RuleGroup, mode: RuleApplyMode, context?: SelectionRuleContext): number {
+    const document_ = this.options.getDocument()
+    if (!document_) return 0
+    this.setCellSelection(applyRuleToSelection(this.cellSelection, document_, group, mode, context))
+    return this.cellSelection.length
+  }
+
+  /**
+   * 在**当前选择内**再筛（§C.2 末尾那条）。
+   *
+   * "当前选择内"依赖选择本身，所以它不是逐格谓词、不能当规则 —— 这里做成动作（intersect）。
+   * 返回筛选后的格数（**0 是正常结果**，卡片会显示"选择已空"，不是错误）。
+   */
+  filterSelectionInPlace(group: RuleGroup, context?: SelectionRuleContext): number {
+    const document_ = this.options.getDocument()
+    if (!document_) return 0
+    const next = intersectSelection(document_, this.cellSelection, (_key, cell) => matchesGroup(cell, group, context))
+    this.setCellSelection(next)
+    return this.cellSelection.length
+  }
+
+  /** 以当前选择为种子，按**同地形连通**扩展（§C.3 第 9 条） */
+  expandSelectionByTerrain(): number {
+    const document_ = this.options.getDocument()
+    if (!document_) return 0
+    this.setCellSelection(expandByTerrain(document_, this.cellSelection))
+    return this.cellSelection.length
+  }
+
+  /** 选择信息卡的数据源（单选 = 单格详情由 `describeCellDetails` 给，多选 = 这里的统计） */
+  selectionSummary(): SelectionSummary | null {
+    const document_ = this.options.getDocument()
+    if (!document_ || this.cellSelection.length === 0) return null
+    return summarizeSelection(document_, this.cellSelection)
+  }
+
+  // ------------------------------------------------- 整批编辑（§C.5）
+
+  /**
+   * **整批编辑**：给当前选择里的每一格写同一个字段。返回真的改了几格。
+   *
+   * 三条口径（§C.5 写死）：
+   * 1. **一次提交 = 一条历史** —— 所有格压成一个 op 列表，Ctrl+Z 一次全部回退
+   *    （逐格提交会让"撤销"变成点 N 次，那不是用户要的）；
+   * 2. **只改表里声明过的字段** —— 与检查器同一个闸（见 `setSelectionField`），
+   *    面板传错键名直接拒绝，而不是悄悄往用户文件里塞一个没人认识的键；
+   * 3. **值相同就不产生 op** —— "整批改成 20" 里本来已经是 20 的那几格不该进历史，
+   *    否则撤销栈里会出现"改了 12 格"但其实只变了 3 格的假账。
+   *
+   * `value === null` = **清除该字段**（删掉那个键），不是写一个 `null` 进去。
+   * 生命周期上有一处要注意：选择里可能留着**地图里已经不存在**的格键（撤销 / 重载之后），
+   * 那些格直接跳过 —— 数量由返回值得出，卡片上另有"N 格已不存在"那一行。
+   */
+  setSelectionCellsField(field: string, value: SelectionFieldValue): number {
+    const document_ = this.options.getDocument()
+    if (!document_ || this.cellSelection.length === 0) return 0
+    const fieldSpec = SELECTION_KINDS.cell.fields.find((item) => item.field === field)
+    if (fieldSpec === undefined) return 0
+    if (fieldSpec.control === 'number' && typeof value === 'number' && !Number.isFinite(value)) return 0
+
+    const ops: MapOp[] = []
+    for (const key of this.cellSelection) {
+      const record = objectRecordOf(document_, 'cell', key)
+      if (record === null) continue
+      const current = readObjectFieldValue(record, field)
+      if (sameObjectFieldValue(current, value)) continue
+      ops.push({ kind: 'setCellField', key, field, from: current, to: value })
+    }
+    if (ops.length === 0) return 0
+    this.commit(ops, value === null ? `清除 ${ops.length} 格的${fieldSpec.label}` : `整批设置 ${ops.length} 格的${fieldSpec.label}`)
+    return ops.length
   }
 
   /** 检查器要显示的那一条（找不到对象时返回 null，见 `describeSelection`） */
@@ -732,7 +1191,10 @@ export class MapEditor {
       this.cancelDraft()
     } else {
       // 进入绘制模式时清掉选中：高亮框留在画布上会与"即将画的东西"抢注意力，
-      // 而且绘制模式下点画布不再有"选中"的含义（点击被绘制手势占用）
+      // 而且绘制模式下点画布不再有"选中"的含义（点击被绘制手势占用）。
+      // **格选择一起清**：多格描边环同理，绘画时留着它只会遮住刚落笔的颜色。
+      this.cancelCellDrag()
+      this.cellSelection = []
       this.selection = null
       if (this.options.onSelectionChanged) this.options.onSelectionChanged()
     }
@@ -833,6 +1295,8 @@ export class MapEditor {
     const grid = this.grid()
     const document_ = this.options.getDocument()
     if (!grid || !document_ || this.mode !== 'paint') return
+    // 数据层笔刷：值没填好 / 除以 0 时**不生效**（状态条会说明原因，§E 第 2 条）
+    if (this.isFieldBrush() && !this.brushReadiness().ok) return
 
     this.strokePrevious = new Map()
     this.strokeCells = []
@@ -864,12 +1328,23 @@ export class MapEditor {
 
     // 逐格算新状态（而不是所有格共用一个新建的 `{ t }`）：格上的其它键要跟着走
     const previousOf = (q: number, r: number): TerrainCell | null => previous.get(cellKey(q, r)) ?? null
-    const ops: MapOp[] = opsFromPreviousOf(cells, (q, r) => this.nextCellFor(previousOf(q, r)), previousOf)
+    const ops: MapOp[] = opsFromPreviousOf(cells, (q, r) => this.nextCellOnStroke(previousOf(q, r)), previousOf)
     if (ops.length > 0) {
-      this.history.push({ label: `绘制 ${ops.length} 格`, ops })
+      this.history.push({ label: this.strokeLabel(ops.length), ops })
       this.options.onSaveRequested?.()
     }
     this.options.onStateChanged?.()
+  }
+
+  /** 这一笔的历史名（数据层笔刷要说清"刷的是哪一层、怎么刷的"） */
+  private strokeLabel(count: number): string {
+    const field = this.brushField
+    if (field === null) return `绘制 ${count} 格`
+    const spec = OVERLAY_FIELDS.find((candidate) => candidate.id === field)
+    const label = spec?.label ?? field
+    if (!this.brushFieldIsNumeric()) return `刷${label} ${count} 格`
+    const op = this.brushOp === 'set' ? '=' : this.brushOp
+    return `${label} ${op}${this.brushValue ?? 0} · ${count} 格`
   }
 
   /** 中断笔画（切换模式、失焦）：把已画的部分作为一条历史保留 */
@@ -890,13 +1365,50 @@ export class MapEditor {
         // 第一次碰到这一格：记下笔画开始前的状态
         const before = document_.terrain[key]
         previous.set(key, before === undefined ? null : { ...before })
-        this.strokeCells.push(cell)
         // 以这一格原有内容为底（保留未知键），不是整格替换
-        document_.terrain[key] = this.nextCellFor(before ?? null)
+        const next = this.nextCellOnStroke(before ?? null)
+        // `null` = 这一格笔刷不碰它（例如 ×/÷ 遇到没有值的格）：**不进历史、也不算"划过"**
+        if (next === null) continue
+        this.strokeCells.push(cell)
+        document_.terrain[key] = next
         changed = true
       }
     }
     if (changed) this.options.onChanged()
+  }
+
+  /**
+   * 这一格被笔刷点中之后应该是什么样（施工文件 §E 的那张表）。
+   *
+   * - 地形笔刷（`brushField === null`）：**既有行为一字不改**（重刷即重置 `t/f/c`）；
+   * - 分类字段（生物群系）：设成当前 ID；
+   * - 数值字段：
+   *   - `set` → 写这个数；
+   *   - `+ / -` → `prev ± n`，**没有值时从"每格默认值"起算（也没有就从 0）** ——
+   *     这一步会把默认值**固化进这一格**（从此不再跟随默认值），UI 上写明了这一点；
+   *   - `× / ÷` → **跳过没有值的格**（`return null`）：拿"没量过"去乘没有任何意义；
+   *     除以 0 在 `brushReadiness` 就拦下了（整笔不生效，而不是逐格产生 Infinity）。
+   *
+   * 返回 `null` = 这一格**不变**（`opsFromPreviousOf` 会把它算成"没有变化"，于是不进历史）。
+   */
+  private nextCellOnStroke(existing: TerrainCell | null): TerrainCell | null {
+    const field = this.brushField
+    if (field === null) return this.nextCellFor(existing)
+    const base = existing === null ? {} : { ...existing }
+    if (!this.brushFieldIsNumeric()) {
+      return { ...base, biome: this.brushBiome }
+    }
+    const spec = OVERLAY_FIELDS.find((candidate) => candidate.id === field)
+    if (spec === undefined || !isNumericField(spec)) return null
+    const value = this.brushValue
+    if (value === null) return null
+    const previous = spec.read(existing ?? undefined)
+    const fallback = defaultValueOf(this.options.getDocument()?.dataDefaults ?? null, spec.cellKey)
+    const next = applyBrushOp(this.brushOp, previous, value, fallback)
+    if (next === undefined) return null
+    // 值相同就**不动这一格**（否则"重刷一遍温度"会产生一堆没有变化的历史）
+    if (previous !== undefined && previous === next) return null
+    return { ...base, [spec.cellKey]: next }
   }
 
   // ------------------------------------------------------------ 标记与文字标注

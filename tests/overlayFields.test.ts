@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 数据层的字段描述表与样式规范化（温度是第一份模板）。
  *
  * 这一组断言盯的是三件事：
@@ -15,15 +15,31 @@ import {
   OVERLAY_FIELDS,
   defaultOverlayStyles,
   formatFieldReading,
+  isCategoryField,
+  isNumericField,
   normalizeOverlayStyles,
   overlayField,
   overlayUnitSuffix,
   overlayUnitTitle,
+  type FieldId,
+  type NumericOverlayFieldSpec,
 } from '../src/render/overlayFields.ts'
 import { formatOverlayValue } from '../src/render/overlayDraw.ts'
 import type { ElevationCalibration } from '../src/render/elevationUnits.ts'
 import { LAYER_TABLE, type LayerSpec } from '../src/render/layerVisibility.ts'
 import { SELECTION_KINDS } from '../src/editor/selection.ts'
+
+/**
+ * 取一个**数值**字段。
+ *
+ * 字段表现在是联合类型（数值 / 分类）—— "读值"这件事只对数值字段成立，
+ * 所以测试里也要先收窄。收窄失败时**直接抛**（而不是断言），这样后面的代码是类型安全的。
+ */
+function numericField(id: FieldId): NumericOverlayFieldSpec {
+  const spec = overlayField(id)
+  if (!isNumericField(spec)) throw new Error(`${id} 应当是数值字段`)
+  return spec
+}
 
 test('字段表与图层表双向对得上：每行数据层都指向一个真实存在的图层', () => {
   const ids = OVERLAY_FIELDS.map((spec) => spec.id)
@@ -34,12 +50,14 @@ test('字段表与图层表双向对得上：每行数据层都指向一个真�
     assert.ok(layer, `字段 ${spec.id} 指向的图层 ${spec.layerId} 不在 LAYER_TABLE 里`)
     assert.equal(layer.overlay, spec.id, `图层 ${spec.layerId} 的 overlay 必须指回字段 ${spec.id}`)
     assert.equal(layer.isDataLayer, true, '数据层的图层必须标 isDataLayer（它决定"是否数据层"这类判断）')
-    assert.ok(spec.label.trim().length > 0 && spec.unit.trim().length > 0, `${spec.id} 缺名字或单位`)
+    assert.ok(spec.label.trim().length > 0, `${spec.id} 缺名字`)
+    // 单位：数值字段必须有（图例刻度要它）；**分类字段是空串**（它的值不是数）
+    assert.equal(spec.unit.trim().length > 0, isNumericField(spec), `${spec.id} 的单位与"是不是数值字段"对不上`)
   }
 })
 
 test('读值：只有有限数才算数据，0 是合法值（缺数据不许用 0 冒充）', () => {
-  const spec = overlayField('temperature')
+  const spec = numericField('temperature')
   assert.equal(spec.read({ t: 'forest', temp: 0 }), 0, '0 ℃ 是真实数据')
   assert.equal(spec.read({ t: 'forest', temp: -12.5 }), -12.5)
   assert.equal(spec.read({ t: 'forest' }), undefined, '没有这个字段')
@@ -100,7 +118,7 @@ test('规范化：不透明度夹在 0–1、只认布尔开关、少于两条�
   ], '锚点按值升序排（用户填的顺序不参与语义）')
   assert.equal(
     Object.keys(normalizeOverlayStyles({ temperature: {}, somethingElse: {} })).join(','),
-    'temperature,depth',
+    'temperature,depth,biome',
     '只认登记表里的字段，不认识的键不许进设置',
   )
   assert.throws(() => overlayField('nope' as never), /未知的数据层字段/)
@@ -116,6 +134,12 @@ test('数据层的字段不许声明取值区间（色带两端不是数据的�
     assert.equal(field.min, undefined, `${spec.cellKey} 不该有下限（任何有限数都是合法数据）`)
     assert.equal(field.max, undefined, `${spec.cellKey} 不该有上限`)
     assert.equal(field.group, 'data', `${spec.cellKey} 属于「数据层」一组，不是「外观」`)
+    // 控件形状也要与字段的性质对上：数值字段给数字框，分类字段给文本框（不是色带 / 下拉）
+    assert.equal(
+      field.control,
+      isNumericField(spec) ? 'number' : 'text',
+      `${spec.cellKey} 的控件形状与"是不是数值字段"对不上`,
+    )
   }
 })
 
@@ -135,7 +159,7 @@ test('深度的出厂样式：高处浅米 → 海平面浅蓝 → 深海深蓝�
 })
 
 test('深度的读值：与温度同一口径（只有有限数才算数据，0 = 海平面是合法值）', () => {
-  const spec = overlayField('depth')
+  const spec = numericField('depth')
   assert.equal(spec.read({ depth: 0 }), 0, '0 = 海平面，是真实数据')
   assert.equal(spec.read({ depth: -1200 }), -1200, '负值 = 海拔')
   assert.equal(spec.read({ t: 'water', depth: 3000 }), 3000)
@@ -157,7 +181,7 @@ test('展示单位：归一化只认登记表里那几个，坏值回退出厂�
 })
 
 test('读数格式化：米 / 千米 / 相对值；未标定时说"未标定"，不编一个数字', () => {
-  const spec = overlayField('depth')
+  const spec = numericField('depth')
   const calibration: ElevationCalibration = { unit: 'm', maxDepth: 8000, maxHeight: 3000 }
   const reading = (value: number, unit: 'm' | 'km' | 'rel', cal: ElevationCalibration = calibration) =>
     formatFieldReading(spec, value, { ...spec.defaultStyle(), unit }, cal)

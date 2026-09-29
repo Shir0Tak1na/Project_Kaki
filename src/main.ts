@@ -41,8 +41,9 @@ import type { Point } from './core/hex.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
 import { ReportModal, type ReportModalFactory, type ReportModalOptions } from './ui/ReportModal.ts'
 import { AssetSuggestModal, type AssetPickerKind, type AssetPickerOptions, type ImagePickerFactory } from './ui/AssetSuggestModal.ts'
-import { MapPanelView, MAP_PANEL_VIEW_TYPE, type PluginAction } from './ui/MapPanel.ts'
+import { MapPanelView, MAP_PANEL_VIEW_TYPE, type BatchEditInfo, type PluginAction } from './ui/MapPanel.ts'
 import type { SelectionFieldValue } from './editor/selection.ts'
+import { SELECTION_KINDS } from './editor/selection.ts'
 import {
   CartographerSettingTab,
   normalizeLabelScale,
@@ -86,6 +87,7 @@ import {
   numericDefaultRows,
   overlayField,
   OVERLAY_FIELDS,
+  type CategoryOverlayFieldSpec,
   type FieldId,
   type OverlayStyle,
 } from './render/overlayFields.ts'
@@ -162,6 +164,15 @@ import {
   type ElevationModalFactory,
 } from './ui/ElevationCalibrationModal.ts'
 import { DataDefaultsModal, type DataDefaultsModalFactory } from './ui/DataDefaultsModal.ts'
+import { SelectionFilterModal, type SelectionFilterModalFactory } from './ui/SelectionFilterModal.ts'
+import {
+  BIOME_TAGS,
+  CUSTOM_BIOME_PREFIX,
+  listResolvedBiomeStyles,
+  resolveBiomeStyle,
+  type CustomBiome,
+} from './render/biomeCatalog.ts'
+import type { SelectionRuleContext } from './render/selectionRules.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
 export type PromptModalFactory = (
@@ -270,6 +281,8 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 每格默认值对话框工厂（同上：仅自动化测试注入，默认是真实对话框） */
   private dataDefaultsModalFactory: DataDefaultsModalFactory = (app, options) =>
     new DataDefaultsModal(app, options)
+  private selectionFilterModalFactory: SelectionFilterModalFactory = (app, options) =>
+    new SelectionFilterModal(app, options)
   /**
    * 设置页实例：导入之后要让已经打开的设置页也跟着刷新（否则用户会看到一份过时的列表）。
    *
@@ -304,6 +317,10 @@ export default class ProjectKakiPlugin extends Plugin {
       getRegionTypes: () => this.getRegionTypes(),
       getCustomTerrains: () => this.getCustomTerrains(),
       getCustomMarkers: () => this.getCustomMarkers(),
+      // 自定义生物群系：只影响**颜色解析**（分类字段上色与图例）—— 值本身在地图文件里
+      getCustomBiomes: () => this.getCustomBiomes(),
+      // 画布工具条上的「筛选…」按钮 → 插件层的对话框（地图层不认识插件，只能从这里往上要）
+      onOpenSelectionFilter: () => this.openSelectionFilterModal(),
       // 选中项变了：侧栏检查器要立刻跟着变（面板在另一棵树里，只能由插件层转发）
       onSelectionChanged: () => this.refreshPanel(),
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
@@ -424,6 +441,22 @@ export default class ProjectKakiPlugin extends Plugin {
           return describeDataDefaults(document_.dataDefaults ?? null, this.defaultRowEntries())
         },
         run: () => this.openDataDefaultsModal(),
+      },
+      {
+        // 选择系统的**筛选器**（施工文件 §C.2）：UI 子句构建器 + 替换/并入/移出/在当前选择内筛/连通扩展。
+        // 归 `map` 组：它只改"选择"，不改地图数据（选择不进撤销栈）。
+        id: 'filter-selection',
+        name: '按规则筛选选择…',
+        icon: 'filter',
+        group: 'map',
+        available: hasLayer,
+        describe: () => {
+          const editor = activeEditor()
+          if (!editor) return '需要先启用地图层'
+          const count = editor.getCellSelection().length
+          return count === 0 ? '当前没有选中格（可以先框选一片，再在这里筛）' : `当前选中 ${count} 格`
+        },
+        run: () => this.openSelectionFilterModal(),
       },
       {
         id: 'toggle-edit-mode',
@@ -691,11 +724,95 @@ export default class ProjectKakiPlugin extends Plugin {
       onShowQuickStart: () => {
         void this.setQuickStartHidden('panel', false)
       },
+      // ---- 整批编辑（§C.5）----
+      getBatchEdit: () => this.batchEditInfo(),
+      onSetCellsField: (field, rawValue) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        const parsed = this.parseCellsFieldInput(field, rawValue)
+        if (parsed === undefined) return
+        const changed = editor.setSelectionCellsField(field, parsed)
+        if (changed > 0) new Notice(`已整批设置 ${changed} 格（Ctrl/Cmd+Z 可撤销）`, 4000)
+        else new Notice('这些格本来就是这个值，没有产生改动。', 4000)
+        this.refreshPanel()
+      },
+      // 选择不进撤销栈（§C.3），所以这个动作也没有"撤销"可言 —— 它就是"取消在看这些格"
+      onClearSelection: () => {
+        this.layers?.getInspectorEditor()?.clearAllSelection()
+        this.refreshPanel()
+      },
+      // ---- 「显示」三组（§F.1）：图例开关 + 数据层参数（与设置页共用同一份控件渲染）----
+      getShowLegend: () => this.pluginSettings.showLegend,
+      onToggleLegend: () => {
+        void this.setShowLegend(!this.pluginSettings.showLegend)
+      },
+      getOverlayStyles: () => this.pluginSettings.overlays,
+      onSetOverlayStyle: (field, patch) => {
+        void this.setOverlayStyle(field, patch)
+      },
+      onResetOverlayRamp: (field) => {
+        void this.resetOverlayRamp(field)
+      },
+      onSetOverlayCategoryColor: (field, categoryId, color) => {
+        void this.setOverlayCategoryColor(field, categoryId, color)
+      },
+      getCategoryUsage: (spec) => this.categoryUsageOf(spec),
     }))
 
     this.addRibbonIcon('map', 'Project Kaki：打开地图面板', () => {
       void this.activatePanel()
     })
+  }
+
+  /**
+   * **整批编辑**要显示的那一份数据（§C.5）；`null` = 当前不是多选。
+   *
+   * 为什么在插件层算、而不是让面板自己算：面板不认识编辑器与文档（这是它一贯的边界）。
+   * 这里只做一件事：把"当前选择 + 文档"翻成面板要显示的 `BatchEditInfo`。
+   *
+   * "mixed" 的判据（选中 ≥ 2 格时总有意义）：这批格里**既有有值的、也有没有值的** ——
+   * 只有这时才必须提示"不猜共同值"；全都没值的情况用户本来就没有可猜的东西。
+   */
+  private batchEditInfo(): BatchEditInfo | null {
+    const editor = this.layers?.getInspectorEditor()
+    const document_ = this.layers?.getActiveDocument() ?? null
+    if (!editor || !document_) return null
+    const keys = editor.getCellSelection()
+    if (keys.length < 2) return null
+    const summary = editor.selectionSummary()
+    return {
+      count: keys.length,
+      missing: summary?.missing ?? 0,
+      // 字段清单**从选择统计派生**（`summarizeSelection` 已经按字段表逐个算过缺数据格数）——
+      // 以后加一个数值字段，这里一行都不用改
+      fields: (summary?.fields ?? []).map((stat) => ({
+        key: stat.key,
+        label: stat.label,
+        unit: stat.unit,
+        mixed: stat.average !== null && stat.missing > 0,
+        missing: stat.missing,
+      })),
+    }
+  }
+
+  /**
+   * 整批编辑的原始文本 → 字段值（`null` = 清除该字段，`undefined` = 解析失败、不写）。
+   *
+   * 与 `parseSelectionFieldInput` 同一条纪律：**解析只在插件层做一处**。
+   * 与那里不同的是：它不依赖"当前选中项"，所以不必先去问检查器要字段规格 ——
+   * 地块的字段表就是权威（`SELECTION_KINDS.cell.fields`）。
+   */
+  private parseCellsFieldInput(field: string, raw: string): SelectionFieldValue | undefined {
+    const spec = SELECTION_KINDS.cell.fields.find((item) => item.field === field)
+    if (spec === undefined) return undefined
+    const text = raw.trim()
+    if (text.length === 0) return null
+    if (spec.control === 'color') return normalizeColor(text, '') === '' ? undefined : normalizeColor(text, '')
+    // 文本字段（生物群系 ID）：原样收下（认不出的 ID 必须能保留，§5.11）
+    if (spec.control === 'text') return text
+    const value = Number(text)
+    // 唯一的硬约束是"必须是有限数"：温度 / 深度**没有取值范围**（见 selection.ts 里那段注释）
+    return Number.isFinite(value) ? value : undefined
   }
 
   /**
@@ -743,6 +860,9 @@ export default class ProjectKakiPlugin extends Plugin {
     const text = raw.trim()
     if (text.length === 0) return null
     if (spec.control === 'color') return normalizeColor(text, '') === '' ? undefined : normalizeColor(text, '')
+    // 文本字段（生物群系 ID）：**原样收下**，不校验它认不认识 ——
+    // 别的库写的 ID 必须能保留（§5.11），能不能画出来是绘制层的事
+    if (spec.control === 'text') return text
     if (spec.control === 'number') {
       // 只接受纯数字：`Number('12px')` 是 NaN，但 `Number('')` 是 0 —— 所以先判空（上面已判）
       const value = Number(text)
@@ -1303,6 +1423,62 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
+   * 自定义生物群系目录（来自插件设置）。
+   *
+   * 与 `getCustomTerrains` / `getCustomMarkers` 完全同构：它只影响**颜色解析**
+   * （分类字段逐格上色 + 图例），值本身永远在地图文件里 —— 删掉定义不会删数据。
+   */
+  getCustomBiomes(): readonly CustomBiome[] {
+    return this.pluginSettings.customBiomes
+  }
+
+  /**
+   * 当前活动地图的文档（设置页要读它来列"这条分类在地图上用了多少格"）。
+   *
+   * 与 `getCustomBiomes` 一样只是转发 `layers`：设置页不认识地图层管理器，
+   * 由插件层替它取一次。没有活动地图时返回 `null`（设置页照常渲染，只是那一段空着）。
+   */
+  getActiveDocument(): MapDocument | null {
+    return this.layers?.getActiveDocument() ?? null
+  }
+
+  /**
+   * 当前地图上**真的用到**的某个分类字段的值（按显示名排序）—— 设置页与侧栏面板共用。
+   *
+   * 为什么只列用到的：内置 34 条全列出来会把设置页撑成一面墙（用户抱怨过太挤，§5.31），
+   * 而"还没用到的分类"改了颜色也看不见效果。**认不出的 ID 也照列** ——
+   * 那正是用户最需要知道"这一格到底是什么"的情况（§5.11）。
+   *
+   * 放在插件层而不是界面层：它要读活动文档 + 自定义目录，界面层两样都拿不到
+   * （设置页与面板都不认识地图层管理器）。
+   */
+  categoryUsageOf(
+    spec: CategoryOverlayFieldSpec,
+  ): Array<{ id: string; label: string; color: string; count: number; known: boolean }> {
+    const document_ = this.getActiveDocument()
+    if (document_ === null) return []
+    const custom = this.getCustomBiomes()
+    const counts = new Map<string, number>()
+    for (const cell of Object.values(document_.terrain)) {
+      const id = spec.readCategory(cell)
+      if (id === undefined) continue
+      counts.set(id, (counts.get(id) ?? 0) + 1)
+    }
+    return [...counts.entries()]
+      .map(([id, count]) => {
+        const resolved = resolveBiomeStyle(id, custom)
+        return {
+          id,
+          label: resolved.label,
+          color: resolved.color,
+          count,
+          known: resolved.builtin || id.startsWith(CUSTOM_BIOME_PREFIX),
+        }
+      })
+      .sort((a, b) => a.label.localeCompare(b.label, 'zh'))
+  }
+
+  /**
    * 新增一个自定义标记。
    *
    * 与 `addCustomTerrain` 逐字同构：校验全在 `validateCustomMarkerInput` 里（纯函数），
@@ -1816,6 +1992,61 @@ export default class ProjectKakiPlugin extends Plugin {
     }).open()
   }
 
+  /* --------------------------------------------------------- 选择筛选器（§C.2） */
+
+  /**
+   * 打开「按规则筛选选择…」对话框。
+   *
+   * 与另外两个地图级对话框同一套路，但有一处**刻意的不同**：它**不改地图数据**，
+   * 因此不进撤销栈、也不提示"可撤销"—— 改的只是"我正在看哪些格"（§C.3）。
+   *
+   * 对话框**不自动关闭**：用户通常要连着按几次（先"替换"、再"并入"、再"连通扩展"），
+   * 每按一次就刷新一次"当前选择 N 格"，效果当场可见。
+   */
+  openSelectionFilterModal(): void {
+    const editor = this.layers?.getActiveEditor() ?? null
+    if (!editor) {
+      new Notice('需要先启用一张 Canvas 的地图层，才能筛选选择。', NOTICE_MAX_MS)
+      return
+    }
+    // 规则下拉里的候选项**现取**：目录会随设置变化（自定义地形 / 自定义生物群系），
+    // 常量化就等于"改了要重启"
+    const context = this.selectionRuleContext()
+    this.selectionFilterModalFactory(this.app, {
+      context,
+      currentCount: editor.getCellSelection().length,
+      // 三个集合动作与两个"动作"都走**编辑器**（它持有当前选择），
+      // 而对话框是异步的 → 每次调用都重新取一次编辑器（期间视图可能已关闭）。
+      // 上下文也一起传：`biomeTag` 那条规则要知道"某个群系带哪些标签"。
+      apply: (group, mode) => (this.layers?.getActiveEditor() ?? editor).applySelectionRule(group, mode, context),
+      filterInside: (group) => (this.layers?.getActiveEditor() ?? editor).filterSelectionInPlace(group, context),
+      expand: () => (this.layers?.getActiveEditor() ?? editor).expandSelectionByTerrain(),
+    }).open()
+  }
+
+  /**
+   * 选择筛选器的**规则上下文**：把"现在有哪些地形 / 生物群系（含各自的标签）"整理好。
+   *
+   * 为什么在这里（而不是规则表里）：目录来自插件设置与内置表两处，
+   * 而规则表是模块级常量 —— 常量化它就等于"改了自定义定义要重启插件"。
+   * 生物群系的**标签跟着选项一起进去**：`biomeTag` 规则要在纯函数里判断
+   * "这一格的群系带不带这个标签"，而 `match` 拿不到目录（见 `selectionRules.ts`）。
+   */
+  private selectionRuleContext(): SelectionRuleContext {
+    return {
+      terrains: listResolvedTerrainStyles(this.pluginSettings.customTerrains).map((style) => ({
+        value: style.id,
+        label: style.label,
+      })),
+      biomes: listResolvedBiomeStyles(this.pluginSettings.customBiomes).map((entry) => ({
+        value: entry.id,
+        label: entry.label,
+        tags: entry.tags,
+      })),
+      biomeTags: BIOME_TAGS.map((tag) => ({ value: tag.id, label: `${tag.group}·${tag.label}` })),
+    }
+  }
+
   /** 同上：替换「删除定义」确认框（测试里用替身直接驱动"有引用才弹"这条分流） */
   setDeleteModalFactory(factory: ConfirmDeleteModalFactory): void {
     this.deleteModalFactory = factory
@@ -2023,6 +2254,19 @@ export default class ProjectKakiPlugin extends Plugin {
     await this.setOverlayStyle(field, { ramp: fallback.ramp })
   }
 
+  /**
+   * 给**分类字段**的某一条改颜色（空串 = 删掉这条覆盖，回到分类表里的颜色）。
+   *
+   * 与 `setOverlayStyle` 同一条路（`normalizeOverlayStyles` 会按字段类型决定收不收这一项）：
+   * 于是"只存改过的那些"与"空表不留键"这两条口径由规范化一处保证，这里不重复实现。
+   */
+  async setOverlayCategoryColor(field: FieldId, categoryId: string, color: string): Promise<void> {
+    const current = { ...(this.pluginSettings.overlays[field].categoryColors ?? {}) }
+    if (color.length === 0) delete current[categoryId]
+    else current[categoryId] = color
+    await this.setOverlayStyle(field, { categoryColors: current })
+  }
+
   async setShowLegend(value: boolean): Promise<void> {
     const next = value === true
     if (next === this.pluginSettings.showLegend) return
@@ -2074,6 +2318,11 @@ export default class ProjectKakiPlugin extends Plugin {
   /** 替换每格默认值对话框（同上） */
   setDataDefaultsModalFactory(factory: DataDefaultsModalFactory): void {
     this.dataDefaultsModalFactory = factory
+  }
+
+  /** 替换选择筛选器对话框（同上） */
+  setSelectionFilterModalFactory(factory: SelectionFilterModalFactory): void {
+    this.selectionFilterModalFactory = factory
   }
 
   /**

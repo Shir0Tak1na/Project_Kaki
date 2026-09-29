@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 数据层的**绘制计划**（`overlayPlan.ts`）单测。
  *
  * 这一组断言盯四件事：
@@ -18,7 +18,11 @@ import { DEFAULT_LAYER_VISIBILITY, withLayerVisibility } from '../src/render/lay
 import {
   DEFAULT_OVERLAY_STYLES,
   OVERLAY_FIELDS,
+  isCategoryField,
+  isNumericField,
   overlayField,
+  type FieldId,
+  type NumericOverlayFieldSpec,
   type OverlayStyle,
   type OverlayStyles,
 } from '../src/render/overlayFields.ts'
@@ -29,6 +33,17 @@ import {
   createOverlayFieldCache,
   overlayFieldCacheKey,
 } from '../src/render/overlayPlan.ts'
+
+/**
+ * 取一个**数值**字段（字段表现在是联合类型：数值 / 分类）。
+ *
+ * "采样本 / 插值 / 等值线"这一整套只对数值字段成立，所以测试里也要先收窄。
+ */
+function numericOverlayField(id: FieldId): NumericOverlayFieldSpec {
+  const spec = overlayField(id)
+  if (!isNumericField(spec)) throw new Error(`${id} 应当是数值字段`)
+  return spec
+}
 
 function makeDocument(): MapDocument {
   return {
@@ -47,7 +62,7 @@ function makeDocument(): MapDocument {
   }
 }
 
-const temperature = overlayField('temperature')
+const temperature = numericOverlayField('temperature')
 const CELL_STYLE = DEFAULT_OVERLAY_STYLES.temperature
 const FIELD_STYLE: OverlayStyle = { ...CELL_STYLE, mode: 'field', contourInterval: 20 }
 
@@ -320,10 +335,16 @@ test('缓存：键随数据与**显示参数**变、不随视口变；命中后�
   assert.notEqual(overlayFieldCacheKey(temperature, document, samples, { ...FIELD_STYLE, opacity: 0.9 }), key, '不透明度进键')
   assert.notEqual(overlayFieldCacheKey(temperature, document, samples, { ...FIELD_STYLE, contourInterval: 5 }), key, '等值线间距进键')
   assert.notEqual(overlayFieldCacheKey(temperature, document, samples, CELL_STYLE), key, '显示方式进键')
+  // 数字的重复间隔是**几何**（沿线上有几个数字）→ 必须进键，否则"调小间隔"要等下次数据变化才生效
+  assert.notEqual(
+    overlayFieldCacheKey(temperature, document, samples, { ...FIELD_STYLE, contourLabelSpacing: 3 }),
+    key,
+    '数字重复间隔进键',
+  )
 
   // 展示单位与地图标定**不改几何、只改线上的数字**（"5" vs "5 km"），同样必须进键 ——
   // 否则在设置里换了单位，等值线还在、数字却要等下次数据变化才更新（比"颜色不刷新"更隐蔽）
-  const depth = overlayField('depth')
+  const depth = numericOverlayField('depth')
   const depthField: OverlayStyle = { ...depth.defaultStyle(), mode: 'field', contourInterval: 1000 }
   const depthKey = overlayFieldCacheKey(depth, document, samples, depthField)
   assert.notEqual(
@@ -350,17 +371,38 @@ test('缓存命中时图元清单也复用（连续场每帧只剩"画"）', () 
   assert.deepEqual(second.stats, first.stats)
 })
 
-test('字段表里的每个字段都能走两种模式（加一行字段不用改计划层）', () => {
+test('字段表里的每个字段都能画出东西（加一行字段不用改计划层）', () => {
   const document = makeDocument()
-  document.terrain['0_0'] = { t: 'water', temp: 15, depth: 3000 }
+  document.terrain['0_0'] = { t: 'water', temp: 15, depth: 3000, biome: 'desert' }
   for (const spec of OVERLAY_FIELDS) {
-    for (const mode of ['cell', 'field'] as const) {
+    // 分类字段（生物群系）**只有逐格一种形态**：分类值之间没有高低，插值与等值线都不成立。
+    // 所以它的"两种模式"是**刻意的例外**，这里按 `numeric` 分流（不是漏测）。
+    const modes = isNumericField(spec) ? (['cell', 'field'] as const) : (['cell'] as const)
+    for (const mode of modes) {
       const style = { ...spec.defaultStyle(), mode }
       const { stats } = buildOverlayPlan({ document, spec, style })
       assert.equal(stats.mode, mode, `${spec.id}/${mode}`)
       assert.equal(stats.drawn > 0, true, `${spec.id}/${mode} 至少要画出东西`)
     }
   }
+})
+
+test('分类字段（生物群系）：逐格纯色、颜色取自目录、认不出的 ID 用中性灰', () => {
+  const spec = overlayField('biome')
+  if (!isCategoryField(spec)) throw new Error('biome 应当是分类字段')
+  const style = spec.defaultStyle()
+  const document = makeDocument()
+  document.terrain['0_0'] = { t: 'forest', biome: 'desert' }
+  document.terrain['1_0'] = { t: 'water', biome: '另一个库的群系' }
+  // 第三格没有 biome：**不画**（与数值字段同一条口径："没有数据"不是某个颜色）
+  const { plan, stats } = buildOverlayPlan({ document, spec, style })
+  assert.equal(stats.mode, 'cell')
+  assert.equal(stats.drawn, 2, '只有两格填了生物群系')
+  assert.equal(stats.labels, 0, '分类字段不写数值文字')
+  assert.equal(stats.contours, 0, '分类字段没有等值线')
+  const colors = plan.primitives.filter((item) => item.kind === 'polygon').map((item) => item.color)
+  assert.equal(colors.includes('#e0c477'), true, '沙漠用它自己在目录里的颜色')
+  assert.equal(colors.includes('#8b8f96'), true, '认不出的 ID 画成中性灰（"未知"必须看得见）')
 })
 
 /** 让类型检查确认 `OverlayStyles` 在测试里也是完整的一份（漏字段会在编译期报错） */

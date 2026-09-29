@@ -27,7 +27,8 @@ import { axialToWorld, cellKey, hexCorners, parseCellKey } from '../core/hex.ts'
 import type { BBox } from '../core/viewport.ts'
 import { brushCellsAt, visibleCellBounds } from './hexGrid.ts'
 import { buildRenderPlan, worldToRaster, type MapRenderPlan } from './renderPlan.ts'
-import { SELECTION_HIGHLIGHTS } from './selectionHighlight.ts'
+import { SELECTION_ACCENT, SELECTION_HIGHLIGHTS } from './selectionHighlight.ts'
+import type { CellSelection } from './selectionSet.ts'
 import { MarkerLayer } from './MarkerLayer.ts'
 import { buildPlacements, type MarkerPlacement } from './markerPlacement.ts'
 import { drawDraft, drawPath, drawRegion, labelCssPx } from './shapeDraw.ts'
@@ -62,6 +63,25 @@ import type { MapDraft } from '../editor/MapEditor.ts'
 
 /** 超过这个可见格数就不画网格线（缩小到很远时逐格描边会拖垮帧率） */
 const MAX_GRID_CELLS = 4000
+
+/**
+ * 一帧最多描多少个"格选择"环。
+ *
+ * 手一抖框选整张图是完全可能的；宁可少画一部分（统计字段会如实报出画了多少），
+ * 也不能让平移/缩放变卡 —— 选择只是"看着方便"，不值得押上帧率。
+ */
+const MAX_HIGHLIGHT_CELLS = 2000
+
+/** 某个世界坐标附近的格是否落在本帧的栅格里（视野外的格描了也看不见，白花时间） */
+function cellVisibleInPlan(plan: MapRenderPlan, x: number, y: number, radius: number): boolean {
+  const point = worldToRaster(plan.layer, x, y)
+  return (
+    point.x + radius >= 0 &&
+    point.y + radius >= 0 &&
+    point.x - radius <= plan.layer.rasterWidth &&
+    point.y - radius <= plan.layer.rasterHeight
+  )
+}
 
 export interface OverlayStats {
   attached: boolean
@@ -141,6 +161,14 @@ export interface OverlayStats {
    * 而不是"看起来好像有框"。
    */
   lastHighlight: { kind: SelectionKind; id: string } | null
+  /**
+   * 本帧画出的**格选择**描边环个数（0 = 没画）。
+   *
+   * 为什么要一个可读的数字：格选择与"对象选中"两个高亮是两套东西，
+   * "框选了一片但画面上没看出区别"必须能一眼判定是渲染没画还是观感问题。
+   * 超过上限时**只画前 N 格**，这个数字就是"实际画了多少"，不是"选了多少"。
+   */
+  lastCellHighlight: number
 }
 
 export interface MapOverlayOptions {
@@ -177,6 +205,14 @@ export interface MapOverlayOptions {
    * 整个画布的框选/平移就会失灵。
    */
   getSelection?: () => MapSelection | null
+  /**
+   * 当前**格选择**（多格；每帧现读）。
+   *
+   * 与 `getSelection` 分开：那是"侧栏检查器在编辑哪一个对象"（单选，走 `SELECTION_HIGHLIGHTS` 那张表），
+   * 这是"我正在看哪些格"（可多格，见施工文件 §C）。**恰好一格时两者重合**，
+   * 所以这里刻意跳过那一个，避免同一格被画两遍（描边会叠成一条更粗的线，看起来像"选中程度不同"）。
+   */
+  getCellSelection?: () => CellSelection
   /** 进行中的路径/区域草稿（预览用；由编辑器提供） */
   getDraft?: () => MapDraft | null
   /** 名称字号倍率（用户设置；1 = 默认） */
@@ -223,6 +259,14 @@ export interface MapOverlayOptions {
    * 不需要任何广播或失效通知（少一个"忘了通知"的失效点）。
    */
   getOverlayStyles?: () => OverlayStyles
+  /**
+   * **分类字段**的"分类 ID → 颜色"（每帧现读；只有分类字段用得上）。
+   *
+   * 与 `getOverlayStyles` 同一条口径：自定义生物群系的颜色住在插件设置里，
+   * 所以现读 —— 用户在设置里改一条颜色，下一帧就是新颜色，不需要任何广播。
+   * 缺省 = 只用内置目录（绘制层照常画得出东西，只是不含自定义那几条）。
+   */
+  getCategoryColors?: (fieldId: FieldId) => ReadonlyMap<string, string> | undefined
 }
 
 function asElement(value: unknown): HTMLElement | null {
@@ -322,6 +366,7 @@ export class MapOverlay {
     lastDurationMs: 0,
     lastError: null,
     lastHighlight: null,
+    lastCellHighlight: 0,
   }
 
   constructor(options: MapOverlayOptions) {
@@ -1087,6 +1132,8 @@ export class MapOverlay {
               fieldCache: this.fieldCacheFor(spec.overlay),
               // 颜色面要落在自己的一张离屏画布上（绘制层提供造画布的能力，钩子不碰 DOM）
               createCanvas: (width: number, height: number) => this.createOffscreenCanvas(width, height),
+              // **分类字段**的"值 → 颜色"要现读目录（自定义生物群系的颜色住在插件设置里）
+              categoryColors: this.options.getCategoryColors?.(spec.overlay),
             }
           : {}),
       })
@@ -1114,6 +1161,8 @@ export class MapOverlay {
     // 选中高亮画在**最上层**（连草稿预览之上）：用户点了某个对象之后，第一眼要看到"选中了谁"。
     // 统计字段只在真的画了的时候才有值 —— 于是"高亮没画"能被断言抓到，而不是靠肉眼看截图。
     this.stats.lastHighlight = this.drawSelection(ctx, plan, document_, targetRadius)
+    // 格选择（多格）画在对象选中之上：框选一片时"哪些格在里面"是当前的主信息
+    this.stats.lastCellHighlight = this.drawCellSelection(ctx, plan, document_, targetRadius)
 
     if (this.hover) this.drawHover(ctx, plan, document_, targetRadius)
   }
@@ -1162,6 +1211,60 @@ export class MapOverlay {
     })
     ctx.restore()
     return drawn ? { kind: selection.kind, id: selection.id } : null
+  }
+
+  /**
+   * 格选择（多格）的描边环：**加法**——每格画一圈，不描外轮廓。
+   *
+   * 为什么不用"整片外轮廓"：求并集轮廓要一份额外的几何（而且选中不连通时会有多段），
+   * 而逐格描边与"单选一格"的观感一致（同一套 `SELECTION_ACCENT`），用户一眼能对上。
+   *
+   * `MAX_HIGHLIGHT_CELLS` 是防"一帧几万次描边把帧率拖垮"的硬上限：
+   * 手一抖框选整张图是完全可能的，宁可少画几十格也不能让平移变卡。
+   * 返回值 = **实际画了多少格**（不是选了多少），见 `OverlayStats.lastCellHighlight`。
+   */
+  private drawCellSelection(
+    ctx: CanvasRenderingContext2D,
+    plan: MapRenderPlan,
+    document_: MapDocument,
+    targetRadius: number,
+  ): number {
+    const selection = this.options.getCellSelection?.() ?? []
+    if (selection.length === 0) return 0
+    // 恰好一格时它同时是"对象选中"，那一圈已经由 `drawSelection` 画了 —— 跳过，别画两遍
+    const skip = this.options.getSelection?.() ?? null
+    const skipId = skip !== null && skip.kind === 'cell' ? skip.id : null
+
+    ctx.save()
+    ctx.setLineDash([])
+    ctx.lineWidth = Math.max(2, targetRadius * 0.09)
+    ctx.strokeStyle = SELECTION_ACCENT
+    ctx.globalAlpha = 0.9
+    let drawn = 0
+    for (const key of selection) {
+      if (drawn >= MAX_HIGHLIGHT_CELLS) break
+      if (key === skipId) continue
+      const axial = parseCellKey(key)
+      const world = axial === null ? null : axialToWorld(document_.grid, axial.q, axial.r)
+      // 不在视野内的格直接跳过：`plan.layer` 外的东西画了也看不见，白描一次
+      if (world === null || !cellVisibleInPlan(plan, world.x, world.y, targetRadius)) continue
+      const center = worldToRaster(plan.layer, world.x, world.y)
+      const corners = hexCorners(
+        { kind: 'hex', orientation: document_.grid.orientation, size: targetRadius, origin: [center.x, center.y] },
+        0,
+        0,
+      )
+      ctx.beginPath()
+      corners.forEach((point, index) => {
+        if (index === 0) ctx.moveTo(point.x, point.y)
+        else ctx.lineTo(point.x, point.y)
+      })
+      ctx.closePath()
+      ctx.stroke()
+      drawn += 1
+    }
+    ctx.restore()
+    return drawn
   }
 
   /** 悬停预览：高亮笔刷将覆盖的格（绘制模式下用户据此判断落点） */

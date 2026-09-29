@@ -42,8 +42,13 @@ export function vertexKey(grid: GridSpec, point: Point): string {
   return `${Math.round(point.x / quantum)}:${Math.round(point.y / quantum)}`
 }
 
-/** 某格的 6 个邻居（轴向） */
-const AXIAL_NEIGHBORS: ReadonlyArray<readonly [number, number]> = [
+/**
+ * 某格的 6 个邻居（轴向）。
+ *
+ * 导出给"按邻域遍历"的地方用（例如选择系统的同地形连通扩展）——
+ * `terrainRegions.ts` 里另有一份**刻意**的副本（它带自验证断言，见那边的注释）。
+ */
+export const AXIAL_NEIGHBORS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
   [1, -1],
   [0, -1],

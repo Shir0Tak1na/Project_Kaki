@@ -70,7 +70,15 @@ export interface SelectionFieldSpec {
   /** 文件里的键名（`color` / `width` / `dash` / `opacity` / `borderColor` / `borderWidth` / `borderDash` / `c`） */
   field: string
   label: string
-  control: 'color' | 'number' | 'dash'
+  /**
+   * 用哪种控件编辑。
+   *
+   * - `color` / `number` / `dash`：既有的三种（覆盖色、数值、虚线）；
+   * - `text`：**文本**（生物群系 ID 这类分类值）。刻意**不做成下拉**：
+   *   本机没有那个定义时（别的库写的 ID）也必须能原样保留与改掉，
+   *   而下拉只能列出"本机存在的选项"（同一理由见 `SELECTION_KINDS.cell.actions` 那段）。
+   */
+  control: 'color' | 'number' | 'dash' | 'text'
   /** 数字控件的范围（世界单位或 0–1），仅 `control: 'number'` 有意义。**数据层不给范围**（见下面注释） */
   min?: number
   max?: number
@@ -338,6 +346,11 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
         control: 'number',
         group: 'data',
       },
+      // 生物群系（§D）：**分类字段**，值是分类表里的一个 ID（见 `render/biomeCatalog.ts`）。
+      // 用文本控件而不是下拉：别的库写的 ID 必须能看见、能保留、能改掉，
+      // 而下拉只列得出"本机存在的选项"（认不出的 ID 会在绘制层画成中性灰）。
+      // **留空 = 删掉该键 = 这一格没有生物群系** —— 与写某个 ID 是两件事。
+      { field: 'biome', label: '生物群系（ID）', control: 'text', group: 'data' },
     ],
   },
 }

@@ -227,6 +227,17 @@ export function textColorOf(color: string): string {
   return contrastWithWhite >= contrastWithDark ? LIGHT_TEXT : DARK_TEXT
 }
 
+/**
+ * 与 `textColorOf(color)` **相反**的那个对比色（白 ↔ 近黑）。
+ *
+ * 用途是"**描边必须与字色相反**"这条口径（等值线数字压在彩色场上，
+ * 白字配白边等于没描边 —— 用户实测报过"一坨黑"）。收在这里而不是在渲染层各写一次：
+ * 白 / 近黑这一对只在 `textColorOf` 里定义，谁都不该自己拼第二个色值。
+ */
+export function oppositeTextColor(color: string): string {
+  return textColorOf(color) === LIGHT_TEXT ? DARK_TEXT : LIGHT_TEXT
+}
+
 /* ------------------------------------------------------------------ 规范化 */
 
 function normalizeRangeStyle(raw: unknown, fallback: RangeStyle): RangeStyle {

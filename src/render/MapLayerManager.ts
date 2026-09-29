@@ -15,6 +15,7 @@ import { MapInteraction } from '../editor/MapInteraction.ts'
 import { PlaceMarkerModal, type PlaceMarkerOptions } from '../ui/PlaceMarkerModal.ts'
 import { TextPromptModal, type TextPromptOptions } from '../ui/TextPromptModal.ts'
 import { MapToolbar } from '../ui/MapToolbar.ts'
+import { SelectionCard } from '../ui/SelectionCard.ts'
 import { MapOverlay, type OverlayStats } from './MapOverlay.ts'
 import { buildLegendEntries, type LegendDeps, type LegendEntry } from './legend.ts'
 import {
@@ -35,6 +36,7 @@ import {
   type RegionTypeEntry,
 } from './regionTypeCatalog.ts'
 import { resolveTerrainStyle, type CustomTerrain } from './terrainCatalog.ts'
+import { biomeColorMap, resolveBiomeStyle, type CustomBiome } from './biomeCatalog.ts'
 import { MapLegend } from '../ui/MapLegend.ts'
 import { resolveVaultResourceUrl } from '../base/vaultResource.ts'
 
@@ -98,6 +100,22 @@ export interface MapLayerManagerDeps {
    */
   getCustomMarkers?: () => readonly CustomMarker[]
   /**
+   * 用户自定义**生物群系**（来自插件设置）。
+   *
+   * 与 `getCustomTerrains` 逐字同理：目录活得比设置页久，必须"每次现读"。
+   * 它只影响**颜色解析**（分类字段的逐格上色与图例）—— 值本身永远在地图文件里。
+   */
+  getCustomBiomes?: () => readonly CustomBiome[]
+  /**
+   * 请求打开「按规则筛选选择…」对话框。
+   *
+   * 为什么从这里往外传：对话框住在插件层（`main.ts`），而按钮长在画布上的工具条里 ——
+   * 地图层不认识插件，插件的对话框也不该认识工具条。缺省 = 按钮点了没反应，
+   * 所以 `main.ts` **必须**接上（与 `onToggleLabels` 那条"必需而非可选"的理由不同：
+   * 这里工具条本身是可选组件，缺省时不渲染那个按钮更合适 —— 见 `MapToolbar`）。
+   */
+  onOpenSelectionFilter?: () => void
+  /**
    * 选中项发生变化（侧栏检查器据此重绘）。
    *
    * 由插件层提供（面板是 `ItemView`，这一层不认识它）—— 与 `getActions` 同一思路：
@@ -145,6 +163,13 @@ interface LayerEntry {
   toolbar: MapToolbar | null
   /** 画布上的图例面板（挂在同样的 wrapperEl 上）；创建失败为 null，不影响地图层 */
   legend: MapLegend | null
+  /**
+   * 画布上的**选择信息卡**（右上角，施工文件 §C.4）。
+   *
+   * 与工具条同一条挂载策略（挂在未变换的 `wrapperEl` 上），但**职责不同**：
+   * 工具条只显示状态与工具，只读的详情一律在卡片里 —— 于是侧栏那一栏可以专心做编辑。
+   */
+  selectionCard: SelectionCard | null
 }
 
 function asElement(value: unknown): HTMLElement | null {
@@ -447,6 +472,10 @@ export class MapLayerManager {
       getLayers: () => this.layersVisibility(),
       // 数据层的色带 / 不透明度：同样每帧现读（改设置下一帧就是新颜色）
       getOverlayStyles: () => this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
+      // **分类字段**的"值 → 颜色"：现读分类目录（内置 34 条 + 用户自定义）。
+      // 与色带同一条口径：改一条颜色，下一帧就是新颜色（没有第二份缓存要失效）。
+      getCategoryColors: (fieldId) =>
+        fieldId === 'biome' ? biomeColorMap(this.deps.getCustomBiomes?.() ?? []) : undefined,
       // 名称字体族：来自插件设置（空串 = 跟随主题）
       getLabelFontFamily: () => this.deps.getStylePalette?.().fontFamily ?? '',
       // 自定义地形：目录与图片加载都从这里注入（渲染层不认识 vault）
@@ -459,10 +488,15 @@ export class MapLayerManager {
       // 按下标记/文字就先选中它（用户要的"先选中，再决定操作"）
       onSelect: (hit) => {
         this.lastInspectorPath = canvasPath
-        this.entries.get(canvasPath)?.editor.setSelection({ kind: hit.kind, id: hit.id })
+        const entry = this.entries.get(canvasPath)
+        entry?.editor.setSelection({ kind: hit.kind, id: hit.id })
+        // 点了标记/名称 = 选中"那一个对象"，格选择随之清空（否则信息卡会同时显示两边）
+        entry?.editor.clearCellSelection()
       },
       // 高亮每帧现读：选中变化时编辑器会请求重绘
       getSelection: () => this.entries.get(canvasPath)?.editor.getSelection() ?? null,
+      // 格选择（多格）同样每帧现读：框选拖动中要跟着手指实时变
+      getCellSelection: () => this.entries.get(canvasPath)?.editor.getCellSelection() ?? [],
       // 拖动移动：客户端坐标 → 世界坐标的换算只在这里做（标记层不认识画布内部坐标系）
       onEntityDragStart: (placement: MarkerPlacement) => {
         const editor = this.entries.get(canvasPath)?.editor
@@ -501,19 +535,24 @@ export class MapLayerManager {
       onSelectionChanged: () => {
         this.lastInspectorPath = canvasPath
         overlay.requestRedraw()
-        // 侧栏检查器要跟着变：选中项与它的信息都显示在那里
+        // 右上角的信息卡与侧栏检查器都要跟着变（两处读的是同一份选中状态）
+        this.entries.get(canvasPath)?.selectionCard?.refresh()
         this.deps.onSelectionChanged?.()
       },
       onStateChanged: () => {
         // 单一收口点：任何模式/工具变化都会经过这里，
         // 因此标记层的交互开关放在这里最稳（不依赖调用方是否走了交互层）
         overlay.setMarkerInteractive(editor.mode === 'select')
-        this.entries.get(canvasPath)?.toolbar?.refresh()
+        const entry = this.entries.get(canvasPath)
+        entry?.toolbar?.refresh()
+        entry?.selectionCard?.refresh()
       },
     })
 
     // 工具条先声明：交互层的模式回调要刷新它（闭包在初始化之后才会被调用）
     let toolbar: MapToolbar | null = null
+    // 信息卡同理：交互层的 `getUiExclusions` 与模式回调都会用到它
+    let selectionCard: SelectionCard | null = null
 
     const interaction = new MapInteraction({
       app: this.deps.app,
@@ -524,8 +563,16 @@ export class MapLayerManager {
       getHost: () =>
         asElement((handle.view as { containerEl?: unknown }).containerEl) ??
         asElement((handle.canvas as { wrapperEl?: unknown }).wrapperEl),
-      // 工具条也在同一个视图容器里：必须排除，否则它的点击会被捕获阶段吃掉
-      getUiExclusions: () => [toolbar?.getElement() ?? null],
+      // 工具条也在同一个视图容器里：必须排除，否则它的点击会被捕获阶段吃掉。
+      // 标记层容器同理：**标记 / 名称元素上的左键必须留给标记层自己**
+      // （打开笔记、拖动移动），我们不能在捕获阶段把它吞掉 —— 那会让"点标记"彻底失灵。
+      getUiExclusions: () => [
+        toolbar?.getElement() ?? null,
+        overlay.getMarkerLayer()?.getElement() ?? null,
+        // 信息卡也在同一个视图容器里，而且**是可点的**（"清空选择"按钮）：
+        // 不排除的话，捕获阶段的 stopImmediatePropagation 会把那一击吃掉
+        selectionCard?.getElement() ?? null,
+      ],
       onHover: (hover) => overlay.setHover(hover),
       onModeChanged: (mode) => {
         // 覆盖层始终 pointer-events: none（只负责画）；模式只影响交互层、标记层与工具条
@@ -583,6 +630,8 @@ export class MapLayerManager {
           getRegionTypes: () => this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries(),
           getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
           getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
+          // 笔刷那一节的"设为哪个群系"下拉要列全目录（内置 + 自定义），同样现读
+          getCustomBiomes: () => this.deps.getCustomBiomes?.() ?? [],
           resolveImageSrc: (path) => this.resourceUrlFor(path),
           // 「名称」按钮写图层设置（同一个值）：编辑器里**没有**第二份名称开关，
           // 所以不存在"设置里打开、按钮显示关闭"这种状态
@@ -605,10 +654,34 @@ export class MapLayerManager {
           onRedo: () => {
             editor.redo()
           },
+          // 只有插件层接上了才渲染那个按钮（缺省 = 这个按钮不出现，而不是"点了没反应"）
+          onOpenSelectionFilter: this.deps.onOpenSelectionFilter,
         })
       } catch (error) {
         console.warn('[project-kaki] 工具条创建失败，地图层继续但不带工具条', error)
         toolbar = null
+      }
+    }
+
+    // 选择信息卡：同一层（未变换的 wrapperEl），失败也不该连带整个地图层失败。
+    // 它只读、不改数据；"清空选择"是唯一动作，而且与 Esc 的第一步走同一条路。
+    if (toolbarHost) {
+      try {
+        selectionCard = new SelectionCard(toolbarHost, {
+          editor,
+          getDocument: () => this.entries.get(canvasPath)?.document ?? null,
+          getOverlayStyles: () => this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
+          terrainLabel: (id) => resolveTerrainStyle(id, this.deps.getCustomTerrains?.() ?? []).label,
+          // 生物群系同样按**现读的目录**解析：认不出的 ID 回退成 ID 本身（§5.11），
+          // 于是信息卡里"这格到底是什么"与画布上的颜色、图例里的那一行是同一份答案
+          biomeLabel: (id) => resolveBiomeStyle(id, this.deps.getCustomBiomes?.() ?? []).label,
+          onClear: () => {
+            editor.clearAllSelection()
+          },
+        })
+      } catch (error) {
+        console.warn('[project-kaki] 选择信息卡创建失败，地图层继续但不带它', error)
+        selectionCard = null
       }
     }
 
@@ -623,6 +696,7 @@ export class MapLayerManager {
       interaction,
       toolbar,
       legend: null,
+      selectionCard,
     }
     // 先登记再挂载：getDocument 依赖 entries 里已有本条目
     this.entries.set(canvasPath, entry)
@@ -630,6 +704,7 @@ export class MapLayerManager {
     const result = overlay.attach()
     if (!result.ok) {
       toolbar?.destroy()
+      selectionCard?.destroy()
       this.entries.delete(canvasPath)
       return { canvasPath, mapPath, attached: false, reason: result.reason }
     }
@@ -844,6 +919,11 @@ export class MapLayerManager {
       resolveRegion: (color, type) => ({
         label: type.length > 0 ? regionTypeLabelOf(type, regionTypes) : regionLabelForColor(color, regionTypes),
       }),
+      // 生物群系：按 ID 解析目录里那一条（显示名 + 它自己的颜色）。认不出的 ID 原样显示
+      resolveBiome: (id) => {
+        const style = resolveBiomeStyle(id, this.deps.getCustomBiomes?.() ?? [])
+        return { label: style.label, color: style.color }
+      },
       // 数据层的色带：与画布**同一个来源**（每帧现读那一个 getter），
       // 否则会出现"画布上是新色带、图例里还是旧的"这种两套配色的老毛病
       overlayStyles: this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
@@ -859,6 +939,7 @@ export class MapLayerManager {
     if (!entry) return
     entry.interaction.detach()
     entry.toolbar?.destroy()
+    entry.selectionCard?.destroy()
     entry.legend?.destroy()
     entry.overlay.detach()
     this.entries.delete(canvasPath)

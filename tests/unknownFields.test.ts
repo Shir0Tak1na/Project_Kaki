@@ -196,7 +196,8 @@ test('温度 / 深度给了非数字：值原样保留、键名不变，只按"�
   const text = serializeMapDocument(parsed.document!)
   assert.equal(text.includes('"temp":"20"'), true, text)
   assert.equal(text.includes('"depth":null'), true, text)
-  const warnings = parsed.issues.filter((issue) => issue.message.includes('不是有限数'))
+  // 只告警一次（每格一条会刷屏）：文案里同时点出坏掉的键名与"为什么不可用"
+  const warnings = parsed.issues.filter((issue) => issue.message.includes('不是可用的值'))
   assert.equal(warnings.length, 1, JSON.stringify(parsed.issues.map((issue) => issue.message)))
   assert.match(warnings[0]!.message, /"temp"/)
   assert.match(warnings[0]!.message, /"depth"/)

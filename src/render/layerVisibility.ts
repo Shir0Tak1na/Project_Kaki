@@ -91,6 +91,13 @@ export interface LayerDrawContext {
    * 取不到时连续场**退回不画**，而不是抛异常把整帧带塌。
    */
   createCanvas?: (width: number, height: number) => HTMLCanvasElement | null
+  /**
+   * **分类字段**的"分类 ID → 颜色"（现读目录：内置 + 自定义）。
+   *
+   * 与 `overlay` 同一条路：由绘制层每帧现读设置、递进钩子；钩子（`drawOverlayLayer`）
+   * 原样转给 `buildOverlayPlan`。数值字段用不到它（它们有色带）。
+   */
+  categoryColors?: ReadonlyMap<string, string>
 }
 
 interface LayerSpecShape {
@@ -101,6 +108,18 @@ interface LayerSpecShape {
   readonly defaultVisible: boolean
   readonly isDataLayer: boolean
   readonly order: number
+  /**
+   * 侧栏「显示」里它属于哪一组（施工文件 §F.1 那条"每个开关只出现在一处"的切法）。
+   *
+   * - `base` = **底图**：地形、六边形网格，以及三条数据层的覆盖染色（温度 / 深度 / 生物群系）——
+   *   它们都是"地图的底色"，回答"这片地方长什么样"；
+   * - `feature` = **地物**：区域、路径、标记、名称 —— 它们都是"画在底图上的东西"，
+   *   回答"这片地方上有什么"。
+   *
+   * 刻意做成表里的一列（而不是在面板里按 id 硬编码）：**加一层仍然只加一行**，
+   * 而且"这一层属于哪一组"与"它叫什么、出厂开不开"放在一起，不会分叉。
+   */
+  readonly displayGroup: 'base' | 'feature'
   /** 这一层画的是哪个**数据字段**（数据层才有；见 `overlayFields.ts`） */
   readonly overlay?: FieldId
   readonly draw?: (context: LayerDrawContext) => LayerDrawOutcome | void
@@ -118,6 +137,7 @@ export const LAYER_TABLE = [
     describe: '六边形地形底色与图形。关掉后只剩矢量元素（路径/区域/标记），文档里的格子不受影响。',
     defaultVisible: true,
     isDataLayer: true,
+    displayGroup: 'base',
     order: 10,
   },
   {
@@ -130,6 +150,7 @@ export const LAYER_TABLE = [
       '它只决定"看不看"，地图文件里的温度不受影响。',
     defaultVisible: false,
     isDataLayer: true,
+    displayGroup: 'base',
     // 压在地形之上、网格与矢量对象之下（路径与名称不该被色块糊住）
     order: 12,
     overlay: 'temperature',
@@ -145,9 +166,27 @@ export const LAYER_TABLE = [
       '它只决定"看不看"，地图文件里的深度值不受影响。',
     defaultVisible: false,
     isDataLayer: true,
+    displayGroup: 'base',
     // 紧挨温度之下、仍在网格与矢量对象之下（两条数据层不该互相遮挡，也不能糊住路径与名称）
     order: 14,
     overlay: 'depth',
+    draw: drawOverlayLayer,
+  },
+  {
+    id: 'biome',
+    label: '生物群系',
+    hint: '格上生物群系的分类配色（与温度 / 深度同一种数据层，叠在地形之上）',
+    describe:
+      '生物群系覆盖层：每一格按它的生物群系**各自的颜色**上色（颜色属于分类表里的那一条，' +
+      '不是"由大类推"）。默认隐藏；逐条配色可在设置页的「数据层」里覆盖。' +
+      '它只决定"看不看"，地图文件里的 biome 值不受影响。',
+    defaultVisible: false,
+    isDataLayer: true,
+    displayGroup: 'base',
+    // 与温度 / 深度同一条带（12 / 14 / 16）：三条数据层叠在地形之上、网格与矢量对象之下。
+    // 放在最后是因为它最"花"（分类配色），被路径与名称压住才不会喧宾夺主。
+    order: 16,
+    overlay: 'biome',
     draw: drawOverlayLayer,
   },
   {
@@ -157,6 +196,7 @@ export const LAYER_TABLE = [
     describe: '六边形网格线。工具条上也有同一个开关（设置页原来那个「显示六边形网格」已并入这里）。',
     defaultVisible: true,
     isDataLayer: false,
+    displayGroup: 'base',
     order: 20,
   },
   {
@@ -166,6 +206,7 @@ export const LAYER_TABLE = [
     describe: '半透明区域填充与边框（国境、领地）。',
     defaultVisible: true,
     isDataLayer: true,
+    displayGroup: 'feature',
     order: 30,
   },
   {
@@ -175,6 +216,7 @@ export const LAYER_TABLE = [
     describe: '河流、道路、贸易路线、边界。',
     defaultVisible: true,
     isDataLayer: true,
+    displayGroup: 'feature',
     order: 40,
   },
   {
@@ -184,6 +226,7 @@ export const LAYER_TABLE = [
     describe: '标记与文字标注（画布上可点击、可拖动的那些实体）。',
     defaultVisible: true,
     isDataLayer: true,
+    displayGroup: 'feature',
     order: 50,
   },
   {
@@ -193,6 +236,7 @@ export const LAYER_TABLE = [
     describe: '路径与区域的名称标注。工具条上的「名称」按钮切换的是同一个值。',
     defaultVisible: true,
     isDataLayer: false,
+    displayGroup: 'feature',
     // 名称**不是独立的一遍**：区域的名称在区域那一遍里画、路径的名称在路径那一遍里画，
     // 所以它的位置跟着所属形状走。这里给的次序只表达"名称夹在矢量图形之间、且永远在标记之下"；
     // 绘制层不必为它单独安排一遍（它只作为标志被区域 / 路径两遍读走）。
