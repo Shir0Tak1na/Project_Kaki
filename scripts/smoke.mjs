@@ -1804,6 +1804,22 @@ function makeApp(canvas, options = {}) {
   // 视图容器包含 wrapperEl —— 交互层就是在这一层用捕获阶段监听指针
   const containerEl = makeEl({ className: 'workspace-leaf-content' })
   containerEl.appendChild(canvas.wrapperEl)
+  /**
+   * 诊断报告第 8 节会量"我方浮层有没有压住 Obsidian 原生控件"（D）。真实视图容器是个真 DOM，
+   * 有 `querySelector`；桩里补一个**最小**实现，让这条链路在冒烟里也真的走一遍。
+   * 几何判定的正确性由 `tests/overlayGeometry.test.ts` 的 6 条单测钉死，这里只证明"接线接上了、
+   * 两个状态都报得出来"。
+   */
+  const fakeRects = [
+    { selector: '.fc-toolbar', rect: { left: 8, top: 48, width: 200, height: 48 } },
+    { selector: '.view-header', rect: { left: 0, top: 0, width: 900, height: 40 } },
+    { selector: '.canvas-controls', rect: { left: 848, top: 640, width: 40, height: 60 } },
+  ]
+  containerEl.__fcRects = fakeRects
+  containerEl.querySelector = (selector) => {
+    const hit = fakeRects.find((entry) => entry.selector === String(selector))
+    return hit ? makeEl({ className: String(selector).slice(1), rect: hit.rect }) : null
+  }
 
   const leaf = {
     isDeferred: false,
@@ -2210,6 +2226,23 @@ console.log('场景 1：真实结构与对抗性 tx/ty（tx/ty 故意不等于�
   check('挂载点不是卡片菜单或节点', !/世界层挂载点 = `div\.canvas-(card-menu|node|controls|control)/.test(report))
   check('候选表标记出了 ★ 世界层', report.includes('| ★ |'))
   check('候选表列出了菜单与节点的矩阵', report.includes('canvas-card-menu') && report.includes('canvas-node'))
+
+  // D：浮层有没有压住 Obsidian 原生控件 —— 报告里给数字，而不是只留一句"请人工确认"（§F.3）
+  check('报告新增第 8 节「浮层与原生控件是否重叠」', report.includes('## 8. 浮层与原生控件是否重叠'), report.match(/## 8[^\n]*/)?.[0] ?? '(缺第 8 节)')
+  check('原结论一节顺延成第 9 节（不重号）', report.includes('## 9. 结论与下一步') && !report.includes('## 8. 结论与下一步'))
+  check('真的量到尺寸并逐对比较（1 个浮层 × 2 个原生控件 = 2 组）', report.includes('- ✅ 逐对比较 2 组，没有一组重叠'), report.match(/- (✅|⚠️)[^\n]*/)?.[0] ?? '(缺判定行)')
+  check('两边的清单都写清了是谁', report.includes('`.fc-toolbar`') && report.includes('`.view-header`') && report.includes('`.canvas-controls`'))
+  // 反例控制：把浮层挪到标题栏上方再跑一次 —— 同一段代码必须报出重叠与尺寸，否则上面那条 ✅ 是空转
+  const diagRects = app.workspace.getLeavesOfType('canvas')[0].view.containerEl.__fcRects
+  const toolbarRect = diagRects.find((entry) => entry.selector === '.fc-toolbar').rect
+  toolbarRect.top = 0
+  const { report: reportOverlap } = await runDiagnostics(app)
+  check(
+    '浮层真的压住标题栏时报出 ⚠️ 与重叠尺寸',
+    reportOverlap.includes('- ⚠️ 1 组重叠') && reportOverlap.includes('`.fc-toolbar` × `.view-header` = 200×40 px'),
+    reportOverlap.match(/- ⚠️[^\n]*/)?.[0] ?? '(缺重叠行)',
+  )
+  toolbarRect.top = 48
 
   // 量化探测：桩环境按 1 CSS 像素取整（实测结论），且 dpr=1.65 ≠ 1
   check('识别出 posFromEvt 存在量化', report.includes('存在量化'), report.match(/判定：[^\n]*/)?.[0] ?? '')

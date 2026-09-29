@@ -24,16 +24,17 @@
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
-- 单元测试：634 个通过
-- 冒烟测试：50 个场景、1433 条断言全部通过
+- 单元测试：640 个通过
+- 冒烟测试：50 个场景、1438 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
-- **最新一轮（导入 / 导出定义文件搬去设置页）** —— 侧栏「文件与导出」组不再画这两个按钮
-  （动作标 `panelHidden: true`，由 `getPanelActions()` 过滤），设置页新增「定义文件（导入 / 导出）」
-  一节（两个按钮 + 口径说明），按钮与命令面板调**同一个方法**
-  （`main.ts` 的 `exportResourceBundle()` / `importResourceBundle()`，本轮由 private 改公开）。
-  用户可见口径见 `CHANGELOG.md`，流水见 `DEVLOG.md` §2g，验收清单见 `PLAN.md` §2.1，
-  教训见 `ENGINEERING-NOTES.md` §5.62。
-  **下一步只剩 `PLAN.md` §3 的最后一项：左上角状态浮窗与 Obsidian 原生控件是否重叠的实机确认（需要你，步骤见 `PLAN.md` §2.3 第 ① 条）**；
+- **最新一轮（D 可测量化：浮层会不会和宿主界面撞）** —— **新建**纯几何模块
+  `src/dev/overlayGeometry.ts`（**不 import obsidian**，所以能进单测）+ `tests/overlayGeometry.test.ts`；
+  `src/dev/diagnostics.ts` 新增**第 8 节「浮层与原生控件是否重叠」**（我方 `.fc-toolbar` / `.fc-selection-card` /
+  `.fc-legend` × 原生 `.canvas-controls` / `.canvas-card-menu` / `.canvas-menu` / `.view-header`），
+  逐对报出重叠尺寸（`✅ 逐对比较 N 组` / `⚠️ K 组重叠：… = 宽×高 px`），原结论节顺延为第 9 节。
+  流水见 `DEVLOG.md` §2h，教训见 `ENGINEERING-NOTES.md` §5.63。
+  **它仍然不能替代人眼确认：下一步只剩 `PLAN.md` §3 的最后一项 —— 左上角状态浮窗与 Obsidian 原生控件
+  是否重叠的实机确认（需要你；先运行命令「诊断当前 Canvas」看第 8 节，步骤见 `PLAN.md` §2.3 第 ① 条）**；
   再往前是「§F：侧栏「显示」三组」、
   「§D + §E：生物群系的分类字段渲染 /
   逐条配色 / 图例按群系分行，与数据层笔刷的「设为 ID」与「＋ − × ÷」三条硬口径」、

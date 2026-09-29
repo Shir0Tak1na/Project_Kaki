@@ -29,6 +29,7 @@ import {
 } from '../canvas/CanvasAdapter.ts'
 import { clientToWorld, quantumNoiseBound, worldToClient, type ClientProjection } from '../core/projection.ts'
 import { screenToWorld, viewportWorldBBox, type Viewport } from '../core/viewport.ts'
+import { describeOverlayCollisions, rectFromBounds, type ElementRect } from './overlayGeometry.ts'
 
 interface RoundTripRow {
   client: string
@@ -163,6 +164,46 @@ function hostVerdict(candidates: TransformCandidate[]): string {
     '判据说明：本画布上同时有多个带 transform 的元素（卡片菜单、每个节点各带一个纯平移矩阵）。',
     '**只按「有没有 transform」判断会误判**，必须看矩阵的缩放分量是否等于当前 scale，或用「是否包含 canvas-node」这一结构证据。',
   ].join('\n')
+}
+
+/** 我方浮层（画布上叠加的东西）：工具条 / 选择信息卡 / 图例 */
+const OVERLAY_SELECTORS = ['.fc-toolbar', '.fc-selection-card', '.fc-legend'] as const
+
+/** Obsidian 画布自己的控件与视图标题栏 —— 浮层不该压住它们 */
+const NATIVE_SELECTORS = ['.canvas-controls', '.canvas-card-menu', '.canvas-menu', '.view-header'] as const
+
+interface QueryableNode {
+  querySelector?(selector: string): unknown
+}
+
+/**
+ * 取这个 Canvas 视图的容器元素（浮层与原生控件都在它里面）。
+ * 拿不到就返回 undefined —— 报告里会写"只能人工确认"，而不是抛错。
+ */
+function viewContainerOf(handle: CanvasHandle): unknown {
+  const view = handle.view as { containerEl?: unknown } | undefined
+  return view?.containerEl
+}
+
+/**
+ * 从容器里量出这些选择器对应元素的屏幕矩形。
+ *
+ * 每一步都先检查能力再调用：诊断跑在真实 Obsidian 里，但**同一个函数也会被冒烟测试调用**，
+ * 那里的 DOM 是桩（可能既没有 `querySelector`，元素也没有 `getBoundingClientRect`）。
+ * 宁可少一行数字，也不要抛错把整份报告弄没。
+ */
+function measureRects(container: unknown, selectors: readonly string[]): ElementRect[] {
+  const node = container as QueryableNode | null | undefined
+  if (!node || typeof node.querySelector !== 'function') return []
+  const rects: ElementRect[] = []
+  for (const selector of selectors) {
+    const found = node.querySelector(selector) as { getBoundingClientRect?(): unknown } | null | undefined
+    if (!found || typeof found.getBoundingClientRect !== 'function') continue
+    const raw = found.getBoundingClientRect() as Parameters<typeof rectFromBounds>[1]
+    const rect = rectFromBounds(selector, raw)
+    if (rect) rects.push(rect)
+  }
+  return rects
 }
 
 function describeHandle(handle: CanvasHandle, index: number): string[] {
@@ -452,7 +493,22 @@ export function buildDiagnosticReport(app: App): string {
   out.push('- 用命令「监视视口变化（Phase 0 探针）」实测：开启后平移/缩放画布，它会分别报告「事件总数」与「有效视口变化数」。')
   out.push('')
 
-  out.push('## 8. 结论与下一步')
+  out.push('## 8. 浮层与原生控件是否重叠（施工文件 §F.3 / ISSUES.md ISSUE-004 §4 第 5 条）')
+  out.push('')
+  const viewContainer = viewContainerOf(target)
+  const overlayRects = measureRects(viewContainer, OVERLAY_SELECTORS)
+  const nativeRects = measureRects(viewContainer, NATIVE_SELECTORS)
+  const canMeasure = typeof (viewContainer as QueryableNode | null | undefined)?.querySelector === 'function'
+  if (!canMeasure) {
+    out.push('- 读不到视图容器（`view.containerEl` 的 `querySelector` 不可用）—— 这一条只能人工看左上角。')
+  } else {
+    out.push(...describeOverlayCollisions(overlayRects, nativeRects))
+  }
+  out.push('- 判定口径：**重叠面积 > 0 才算重叠**（只是贴边不算）；浮层挂在未变换的 `wrapperEl` 上，所以不随画布缩放。')
+  out.push('- 人工确认（真实库）：打开一张 Canvas 并启用地图层，看左上角浮窗有没有盖住视图标题栏 / 标签页 / 侧栏按钮；绘制与选择两种状态各看一遍。')
+  out.push('')
+
+  out.push('## 9. 结论与下一步')
   out.push('')
   const ready = projectionResult.projection !== null && projectionResult.host !== null
   out.push(
