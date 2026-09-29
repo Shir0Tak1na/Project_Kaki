@@ -42,6 +42,8 @@ import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.
 import { ReportModal, type ReportModalFactory, type ReportModalOptions } from './ui/ReportModal.ts'
 import { AssetSuggestModal, type AssetPickerKind, type AssetPickerOptions, type ImagePickerFactory } from './ui/AssetSuggestModal.ts'
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type BatchEditInfo, type PluginAction } from './ui/MapPanel.ts'
+import type { ToolControlsHost } from './ui/toolSections.ts'
+import { resolveVaultResourceUrl } from './base/vaultResource.ts'
 import type { SelectionFieldValue } from './editor/selection.ts'
 import { SELECTION_KINDS } from './editor/selection.ts'
 import {
@@ -323,6 +325,8 @@ export default class ProjectKakiPlugin extends Plugin {
       onOpenSelectionFilter: () => this.openSelectionFilterModal(),
       // 选中项变了：侧栏检查器要立刻跟着变（面板在另一棵树里，只能由插件层转发）
       onSelectionChanged: () => this.refreshPanel(),
+      // 编辑器状态变了（模式 / 工具 / 笔刷层 / 半径 / 框选方式）：侧栏那三节控件画的就是它
+      onEditorStateChanged: () => this.refreshPanel(),
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
       // 工具条上的按钮通过下面两个 setter 写回设置。
       getLayers: () => this.pluginSettings.layers,
@@ -757,11 +761,69 @@ export default class ProjectKakiPlugin extends Plugin {
         void this.setOverlayCategoryColor(field, categoryId, color)
       },
       getCategoryUsage: (spec) => this.categoryUsageOf(spec),
+      // ---- 工具 / 笔刷 / 选择方式（§F.2：这三节从画布浮窗搬进了侧栏）----
+      getToolControls: () => this.toolControlsHost(),
     }))
 
     this.addRibbonIcon('map', 'Project Kaki：打开地图面板', () => {
       void this.activatePanel()
     })
+  }
+
+  /**
+   * 侧栏「工具 / 笔刷 / 选择方式」三节控件要的读写入口（施工文件 §F.2）。
+   *
+   * 三节控件是**从画布浮窗搬进侧栏**的（ISSUE-002「找不到生物群系笔刷」、
+   * ISSUE-004「筛选和绘制在同一个框里」）；控件本体的渲染在 `ui/toolSections.ts`，
+   * 这里只做两件事：**找出当前活跃的那个编辑器**、**每次写入之后请面板重绘**。
+   *
+   * 与 `getSelection` / `onToggleLayer` 同一条边界：面板不认识编辑器，
+   * 也不该认识 —— 否则"状态存在哪里"会在两处各有一份答案。
+   */
+  private toolControlsHost(): ToolControlsHost {
+    /** 当前活跃地图层的编辑器；没有启用的地图层时为 `null`（三节会显示同一句提示） */
+    const active = (): MapEditor | null => this.layers?.getInspectorEditor() ?? null
+    /**
+     * 写入 + 重绘。
+     *
+     * 编辑器自己也会通过 `onEditorStateChanged` 通知面板（快捷键、画布手势都会走那条路）；
+     * 这里的 `refreshPanel()` 管的是"用户点了控件"这一路：界面必须立刻落到新值上。
+     * 重复请求由面板的签名比对 + `requestAnimationFrame` 合并吸收。
+     */
+    const apply = (run: (editor: MapEditor) => void): void => {
+      const editor = active()
+      if (!editor) return
+      run(editor)
+      this.refreshPanel()
+    }
+    return {
+      getStatus: () => active()?.getStatus() ?? null,
+      setTool: (tool) => apply((editor) => editor.setTool(tool)),
+      setTerrainType: (id) => apply((editor) => editor.setTerrainType(id)),
+      setMarkerIcon: (id) => apply((editor) => editor.setMarkerIcon(id)),
+      setPathType: (id) => apply((editor) => editor.setPathType(id)),
+      setRegionType: (id) => apply((editor) => editor.setRegionType(id)),
+      setGeometryMode: (mode) => apply((editor) => editor.setGeometryMode(mode)),
+      setBrushField: (field) => apply((editor) => editor.setBrushField(field)),
+      setBrushOp: (op) => apply((editor) => editor.setBrushOp(op)),
+      setBrushValue: (value) => apply((editor) => editor.setBrushValue(value)),
+      setBrushBiome: (id) => apply((editor) => editor.setBrushBiome(id)),
+      adjustBrushRadius: (delta) => apply((editor) => editor.adjustBrushRadius(delta)),
+      setSelectionMode: (mode) => apply((editor) => editor.setSelectionMode(mode)),
+      expandSelectionByTerrain: () =>
+        apply((editor) => {
+          editor.expandSelectionByTerrain()
+        }),
+      getCustomTerrains: () => this.getCustomTerrains(),
+      getCustomMarkers: () => this.getCustomMarkers(),
+      getPathTypes: () => this.getPathTypes(),
+      getRegionTypes: () => this.getRegionTypes(),
+      getCustomBiomes: () => this.getCustomBiomes(),
+      // 与标记层、设置页预览**同一个函数**：三处各写一遍迟早分叉（见 vaultResource.ts 的注释）
+      resolveImageSrc: (path) => resolveVaultResourceUrl(this.app, path),
+      onOpenSelectionFilter: () => this.openSelectionFilterModal(),
+      requestRerender: () => this.refreshPanel(),
+    }
   }
 
   /**
@@ -911,6 +973,21 @@ export default class ProjectKakiPlugin extends Plugin {
       const view = leaf.view
       if (view instanceof MapPanelView) view.requestRender()
     }
+  }
+
+  /**
+   * 落盘插件设置，并让侧栏面板跟着重绘。
+   *
+   * 为什么这两件事要绑在一起（而不是各写各的）：§F.2 之后侧栏里出现了**从设置派生**的控件 ——
+   * 地形调色板、标记图标、路径/区域类型下拉、生物群系下拉（`ui/toolSections.ts`）。
+   * 改这些设置（新增/删除自定义定义、改颜色与画法参数）过去只需要画布下一帧现读即可生效，
+   * 现在还必须让面板重建一次，否则用户会看到"设置里删掉了，侧栏里那个按钮还在"。
+   *
+   * 重绘是**签名门控 + 同帧合并**的，所以这里无脑调用不会带来逐帧重建（§5.9 那条教训的反面）。
+   */
+  private async persistSettings(): Promise<void> {
+    await this.saveData(this.pluginSettings)
+    this.refreshPanel()
   }
 
   /**
@@ -1263,7 +1340,7 @@ export default class ProjectKakiPlugin extends Plugin {
       ...this.pluginSettings,
       customTerrains: [...this.pluginSettings.customTerrains, result.terrain],
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
     return { ok: true }
   }
@@ -1305,7 +1382,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const list = [...this.pluginSettings.customTerrains]
     list[index] = next.terrain
     this.pluginSettings = { ...this.pluginSettings, customTerrains: list }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -1322,7 +1399,7 @@ export default class ProjectKakiPlugin extends Plugin {
       ...this.pluginSettings,
       customTerrains: this.pluginSettings.customTerrains.filter((_terrain, i) => i !== index),
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -1356,7 +1433,7 @@ export default class ProjectKakiPlugin extends Plugin {
       // 旧字段跟着目录走，避免同一份颜色在两处自相矛盾（它不再是渲染依据）
       pathColors: pathColorsFromEntries(list),
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
     return { ok: true }
   }
@@ -1398,7 +1475,7 @@ export default class ProjectKakiPlugin extends Plugin {
     }
     const list = [...this.pluginSettings.pathTypes, result.entry]
     this.pluginSettings = { ...this.pluginSettings, pathTypes: list, pathColors: pathColorsFromEntries(list) }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
     return { ok: true }
   }
@@ -1413,7 +1490,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const list = this.pluginSettings.pathTypes.filter((entry) => entry.id !== id)
     if (list.length === this.pluginSettings.pathTypes.length) return
     this.pluginSettings = { ...this.pluginSettings, pathTypes: list, pathColors: pathColorsFromEntries(list) }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -1515,7 +1592,7 @@ export default class ProjectKakiPlugin extends Plugin {
       ...this.pluginSettings,
       customMarkers: [...this.pluginSettings.customMarkers, result.marker],
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
     return { ok: true }
   }
@@ -1546,7 +1623,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const list = [...this.pluginSettings.customMarkers]
     list[index] = next.marker
     this.pluginSettings = { ...this.pluginSettings, customMarkers: list }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -1563,7 +1640,7 @@ export default class ProjectKakiPlugin extends Plugin {
       ...this.pluginSettings,
       customMarkers: this.pluginSettings.customMarkers.filter((_marker, i) => i !== index),
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -1577,7 +1654,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const next = normalizeLabelScale(value)
     if (next === this.pluginSettings.labelScale) return
     this.pluginSettings = { ...this.pluginSettings, labelScale: next }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.redrawAll()
   }
 
@@ -1625,7 +1702,7 @@ export default class ProjectKakiPlugin extends Plugin {
       // 旧字段跟着目录走，避免同一份颜色在两处自相矛盾（它不再是渲染依据）
       regionColors: regionColorsFromEntries(list),
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
     return { ok: true }
   }
@@ -1671,7 +1748,7 @@ export default class ProjectKakiPlugin extends Plugin {
       regionTypes: list,
       regionColors: regionColorsFromEntries(list),
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
     return { ok: true }
   }
@@ -1690,7 +1767,7 @@ export default class ProjectKakiPlugin extends Plugin {
       regionTypes: list,
       regionColors: regionColorsFromEntries(list),
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -1878,7 +1955,7 @@ export default class ProjectKakiPlugin extends Plugin {
         break
       }
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -2167,7 +2244,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const next = normalizeFontFamily(value)
     if (next === this.pluginSettings.labelFontFamily) return
     this.pluginSettings = { ...this.pluginSettings, labelFontFamily: next }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -2188,7 +2265,7 @@ export default class ProjectKakiPlugin extends Plugin {
       regionColors: regionColorsFromEntries(regionTypes),
       labelFontFamily: '',
     }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.layers?.setStylePalette()
   }
 
@@ -2201,7 +2278,7 @@ export default class ProjectKakiPlugin extends Plugin {
   async setDeveloperMode(enabled: boolean): Promise<void> {
     if (this.pluginSettings.developerMode === enabled) return
     this.pluginSettings = { ...this.pluginSettings, developerMode: enabled }
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
     this.refreshPanel()
   }
 
@@ -2209,7 +2286,7 @@ export default class ProjectKakiPlugin extends Plugin {
    * 切换某个图层的显示。
    *
    * 顺序是刻意的：**改内存 → 立刻广播 → 再落盘**。
-   * 广播不能等 `await saveData(...)`：工具条上的「名称」按钮是同步点下去的，
+   * 广播不能等 `await saveData(...)`：侧栏里的图层开关是同步点下去的，
    * 等落盘再广播意味着"点了之后下一帧仍然画着名称"（而且测试里同步断言也拿不到新值）。
    * 落盘是后台的事，它慢一点不影响画面。
    *
@@ -2226,7 +2303,7 @@ export default class ProjectKakiPlugin extends Plugin {
     // 所以刷新要在这里做（而不是只让"点面板的那一次"自己刷新），否则会出现
     // "从别处改了图层，面板上的开关还亮着旧状态"。requestRender 会把同帧的重复请求合并掉。
     this.refreshPanel()
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
   }
 
   /**
@@ -2245,7 +2322,7 @@ export default class ProjectKakiPlugin extends Plugin {
     this.pluginSettings = { ...this.pluginSettings, overlays: next }
     // 色带变了 → 图例里的渐变条与越界计数也要跟着变（图例只在"设置变了"时刷新，不跟每帧走）
     this.layers?.setLayers()
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
   }
 
   /** 把某一层的色带恢复出厂（只动色带，不动透明度与"画数值"开关） */
@@ -2272,7 +2349,7 @@ export default class ProjectKakiPlugin extends Plugin {
     if (next === this.pluginSettings.showLegend) return
     this.pluginSettings = { ...this.pluginSettings, showLegend: next }
     this.layers?.setLayers()
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
   }
 
   /**
@@ -2297,7 +2374,7 @@ export default class ProjectKakiPlugin extends Plugin {
       this.pluginSettings = { ...this.pluginSettings, hideQuickStartPanel: next }
     }
     this.refreshPanel()
-    await this.saveData(this.pluginSettings)
+    await this.persistSettings()
   }
 
   /** 替换放置对话框（自动化测试用；不改动则为真实的输入对话框） */

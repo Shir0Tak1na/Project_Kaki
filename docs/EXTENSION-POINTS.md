@@ -171,7 +171,7 @@ isDataLayer / order / draw?`）。`LAYER_KEYS`、`DEFAULT_LAYER_VISIBILITY`、�
   值 → 颜色走 `biomeCatalog`（34 条内置 + `custom:` 自定义，**每条自带颜色**），
   用户逐条改过的存在 `style.categoryColors` 里（**只存改过的**）；渲染走 `buildCategoryPlan`
   （逐格 polygon），图例走 `kind: 'biome'` 分行。**分类字段没有色带 / 越界 / 单位 / 等值线 / 写数值**
-  —— 设置页与工具条都按 `isNumericField` 把它们整组隐掉。
+  —— 设置页与侧栏「笔刷」都按 `isNumericField` 把它们整组隐掉（`src/ui/toolSections.ts`）。
 - **还没做的**：生物群系的**自定义增删改 UI**（目录工厂 / 规范化 / 颜色解析通路已就位，
   缺"新增 / 删除 / 改 ID"那几个入口；与 A3 之后地形 / 标记的定义管理同一条路）、
   生物群系的**自动推导**（`climateModel` 的签名窗口见 §3.3）、
@@ -184,6 +184,10 @@ isDataLayer / order / draw?`）。`LAYER_KEYS`、`DEFAULT_LAYER_VISIBILITY`、�
    若这个字段有自己的单位/读法，再在这一行里加 `units` 与 `format`；
 2. **想清楚合成规则**（谁在谁上面、怎么混）并写进 `order` 与注释，别让绘制层临场决定；
 3. 若用连续场而不是逐格上色，图元 IR 已经就绪（`fieldPlan.ts` 的 `buildFieldPlan`）；
+   ⚠️ **界面控件放哪（2026-09-29 §F.2 之后）**：字段表加一行之后，侧栏「笔刷」的"刷什么"下拉会
+   自动多一项（它遍历 `OVERLAY_FIELDS`），数值/分类两套控件也各自按 `numeric` 分岔 ——
+   你**不需要**去 `MapToolbar.ts` 加控件（那里现在只有状态显示）；要定制就改 `src/ui/toolSections.ts`，
+   并在 `ToolControlsHost` 上加一个读写口、在 `main.ts#toolControlsHost()` 里接上。
 4. Base 行 / 导出 / 图例都要能表达"这一格还有别的值"（图例分段已在 §3.2 的表里就位）；
    若这一层要进**导出**，只需在 `mapPreview` 的叠加层循环里出现（它按 `OVERLAY_FIELDS` 遍历）——
    **不要再写一份绘制**：几何与配色都来自 `buildOverlayPlan`（§5.51）；

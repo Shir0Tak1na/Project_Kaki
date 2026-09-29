@@ -46,6 +46,13 @@ import {
   type CategoryUsageRow,
   type OverlaySectionHost,
 } from './settingsSections.ts'
+import {
+  renderBrushSection,
+  renderSelectionModeSection,
+  renderToolSection,
+  toolControlsSignature,
+  type ToolControlsHost,
+} from './toolSections.ts'
 
 export const MAP_PANEL_VIEW_TYPE = 'fictional-cartographer-panel'
 
@@ -185,6 +192,16 @@ export interface MapPanelDeps {
   onSetOverlayCategoryColor: (field: FieldId, categoryId: string, color: string) => void
   /** 当前地图上真的用到过的分类（面板只列这些；由插件层现算） */
   getCategoryUsage: (spec: CategoryOverlayFieldSpec) => ReadonlyArray<CategoryUsageRow>
+  /**
+   * ---- 工具 / 笔刷 / 选择方式（§F.2）----
+   *
+   * 这三节控件是**从画布浮窗搬来的**（ISSUE-002「找不到生物群系笔刷」、
+   * ISSUE-004「筛选和绘制在同一个框里」）。搬家的意义是"要改什么就在侧栏改"，
+   * 浮窗因此只留下状态与撤销/重做（见 `MapToolbar`）。
+   *
+   * 面板照旧不认识编辑器与目录：控件怎么画在 `toolSections.ts`，读写全部走这个宿主。
+   */
+  getToolControls: () => ToolControlsHost
 }
 
 /** 整批编辑那一节要显示的一份数据（由插件层从"当前选择 + 文档"现算） */
@@ -215,6 +232,36 @@ const GROUP_ORDER: ReadonlyArray<{ group: PanelActionGroup; title: string }> = [
   { group: 'file', title: '文件与导出' },
   { group: 'dev', title: '开发工具（仅开发者模式）' },
 ]
+
+/**
+ * 按 `dataset` 的键值找第一个后代元素（面板用来在重建后认回"同一个控件"）。
+ *
+ * 与 `collectByClass` 那类选择器不同：这里认的是**数据身份**而不是样式类 ——
+ * 样式可以随排版改，`dataset.fcFocusKey` 是契约。
+ */
+function findByDataset(root: HTMLElement | null | undefined, key: string, value: string): HTMLElement | null {
+  if (root === null || root === undefined) return null
+  const walk = (node: HTMLElement): HTMLElement | null => {
+    if (node.dataset?.[key] === value) return node
+    for (const child of (node.children ?? []) as unknown as HTMLElement[]) {
+      const found = walk(child)
+      if (found !== null) return found
+    }
+    return null
+  }
+  return walk(root)
+}
+
+/**
+ * 给 `ToolControlsHost` 换上**面板自己的**"请求重绘"。
+ *
+ * 为什么不在 `main.ts` 里直接写 `refreshPanel()`：面板的重绘是**签名门控**的
+ * （状态没变就跳过），而"用户点了一个控件"这件事本身不在签名里 ——
+ * 只清签名 + 排帧，才能保证这一帧一定重建。
+ */
+function toolControlHostWithRerender(host: ToolControlsHost, requestRerender: () => void): ToolControlsHost {
+  return { ...host, requestRerender }
+}
 
 /** 渲染一个动作时拿得到的东西（面板只画界面，写入全部回 `deps`） */
 interface SelectionActionContext {
@@ -327,6 +374,16 @@ export class MapPanelView extends ItemView {
    */
   private rendered = false
   private frameHandle: number | null = null
+  /**
+   * 重建前记下的"用户正在打字的那个输入框"（`dataset.fcFocusKey` 作身份）。
+   *
+   * 为什么需要：面板是**整块重建**式重绘，而 §E 要求"键入即把笔刷打回未确认"——
+   * 那一步会写编辑器状态、触发重绘，输入框被换成新的：用户打到一半的数字和焦点一起没了，
+   * 表现就是"数字打不进去"。浮窗时期靠"有焦点就不改它的字"绕开，面板没有那个余地
+   * （旧元素已经不在 DOM 里），所以改成"重建后放回去"。
+   * 与 `openGroups` 是同一类处理：把用户正在做的操作从 DOM 读出来再还原。
+   */
+  private focusedInput: { key: string; value: string; start: number | null; end: number | null } | null = null
 
   constructor(leaf: WorkspaceLeaf, deps: MapPanelDeps) {
     super(leaf)
@@ -430,6 +487,18 @@ export class MapPanelView extends ItemView {
             .join(',')
       return `${spec.id}:${JSON.stringify(overlays[spec.id])}:${usage}`
     }).join('|')
+    /**
+     * 「工具 / 笔刷 / 选择方式」三节（§F.2）也一样要进签名：那三节画的就是编辑器状态本身
+     * （当前工具、刷哪一层、半径、框选方式…），漏掉就会出现"点了没反应 / 还高亮着上一个"
+     * 这类静默不更新（§5.9）。目录签名由 `toolControlsSignature` 一并算进去。
+     */
+    const toolControls = toolControlHostWithRerender(this.deps.getToolControls(), () => {
+      // 控件改完状态后要"这一帧一定重绘"：写状态走的是插件层，签名未必马上变，
+      // 所以先清签名再排帧（否则点了按钮面板可能停在旧值上，§5.9）
+      this.lastSignature = null
+      this.requestRender()
+    })
+    const toolSignature = toolControlsSignature(toolControls)
     const signature = [
       summary,
       layerSignature,
@@ -441,6 +510,7 @@ export class MapPanelView extends ItemView {
       // 按钮上的 ●/○ 停在旧状态（同 §5.9）
       `legend:${this.deps.getShowLegend() ? 1 : 0}`,
       `overlays:${overlaySignature}`,
+      `tools:${toolSignature}`,
       // 引导的可见性也要进签名：否则点了「不再显示」之后签名没变，面板会**跳过重绘**，
       // 清单看起来"点了没反应"（同 §5.9 那条"签名漏了状态就会静默不更新"）。
       quickStartVisible ? 'qs:1' : 'qs:0',
@@ -453,6 +523,8 @@ export class MapPanelView extends ItemView {
     // 重建前先把"哪些组是展开的"读回来 —— 否则每次改完字段所有组都收起，
     // 用户改一个值就要重新点开一次（真实库里的反馈）
     this.captureOpenGroups()
+    // 同理："正在打字的那个框"也要能还原（见 `focusedInput` 的说明）
+    this.focusedInput = this.captureFocusedInput()
     this.groupEls.clear()
     root.empty()
     root.addClass('fc-panel-root')
@@ -462,9 +534,15 @@ export class MapPanelView extends ItemView {
 
     this.renderQuickStart(root, quickStartVisible)
 
-    this.renderSelection(root, selection, batch)
-
     this.renderDisplay(root, visibility)
+
+    // §F.2 的次序：显示 → 笔刷 → 选择 → 工具。三节控件都排在动作列表**之前** ——
+    // 它们是"边看画布边调"的东西，让用户先滚过一屏命令按钮才够到笔刷是本末倒置
+    // （ISSUE-002 那句话就是"找不到笔刷"）。
+    renderBrushSection(root, toolControls)
+    renderSelectionModeSection(root, toolControls)
+    this.renderSelection(root, selection, batch)
+    renderToolSection(root, toolControls)
 
     for (const { group, title } of GROUP_ORDER) {
       const items = rows.filter((row) => row.action.group === group)
@@ -473,7 +551,39 @@ export class MapPanelView extends ItemView {
       if (title.length > 0) list.createEl('div', { cls: 'fc-panel-group-title', text: title })
       for (const row of items) this.renderAction(list, row.action, row.available, row.description)
     }
+    this.restoreFocusedInput()
     this.rendered = true
+  }
+
+  /** 重建前：当前焦点是不是落在面板里某个"有身份"的输入框上（`dataset.fcFocusKey`） */
+  private captureFocusedInput(): { key: string; value: string; start: number | null; end: number | null } | null {
+    const doc = this.contentEl.ownerDocument ?? globalThis.document
+    const active = doc?.activeElement as HTMLInputElement | null | undefined
+    if (active === null || active === undefined) return null
+    if (typeof this.contentEl.contains === 'function' && !this.contentEl.contains(active)) return null
+    const key = active.dataset?.fcFocusKey
+    if (typeof key !== 'string' || key.length === 0) return null
+    return {
+      key,
+      value: String(active.value ?? ''),
+      start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
+      end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
+    }
+  }
+
+  /** 重建后：把焦点、文字与光标位置放回同名的新元素上（找不到就什么都不做） */
+  private restoreFocusedInput(): void {
+    const captured = this.focusedInput
+    this.focusedInput = null
+    if (captured === null) return
+    const target = findByDataset(this.contentEl, 'fcFocusKey', captured.key)
+    if (target === null) return
+    const input = target as HTMLInputElement
+    input.value = captured.value
+    input.focus?.()
+    if (captured.start !== null && typeof input.setSelectionRange === 'function') {
+      input.setSelectionRange(captured.start, captured.end ?? captured.start)
+    }
   }
 
   /**

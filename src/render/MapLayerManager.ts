@@ -20,7 +20,6 @@ import { MapOverlay, type OverlayStats } from './MapOverlay.ts'
 import { buildLegendEntries, type LegendDeps, type LegendEntry } from './legend.ts'
 import {
   DEFAULT_LAYER_VISIBILITY,
-  isLayerVisible,
   type LayerKey,
   type LayerVisibility,
 } from './layerVisibility.ts'
@@ -123,6 +122,15 @@ export interface MapLayerManagerDeps {
    */
   onSelectionChanged?: () => void
   /**
+   * 编辑器的**状态**变了（模式 / 工具 / 笔刷层 / 半径 / 框选方式…）。
+   *
+   * 为什么与 `onSelectionChanged` 分开：那个说的是"选中的对象变了"，
+   * 这个说的是"控件上的值变了"。侧栏里的「工具 / 笔刷 / 选择方式」三节画的就是这些值
+   * （§F.2 把控件从画布浮窗搬进了侧栏），所以每一次改动都得让面板重绘 ——
+   * 否则会出现"用快捷键换了地形，侧栏还亮着上一个"这种静默不一致（§5.9 的老毛病）。
+   */
+  onEditorStateChanged?: () => void
+  /**
    * 图层可见性（来自插件设置）。
    *
    * 同样传函数：图层开关会被用户在设置页或工具条上随手改，必须"每次现读"，
@@ -141,8 +149,8 @@ export interface MapLayerManagerDeps {
   /**
    * 写回图层开关（由插件实现：同步改内存 + 落盘 + 广播）。
    *
-   * 工具条上的「名称」按钮走这个口子 —— 图层是持久化设置，
-   * 工具条只是它的一个入口，不能让按钮自己留一份状态。
+   * 侧栏面板「地物」一组里的图层开关走这个口子 —— 图层是持久化设置，
+   * 界面上的按钮只是它的一个入口，不能让按钮自己留一份状态。
    */
   setLayerVisible?: (key: LayerKey, value: boolean) => void
   /** 写回图例显示开关（同上） */
@@ -546,6 +554,8 @@ export class MapLayerManager {
         const entry = this.entries.get(canvasPath)
         entry?.toolbar?.refresh()
         entry?.selectionCard?.refresh()
+        // 侧栏那三节控件（工具 / 笔刷 / 选择方式）画的就是编辑器状态，必须跟着重绘
+        this.deps.onEditorStateChanged?.()
       },
     })
 
@@ -617,32 +627,17 @@ export class MapLayerManager {
 
     // 工具条挂在未变换的 wrapperEl 上：这样它不随画布缩放，按钮尺寸恒定。
     // 工具条是"锦上添花"的部件，创建失败不应连带地图层一起失败 —— 因此包一层。
+    //
+    // ⚠️ 它现在只是**状态浮窗**（§F.2 / §F.3）：工具、笔刷参数、选择方式都搬去了侧栏面板
+    // （`ui/toolSections.ts`）。这里的选项表因此只剩"编辑器 + 撤销/重做 + 一个目录读口"——
+    // 再造一个控制条是这次重构专门要消掉的东西。
     const toolbarHost = asElement((handle.canvas as { wrapperEl?: unknown }).wrapperEl)
     if (toolbarHost) {
       try {
         toolbar = new MapToolbar(toolbarHost, {
           editor,
-          getPalette: () => {
-            const palette = this.deps.getStylePalette?.() ?? defaultStylePalette()
-            return { regionColors: palette.regionColors }
-          },
-          getPathTypes: () => this.deps.getPathTypes?.() ?? defaultPathTypeEntries(),
-          getRegionTypes: () => this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries(),
+          // 副行要写出当前地形笔刷的中文名（自定义地形也得有名字，不能显示成一串 ID）
           getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
-          getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
-          // 笔刷那一节的"设为哪个群系"下拉要列全目录（内置 + 自定义），同样现读
-          getCustomBiomes: () => this.deps.getCustomBiomes?.() ?? [],
-          resolveImageSrc: (path) => this.resourceUrlFor(path),
-          // 「名称」按钮写图层设置（同一个值）：编辑器里**没有**第二份名称开关，
-          // 所以不存在"设置里打开、按钮显示关闭"这种状态
-          getShowShapeLabels: () => isLayerVisible(this.layersVisibility(), 'labels'),
-          onToggleLabels: () => {
-            this.deps.setLayerVisible?.('labels', !isLayerVisible(this.layersVisibility(), 'labels'))
-          },
-          getShowLegend: () => this.deps.getShowLegend?.() ?? false,
-          onToggleLegend: () => {
-            this.deps.setShowLegend?.(!(this.deps.getShowLegend?.() ?? false))
-          },
           onModeChanged: (mode) => interaction.notifyModeChanged(mode),
           // 工具条上那个「地图层」按钮已删掉（用户反馈"不知道是干什么的"，且与面板里的
           // 「启用/停用当前 Canvas 的地图层」重复）。停用地图层现在的入口是：侧栏地图面板
@@ -654,8 +649,8 @@ export class MapLayerManager {
           onRedo: () => {
             editor.redo()
           },
-          // 只有插件层接上了才渲染那个按钮（缺省 = 这个按钮不出现，而不是"点了没反应"）
-          onOpenSelectionFilter: this.deps.onOpenSelectionFilter,
+          // ⚠️ 「筛选…」按钮不在浮窗里了：它与框选/笔迹/连通扩展一起搬进了侧栏
+          // 「选择方式」一节（`deps.onOpenSelectionFilter` 现在由 `main.ts` 直接喂给面板）。
         })
       } catch (error) {
         console.warn('[project-kaki] 工具条创建失败，地图层继续但不带工具条', error)

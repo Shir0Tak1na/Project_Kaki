@@ -1,4 +1,4 @@
-﻿> **这份文件是交接入口，不是排期**：只保留「当前状态 / 已完成能力 / 关键文件 / 交接注意」。
+> **这份文件是交接入口，不是排期**：只保留「当前状态 / 已完成能力 / 关键文件 / 交接注意」。
 > **当前排期看 `PLAN.md`**；**已完成流水看 `DEVLOG.md`**；
 > **2026-09-24 ～ 09-28 的逐轮交接叙事已移到 `archive/ARCHIVE-HANDOFF.md`**（原文保留，只读）。
 > ⚠️ 本文件**不再维护基线数字**（避免两处各写一遍）：基线以 `PLAN.md` §2 与四道门实测为准。
@@ -25,11 +25,18 @@
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
 - 单元测试：634 个通过
-- 冒烟测试：50 个场景、1426 条断言全部通过
+- 冒烟测试：50 个场景、1413 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
-- **最新一轮（§F：侧栏「显示」三组 —— 底图 / 地物 / 数据层参数，每个开关只出现一次；
-  数据层参数与设置页「共用同一份控件渲染」（新建 `src/ui/settingsSections.ts`）见
-  `docs/PLAN.md` §2 与 `docs/DEVLOG.md` §2d**；再往前是「§D + §E：生物群系的分类字段渲染 /
+- **最新一轮（§F.2：工具 / 笔刷 / 选择方式搬进侧栏）** —— 新建 `src/ui/toolSections.ts`，
+  侧栏多出「笔刷」（层 / 算法 / 数值 / 半径 / 地形调色板 / 群系下拉）、「选择方式」（矩形 /
+  笔迹 / 筛选… / 连通扩展）、「工具」（工具切换 / 路径·区域类型 / 图标 / 几何模式）三节；
+  **浮窗降级为状态浮窗**（标题行 + 副行 + 提示行 + 模式 + 撤销/重做），自绘下拉
+  `ToolbarDropdown.ts` 随之退休（侧栏改用原生 `<select>` + 当前类型色块）。
+  用户可见口径见 `docs/CHANGELOG.md`，逐条回执见 `docs/DATA-LAYER-PLAN-v5.md` §F，
+  教训见 `ENGINEERING-NOTES.md` §5.59 / §5.60。**下一步是 ISSUE-003 的筛选器文案
+  （`UI-COPY-REVIEW.md` §4.1）与「导入导出搬去设置页」**；
+  再往前是「§F：侧栏「显示」三组」、
+  「§D + §E：生物群系的分类字段渲染 /
   逐条配色 / 图例按群系分行，与数据层笔刷的「设为 ID」与「＋ − × ÷」三条硬口径」、
   「§C：选择系统 —— 框选 / 笔迹选择 /
   规则筛选器 / 右上角信息卡 / 整批编辑；工具条搬去左上角并降级为状态显示」、
@@ -239,7 +246,9 @@ git add -A ; git commit -m "release: 1.0.0" ; git tag 1.0.0 ; git push --follow-
 - [src/ui/MapLegend.ts](../src/ui/MapLegend.ts)：画布上的图例面板（签名比对、不每帧重建）。
 - [src/base/pngExport.ts](../src/base/pngExport.ts)：SVG → PNG 光栅化（依赖注入，可无浏览器单测）。
 - [scripts/release.mjs](../scripts/release.mjs)：发版时统一四处版本号。
-- [src/ui/MapToolbar.ts](../src/ui/MapToolbar.ts)：Canvas 工具条和地图层停用按钮。
+- [src/ui/MapToolbar.ts](../src/ui/MapToolbar.ts)：Canvas 上的**状态浮窗**（标题行 = 这个框属于谁 · 副行 = 参数或"为什么画不动" · 提示行 · 模式 · 撤销/重做）。工具与参数**不在这里**。
+- [src/ui/toolSections.ts](../src/ui/toolSections.ts)：侧栏「工具 / 笔刷 / 选择方式」三节控件（§F.2 从浮窗搬来；全部从字段表与目录表派生，每个控件只出现一次）。
+- [src/ui/settingsSections.ts](../src/ui/settingsSections.ts)：数据层参数的**共用一份控件渲染**（设置页与侧栏面板各注入自己的读写方式）。
 - [src/editor/MapInteraction.ts](../src/editor/MapInteraction.ts)：捕获阶段事件和原生 UI 排除。
 - [src/render/MapLayerManager.ts](../src/render/MapLayerManager.ts)：地图层生命周期和设置传递。
 - [src/render/MapOverlay.ts](../src/render/MapOverlay.ts)：覆盖层、网格绘制和逐帧重绘。

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 运行时冒烟测试：用桩替身模拟 Obsidian，把编译产物 main.js 真正加载并执行一遍。
  *
  * 桩环境**复刻 Phase 0 在 Obsidian 1.13.7 上实测到的真实结构**（见 docs/archive/PHASE-0-RESULTS.md）：
@@ -2024,6 +2024,29 @@ function collectByClass(root, className) {
 }
 
 /**
+ * 打开（或复用）侧栏地图面板并返回它的视图。
+ *
+ * 为什么要它：施工文件 §F.2 那一轮把**工具 / 笔刷 / 选择方式**三节控件从画布浮窗搬进了侧栏，
+ * 浮窗只剩「状态 + 模式 + 撤销/重做」。于是"地形按钮有几个""筛选…在哪""刷什么下拉"
+ * 这类断言必须去面板里找 —— 面板是全局单例视图，开一次就够。
+ *
+ * ⚠️ 面板的重绘排队在可控 rAF 里（见 `frameQueue`）：改完状态要 `flushFrames()` 之后再读 DOM，
+ * 否则读到的还是上一帧。
+ */
+async function openMapPanel(app, plugin) {
+  if (app.workspace.getLeavesOfType('fictional-cartographer-panel').length === 0) {
+    plugin.ribbonIcons[0].callback()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+  }
+  return app.workspace.getLeavesOfType('fictional-cartographer-panel')[0]?.view
+}
+
+/** 面板里的元素查询（§F.2 之后，工具 / 笔刷 / 选择方式的控件都在面板里） */
+function inPanel(panel, className) {
+  return collectByClass(panel?.contentEl, className)
+}
+
+/**
  * 把若干条「路径段」按顺序拼成一条折线。
  *
  * 变宽描边是**逐段**画的（每段一次 beginPath/stroke），所以一条河流会记录成很多条 2 点记录；
@@ -2595,8 +2618,15 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
   const toolbarEl = wrapper.children.find((child) => child.className === 'fc-toolbar')
   check('工具条已挂到未变换的 wrapperEl 上', toolbarEl !== undefined && toolbarEl.className === 'fc-toolbar')
-  check('工具条列出了 9 种地形', collectByClass(toolbarEl, 'fc-toolbar-terrain').length === 9, String(collectByClass(toolbarEl, 'fc-toolbar-terrain').length))
-  check('工具条含撤销/重做按钮', collectByClass(toolbarEl, 'fc-toolbar-button').length >= 12, String(collectByClass(toolbarEl, 'fc-toolbar-button').length))
+  // §F.2：工具 / 笔刷 / 选择方式都搬进了侧栏，于是"地形按钮在哪"这类断言要改去面板里看 ——
+  // 顺带把"浮窗上确实不再有它们"钉住（这才是 ISSUE-004 的彻底版）。
+  const panel = await openMapPanel(app, plugin)
+  check('侧栏「笔刷」列出了 9 种地形', inPanel(panel, 'fc-panel-terrain').length === 9, String(inPanel(panel, 'fc-panel-terrain').length))
+  check(
+    '浮窗只剩状态与三个按钮（模式 + 撤销/重做）',
+    collectByClass(toolbarEl, 'fc-ctl-button').length === 3,
+    collectByClass(toolbarEl, 'fc-ctl-button').map((button) => button.textContent).join('|'),
+  )
 
   // 根因回归：覆盖层位于命中测试最底层，因此它必须**始终** pointer-events: none，
   // 绘制手势改在视图容器上以捕获阶段监听（下一条断言验证监听确实在容器上）。
@@ -2642,15 +2672,19 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   check('工具条有标题行，写着"绘制 · <工具>"', /^绘制 · .+/.test(toolbarTitle()?.textContent ?? ''), String(toolbarTitle()?.textContent))
   check('标题行是工具条的**第一个**元素（身份要最先被看到）', toolbarEl.children[0] === toolbarTitle(), String(toolbarEl.children[0]?.className))
   check(
-    '当前工具的参数组带 is-params（与"工具切换/模式"分开，不再连成一片）',
-    collectByClass(toolbarEl, 'fc-toolbar-terrain-group').every((el) => el.classList.contains('is-params')) &&
-      collectByClass(toolbarEl, 'fc-toolbar-brushfield-group').every((el) => el.classList.contains('is-params')),
-    `${collectByClass(toolbarEl, 'fc-toolbar-terrain-group').map((el) => el.className).join('|')} / ${collectByClass(toolbarEl, 'fc-toolbar-brushfield-group').map((el) => el.className).join('|')}`,
+    '浮窗上不再有工具切换与参数组（§F.2 的搬家：一个框只留一个角色）',
+    collectByClass(toolbarEl, 'fc-panel-tool').length === 0 &&
+      collectByClass(toolbarEl, 'fc-panel-terrain').length === 0 &&
+      collectByClass(toolbarEl, 'fc-panel-brush-field').length === 0,
+    collectByClass(toolbarEl, 'fc-ctl-button').map((button) => button.textContent).join('|'),
   )
+  flushFrames()
   check(
-    '绘制模式下看不到"筛选…"那一组（显隐按模式做对，别回归）',
-    collectByClass(toolbarEl, 'fc-toolbar-select-group')[0]?.style.display === 'none',
-    String(collectByClass(toolbarEl, 'fc-toolbar-select-group')[0]?.style.display),
+    '绘制模式下侧栏「选择方式」整组置灰（不隐藏：常驻面板里藏起来会像"功能没了"）',
+    inPanel(panel, 'fc-panel-selection-mode-button').length === 2 &&
+      inPanel(panel, 'fc-panel-selection-mode-button').every((button) => button.disabled === true) &&
+      inPanel(panel, 'fc-panel-selection-filter').every((button) => button.disabled === true),
+    inPanel(panel, 'fc-panel-selection-mode-button').map((button) => `${button.textContent}:${button.disabled}`).join('|'),
   )
   check('进入绘制模式后覆盖层仍不参与命中测试', overlayContainer.style.pointerEvents !== 'auto')
 
@@ -2658,15 +2692,21 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   // 若不过滤，捕获阶段的 stopImmediatePropagation 会把按钮点击整个吃掉。
   // 注意先做这些检查：下面的"拦截"断言本身会真的开始一笔笔画。
   const start = canvas._clientFor({ x: 0, y: 0 })
-  const terrainButtons = collectByClass(toolbarEl, 'fc-toolbar-terrain')
-  const terrainButton = terrainButtons[2]
-  const toolbarDown = firePointer(host, 'pointerdown', { clientX: start.x, clientY: start.y, target: terrainButton })
-  check('工具条上的指针事件不被拦截', toolbarDown.stopped === false && toolbarDown.prevented === false)
+  // 浮窗上的点击必须放行（它与 canvas 在同一个视图容器里，不过滤的话捕获阶段的
+  // stopImmediatePropagation 会把按钮点击整个吃掉）—— 现在浮窗上还剩模式与撤销/重做
+  const toolbarDown = firePointer(host, 'pointerdown', {
+    clientX: start.x,
+    clientY: start.y,
+    target: collectByClass(toolbarEl, 'fc-toolbar-mode')[0],
+  })
+  check('浮窗上的指针事件不被拦截', toolbarDown.stopped === false && toolbarDown.prevented === false)
 
+  flushFrames()
+  const terrainButton = inPanel(panel, 'fc-panel-terrain')[2]
   const terrainBefore = editor.terrainType
   fireEvent(terrainButton, 'click')
-  check('点击工具条能切换地形', editor.terrainType !== terrainBefore, `${terrainBefore} → ${editor.terrainType}`)
-  check('点击工具条不会在画布上落笔', Object.keys(layers.getDocument(canvasPath).terrain).length === 0)
+  check('点击侧栏「笔刷」里的地形能切换地形', editor.terrainType !== terrainBefore, `${terrainBefore} → ${editor.terrainType}`)
+  check('点击侧栏不会在画布上落笔', Object.keys(layers.getDocument(canvasPath).terrain).length === 0)
 
   const controlsEl = wrapper.children.find((child) => child.className === 'canvas-controls')
   const controlsDown = firePointer(host, 'pointerdown', { clientX: start.x, clientY: start.y, target: controlsEl })
@@ -3282,11 +3322,19 @@ console.log('\n场景 16：路径与区域命名（画完即命名、双击重�
   )
 
   // ---- 名称显示开关（唯一真相是图层设置 layers.labels）----
+  // §F.2 之后它**只在侧栏「显示 · 地物」一组里出现一次**：浮窗上那个同名按钮已经删掉
+  // （同一个开关挂两处正是 §5.12 那一类问题："点了哪个才算数"会说不清）
   const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
-  const nameButton = collectByClass(toolbarEl, 'fc-toolbar-names')[0]
-  check('工具条上有"名称"开关', nameButton !== undefined)
+  const panel = await openMapPanel(app, plugin)
+  const nameToggle = () => inPanel(panel, 'fc-layer-toggle').find((element) => element.dataset.layer === 'labels')
+  check('侧栏「地物」里有"名称"开关', nameToggle() !== undefined)
+  check(
+    '浮窗上不再重复挂同一个开关',
+    collectByClass(toolbarEl, 'fc-ctl-button').every((button) => (button.textContent ?? '') !== '名称'),
+    collectByClass(toolbarEl, 'fc-ctl-button').map((button) => button.textContent).join('|'),
+  )
   check('名称图层初始是打开的', plugin.getSettings().layers.labels === true, JSON.stringify(plugin.getSettings().layers))
-  fireEvent(nameButton, 'click')
+  fireEvent(nameToggle(), 'click')
   // 刻意**不 await**：点一下必须当场生效（广播在落盘之前），
   // 否则会出现"点了之后下一帧还画着名称"
   check(
@@ -3294,7 +3342,12 @@ console.log('\n场景 16：路径与区域命名（画完即命名、双击重�
     plugin.getSettings().layers.labels === false,
     JSON.stringify(plugin.getSettings().layers),
   )
-  check('按钮的高亮读的是设置，当场跟着变', nameButton.textContent === '名称', String(nameButton.textContent))
+  flushFrames()
+  check(
+    '开关的高亮读的是设置，重建后跟着变',
+    nameToggle()?.classList.contains('is-active') === false,
+    String(nameToggle()?.className),
+  )
   calls = frame()
   check(
     '隐藏名称后不画任何形状文字',
@@ -3302,7 +3355,7 @@ console.log('\n场景 16：路径与区域命名（画完即命名、双击重�
     `strokeText=${calls.strokeText} fillText=${calls.fillText}`,
   )
   check('区域本身照常绘制（只是没有名字）', calls.fill >= 1, String(calls.fill))
-  fireEvent(nameButton, 'click')
+  fireEvent(nameToggle(), 'click')
   check('再点一次恢复显示名称', plugin.getSettings().layers.labels === true, JSON.stringify(plugin.getSettings().layers))
   calls = frame()
   check('名称重新出现', drawnText(ctx).includes('北境领'), drawnText(ctx))
@@ -4106,20 +4159,29 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   }
   const allEdges = (pts) => segmentLengths(pts).every((length) => Math.abs(length - grid().size) < 1e-6)
 
-  // ---- 工具栏按钮 ----
+  // ---- 几何模式按钮（§F.2：从浮窗搬进侧栏「工具」一节）----
+  const panel = await openMapPanel(app, plugin)
   editor.setMode('paint')
   editor.setTool('region')
-  const geometryButtons = collectByClass(toolbarEl, 'fc-toolbar-geometry')
-  check('工具条有「沿格边 / 逐边 / 穿内部」三个按钮', geometryButtons.length === 3, String(geometryButtons.length))
+  flushFrames()
+  // ⚠️ 面板是**整块重建**式重绘：每次改状态后元素都是新的，所以这里要按需现取，
+  // 不能像浮窗时期那样抓一个常量用到底（抓了常量会在"重建后"读到已脱离 DOM 的旧元素）。
+  const geometryButtons = () => inPanel(panel, 'fc-panel-geometry')
+  check('侧栏「工具」有「沿格边 / 逐边 / 穿内部」三个按钮', geometryButtons().length === 3, String(geometryButtons().length))
   check(
     '三个模式的标签齐全',
-    ['沿格边', '逐边', '穿内部'].every((label) => geometryButtons.some((button) => button.textContent === label)),
-    geometryButtons.map((button) => button.textContent).join(', '),
+    ['沿格边', '逐边', '穿内部'].every((label) => geometryButtons().some((button) => button.textContent === label)),
+    geometryButtons().map((button) => button.textContent).join(', '),
   )
   check('默认是穿内部模式', editor.geometryMode === 'interior', editor.geometryMode)
-  fireEvent(geometryButtons[0], 'click')
+  fireEvent(geometryButtons()[0], 'click')
   check('点击后切到沿格边模式', editor.geometryMode === 'edge', editor.geometryMode)
-  check('按钮高亮跟随模式', geometryButtons[0].classList.contains('is-active') && !geometryButtons[1].classList.contains('is-active'))
+  flushFrames()
+  check(
+    '按钮高亮跟随模式',
+    geometryButtons()[0].classList.contains('is-active') && !geometryButtons()[1].classList.contains('is-active'),
+    geometryButtons().map((button) => `${button.textContent}:${button.classList.contains('is-active')}`).join('|'),
+  )
 
   // ---- 沿格边模式：区域 ----
   prompts.length = 0
@@ -4227,8 +4289,9 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   // ---- 逐边模式：一次只画一条边 ----
   editor.setMode('paint')
   editor.setTool('region')
-  const stepButton = geometryButtons.find((button) => button.textContent === '逐边')
-  check('工具条有「逐边」按钮', stepButton !== undefined, geometryButtons.map((b) => b.textContent).join(', '))
+  flushFrames()
+  const stepButton = geometryButtons().find((button) => button.textContent === '逐边')
+  check('侧栏「工具」有「逐边」按钮', stepButton !== undefined, geometryButtons().map((b) => b.textContent).join(', '))
   fireEvent(stepButton, 'click')
   check('已切到逐边模式', editor.geometryMode === 'edge-step', editor.geometryMode)
 
@@ -4582,14 +4645,20 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     `第一条 ${doc().paths[0].color} · 第二条 ${afterPath.color}`,
   )
 
-  // ---- 工具条下拉：色块跟随设置，且**不重建 DOM** ----
-  const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
-  const pathOptionBefore = collectByClass(toolbarEl, 'fc-toolbar-path-option').find((button) => button.dataset.pathType === 'river')
-  const swatchBefore = collectByClass(pathOptionBefore, 'fc-toolbar-swatch')[0]
-  check('工具条下拉里的色块已变成新颜色', swatchBefore?.style.backgroundColor === '#ff0000', String(swatchBefore?.style.backgroundColor))
+  // ---- 侧栏「工具」里的路径类型：色块跟着设置走 ----
+  // （自绘下拉 `ToolbarDropdown` 随这次搬家退休：侧栏用原生 `<select>` +
+  //   当前类型的色块，"我选的是哪一种"这个信息一条没少）
+  const panel = await openMapPanel(app, plugin)
+  editor.setMode('paint')
+  editor.setTool('path')
+  flushFrames()
+  const pathTypeSelect = () => inPanel(panel, 'fc-panel-type-select').find((el) => el.dataset.fcPathType === '1')
+  const pathSwatch = () => inPanel(panel, 'fc-panel-type-swatch').find((el) => el.dataset.fcPathSwatch === '1')
+  check('侧栏路径类型下拉带出当前类型', pathTypeSelect()?.value === 'river', String(pathTypeSelect()?.value))
   check(
-    '色块刷新是原地改样式，没有重建选项',
-    collectByClass(toolbarEl, 'fc-toolbar-path-option').find((button) => button.dataset.pathType === 'river') === pathOptionBefore,
+    '侧栏里当前路径类型的色块已变成新颜色',
+    pathSwatch()?.style.backgroundColor === '#ff0000',
+    String(pathSwatch()?.style.backgroundColor),
   )
 
   // ---- 区域类型：改颜色 → 只影响**之后**新画的区域 ----
@@ -4894,14 +4963,16 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(settingNamed('字形 · 沼泽地')?.dropdown?.options?.map((option) => option.value)),
   )
 
-  // ---------------------------------------------------------- 工具条
-  const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
-  const terrainButtons = () => collectByClass(toolbarEl(), 'fc-toolbar-terrain')
+  // ---------------------------------------------------------- 侧栏「笔刷」里的地形调色板
+  // §F.2：地形选择属于**笔刷**（它就是"刷什么"），从浮窗搬进侧栏，且只出现这一处。
+  const panel = await openMapPanel(app, plugin)
+  const terrainButtons = () => inPanel(panel, 'fc-panel-terrain')
   /** 地形按钮的可见文字：结构是「色块 span + 名称 span」 */
   const terrainLabels = () => terrainButtons().map((button) => button.children[1]?.textContent ?? button.textContent ?? '')
   editor.setMode('paint')
   editor.setTool('brush')
-  check('工具条出现内置 9 种 + 4 个自定义地形', terrainButtons().length === 13, terrainLabels().join(','))
+  flushFrames()
+  check('侧栏「笔刷」出现内置 9 种 + 4 个自定义地形', terrainButtons().length === 13, terrainLabels().join(','))
   const labels = terrainLabels()
   check(
     '自定义地形排在内置之后，且顺序与设置一致',
@@ -4922,8 +4993,8 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   )
   check(
     '自定义地形的按钮带自己的颜色（不是内置色）',
-    collectByClass(terrainButtons()[9], 'fc-toolbar-swatch')[0]?.style.backgroundColor === '#336655',
-    String(collectByClass(terrainButtons()[9], 'fc-toolbar-swatch')[0]?.style.backgroundColor),
+    collectByClass(terrainButtons()[9], 'fc-ctl-swatch')[0]?.style.backgroundColor === '#336655',
+    String(collectByClass(terrainButtons()[9], 'fc-ctl-swatch')[0]?.style.backgroundColor),
   )
   check(
     '自定义地形的悬停提示里带着完整 ID（界面上要能分清哪个是哪个）',
@@ -4931,7 +5002,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     terrainButtons()[9]?.title,
   )
 
-  // 点工具条上的自定义地形 → 编辑器切过去 → 画上去 → 文件里是自定义 ID
+  // 点侧栏里的自定义地形 → 编辑器切过去 → 画上去 → 文件里是自定义 ID
   fireEvent(terrainButtons()[9], 'click')
   check('点自定义地形按钮后编辑器切到该 ID', editor.getStatus().terrainType === 'custom:marsh', editor.getStatus().terrainType)
   paintAt(-400, -200)
@@ -5126,7 +5197,9 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
       Object.values(doc().terrain).some((cell) => cell.t === 'custom:marsh'),
       String(Object.values(doc().terrain).filter((cell) => cell.t === 'custom:marsh').length),
     )
-    check('工具条随之少一个按钮', terrainButtons().length === 12, String(terrainButtons().length))
+    // 目录变了 → 面板要重绘一次（面板按目录签名判断"选项数量本身变了"）
+    flushFrames()
+    check('侧栏「笔刷」随之少一个按钮', terrainButtons().length === 12, String(terrainButtons().length))
     const afterDelete = frame()
     check(
       '被删掉定义的那些格子仍在绘制（回退视觉，而不是消失）',
@@ -5285,10 +5358,14 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
     `fillText=${calls.calls.fillText} strokeText=${calls.calls.strokeText}`,
   )
   check('形状本身照常绘制', stats().lastPathCount === 1 && stats().lastRegionCount === 1)
+  // §F.2 之后这个开关只在侧栏「显示 · 地物」一组里（浮窗上那个同名按钮已删）
+  const panel = await openMapPanel(app, plugin)
+  flushFrames()
+  const nameToggle = () => inPanel(panel, 'fc-layer-toggle').find((element) => element.dataset.layer === 'labels')
   check(
-    '工具条「名称」按钮的高亮读的是设置（不是它自己的状态）',
-    (collectByClass(wrapper, 'fc-toolbar-names')[0]?.textContent ?? '') === '名称',
-    String(collectByClass(wrapper, 'fc-toolbar-names')[0]?.textContent),
+    '侧栏「名称」开关的高亮读的是设置（不是它自己的状态）',
+    nameToggle()?.classList.contains('is-active') === false,
+    String(nameToggle()?.className),
   )
 
   // ---- 图例 ----
@@ -5337,21 +5414,21 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   await plugin.setLayerVisible('paths', true)
   await plugin.setLayerVisible('terrain', true)
 
-  // ---- 工具条入口 ----
-  const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
-  const legendButton = collectByClass(toolbarEl, 'fc-toolbar-legend')[0]
-  check('工具条上有「图例」按钮', legendButton !== undefined)
-  fireEvent(legendButton, 'click')
+  // ---- 侧栏「显示」里的两个入口（§F.2：浮窗上那两个同名按钮已删，避免一个开关挂两处）----
+  flushFrames()
+  const legendToggle = () => inPanel(panel, 'fc-legend-toggle')[0]
+  check('侧栏「地物」一组里有「显示图例」', legendToggle() !== undefined)
+  fireEvent(legendToggle(), 'click')
   await new Promise((resolve) => setTimeout(resolve, 20))
-  check('点工具条按钮会把图例设置写回', plugin.getSettings().showLegend === false, String(plugin.getSettings().showLegend))
+  check('点它会把图例设置写回', plugin.getSettings().showLegend === false, String(plugin.getSettings().showLegend))
   frame()
   check('并且图例真的收起来了', legendEl().style.display === 'none', String(legendEl().style.display))
 
-  const nameButton = collectByClass(toolbarEl, 'fc-toolbar-names')[0]
-  fireEvent(nameButton, 'click')
+  flushFrames()
+  fireEvent(nameToggle(), 'click')
   await new Promise((resolve) => setTimeout(resolve, 20))
   check(
-    '工具条「名称」按钮写的是图层设置（不是编辑器里的一份私有状态）',
+    '侧栏「名称」开关写的是图层设置（不是编辑器里的一份私有状态）',
     plugin.getSettings().layers.labels === false,
     JSON.stringify(plugin.getSettings().layers),
   )
@@ -5431,24 +5508,28 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   )
   layerCapture.restore()
 
-  // ---- 重开地图层：新建的工具条必须与设置一致 ----
+  // ---- 重开地图层：侧栏里的开关必须与设置一致 ----
   // 这是"两份状态"最容易露馅的地方：如果名称开关还存在每张画布的运行时状态里，
-  // 重开之后按钮显示的就是默认值，而设置里却是另一个值 —— 用户看到的就是"我明明关了它又开了"。
+  // 重开之后开关显示的就是默认值，而设置里却是另一个值 —— 用户看到的就是"我明明关了它又开了"。
+  // ⚠️ §F.2 之后这个开关只在侧栏（浮窗上那个按钮已删）：状态的唯一真相仍然是**设置**，
+  // 所以重开地图层这件事对开关的显示**没有任何影响**。
   await plugin.setLayerVisible('labels', false)
   layers.disable(canvasPath)
   runCommand(plugin, 'toggle-map-layer')
   await new Promise((resolve) => setTimeout(resolve, 80))
-  const nameButtonAfterReopen = () => collectByClass(canvas.wrapperEl, 'fc-toolbar-names')[0]
+  flushFrames()
+  const nameToggleAfterReopen = () => inPanel(panel, 'fc-layer-toggle').find((element) => element.dataset.layer === 'labels')
   check(
-    '重开地图层后，名称按钮仍然显示设置里的状态（关闭）',
-    nameButtonAfterReopen()?.textContent === '名称',
-    String(nameButtonAfterReopen()?.textContent),
+    '重开地图层后，名称开关仍然显示设置里的状态（关闭）',
+    nameToggleAfterReopen()?.classList.contains('is-active') === false,
+    String(nameToggleAfterReopen()?.className),
   )
   await plugin.setLayerVisible('labels', true)
+  flushFrames()
   check(
-    '在设置侧打开后，重开的按钮也跟着打开',
-    nameButtonAfterReopen()?.textContent === '名称 ✓',
-    String(nameButtonAfterReopen()?.textContent),
+    '在设置侧打开后，开关也跟着打开',
+    nameToggleAfterReopen()?.classList.contains('is-active') === true,
+    String(nameToggleAfterReopen()?.className),
   )
 
   // ---- 落盘 + 重启读回 ----
@@ -5685,9 +5766,9 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
     String(collectByClass(wrapper, 'fc-toolbar-layer').length),
   )
   check(
-    '工具条上没有任何按钮的文字是「地图层」',
-    collectByClass(toolbarEl, 'fc-toolbar-button').every((button) => (button.textContent ?? '') !== '地图层'),
-    collectByClass(toolbarEl, 'fc-toolbar-button').map((button) => button.textContent).join(','),
+    '浮窗上没有任何按钮的文字是「地图层」',
+    collectByClass(toolbarEl, 'fc-ctl-button').every((button) => (button.textContent ?? '') !== '地图层'),
+    collectByClass(toolbarEl, 'fc-ctl-button').map((button) => button.textContent).join(','),
   )
 
   // ---- 面板：六个图层开关 ----
@@ -6412,11 +6493,14 @@ console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）�
     JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
   )
 
-  const customButton = () => collectByClass(wrapper, 'fc-toolbar-terrain')[9]
-  check('工具条上出现了自定义地形的按钮（排在内置 9 种之后）', customButton() !== undefined)
-  fireEvent(customButton(), 'click')
+  // 走**真实交互路径**：侧栏「笔刷」里的自定义地形按钮（§F.2 之后调色板在侧栏）
+  const panel = await openMapPanel(app, plugin)
   editor.setMode('paint')
   editor.setTool('brush')
+  flushFrames()
+  const customButton = () => inPanel(panel, 'fc-panel-terrain')[9]
+  check('侧栏「笔刷」里出现了自定义地形的按钮（排在内置 9 种之后）', customButton() !== undefined)
+  fireEvent(customButton(), 'click')
   clickAt({ x: -400, y: -200 })
   flushFrames()
   check('文件里存的是自定义 ID', Object.values(doc().terrain).some((cell) => cell.t === 'custom:reef'), JSON.stringify(doc().terrain))
@@ -7214,7 +7298,9 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
     await new Promise((resolve) => setTimeout(resolve, 20))
     openSettings()
   }
-  const iconButtons = () => collectByClass(wrapper, 'fc-toolbar-icon')
+  // §F.2：标记图标也搬进了侧栏「工具」一节（只在标记工具下出现）
+  const panel = await openMapPanel(app, plugin)
+  const iconButtons = () => inPanel(panel, 'fc-panel-icon')
   const frame = () => {
     canvas.markViewportChanged()
     flushFrames()
@@ -7319,9 +7405,12 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
     JSON.stringify(plugin.getSettings().customMarkers[0]),
   )
 
-  // ---------------------------------------------------------- 工具条
+  // ---------------------------------------------------------- 侧栏「工具」里的标记图标
+  editor.setMode('paint')
+  editor.setTool('marker')
+  flushFrames()
   check(
-    '工具条出现内置 9 种 + 2 个自定义标记',
+    '侧栏「工具」出现内置 9 种 + 2 个自定义标记',
     iconButtons().length === 11,
     iconButtons().map((button) => button.title).join(','),
   )
@@ -7338,7 +7427,7 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
   )
   check(
     '自定义标记按钮上带显示名（字形可能只是通用圆点，光看图分不出来）',
-    collectByClass(iconButtons()[9], 'fc-toolbar-icon-glyph').length === 1 &&
+    collectByClass(iconButtons()[9], 'fc-panel-icon-glyph').length === 1 &&
       (iconButtons()[9]?.children.some((child) => child.textContent === '灯塔') ?? false),
     String(iconButtons()[9]?.textContent),
   )
@@ -7532,7 +7621,8 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
     !plugin.getSettings().customMarkers.some((marker) => marker.id === 'custom:lighthouse'),
     JSON.stringify(plugin.getSettings().customMarkers.map((marker) => marker.id)),
   )
-  check('工具条按钮跟着减少', iconButtons().length === beforeDeleteIcons - 1, `${beforeDeleteIcons} → ${iconButtons().length}`)
+  flushFrames()
+  check('侧栏「工具」里的图标跟着减少', iconButtons().length === beforeDeleteIcons - 1, `${beforeDeleteIcons} → ${iconButtons().length}`)
   frame()
   check(
     '被删掉定义的标记仍然画在画布上（回退字形，而不是消失）',
@@ -7659,13 +7749,10 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   /** 当前宿主（设置页或弹窗）底部那一行路径类型就地提示（按 `dataset.fcNote` 取） */
   const pathNote = () =>
     collectByClass(noteHost, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'pathType')?.textContent ?? ''
-  const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
-  const pathOptions = () => collectByClass(toolbarEl(), 'fc-toolbar-path-option')
-  const pathOption = (id) => pathOptions().find((button) => button.dataset.pathType === id)
-  const pathTrigger = () => collectByClass(toolbarEl(), 'fc-toolbar-path-trigger')[0]
-  const pathMenu = () => collectByClass(toolbarEl(), 'fc-toolbar-path-menu')[0]
-  const triggerSwatch = () => collectByClass(pathTrigger(), 'fc-toolbar-swatch')[0]
-  const optionSwatch = (id) => collectByClass(pathOption(id), 'fc-toolbar-swatch')[0]
+  // ⚠️ 自绘下拉（ToolbarDropdown）随 §F.2 搬家退休：侧栏用原生 <select> + 当前类型色块。
+  // 查询辅助（pathSelect / pathOptions / pathOption / pathSwatch）在**用到的那一节**里定义 ——
+  // 那时面板已经打开、编辑器也切到了路径工具（否则面板里根本没有那一行）。
+
   const entryOf = (id) => plugin.getSettings().pathTypes.find((entry) => entry.id === id)
   /** 某一帧里所有描边中用到的颜色（用来断言"这条路径画成了什么颜色"） */
   const strokeColors = () => frame().groups.map((group) => group.strokeStyle)
@@ -7787,75 +7874,38 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   await settingNamed('新增自定义路径类型').button.click()
   check('重复 ID 被拒绝', plugin.getSettings().pathTypes.filter((entry) => entry.id === 'custom:highway').length === 1)
 
-  // ---------------------------------------------------------- 工具条下拉
+  // ---------------------------------------------------------- 侧栏「工具」里的路径类型
+  // §F.2：类型选择从浮窗的**自绘下拉**搬进侧栏，改成原生 `<select>` + 当前类型的色块。
+  // 于是"点外面收起 / 拦下那一击 / 展开时挂全局监听"这一组断言的对象（自绘菜单与它的
+  // document 捕获监听）**不存在了**：原生选单没有全局监听，也不可能把一击漏到画布上
+  // （面板与画布在不同的叶子里，事件根本到不了画布的宿主）。
+  // 换成同样可判伪的三条：选项来自目录、显示名与 ID 解耦、色块跟着当前类型走。
+  const panel = await openMapPanel(app, plugin)
   editor.setMode('paint')
   editor.setTool('path')
-  frame()
+  flushFrames()
+  const pathSelect = () => inPanel(panel, 'fc-panel-type-select').find((el) => el.dataset.fcPathType === '1')
+  const pathOptions = () => pathSelect()?.children ?? []
+  const pathOption = (id) => pathOptions().find((option) => option.value === id)
+  const pathSwatch = () => inPanel(panel, 'fc-panel-type-swatch').find((el) => el.dataset.fcPathSwatch === '1')
   check(
-    '工具条下拉里是内置 4 种 + 自定义（数一数）',
+    '侧栏路径类型下拉里是内置 4 种 + 自定义（数一数）',
     pathOptions().length === 5,
-    JSON.stringify(pathOptions().map((button) => button.dataset.pathType)),
+    JSON.stringify(pathOptions().map((option) => option.value)),
   )
   check(
-    '下拉项用 ID 索引、显示名可读（界面文字与数据解耦）',
+    '选项用 ID 作值、显示名可读（界面文字与数据解耦）',
     pathOption('custom:highway') !== undefined && (pathOption('custom:highway').textContent ?? '').includes('官道'),
     String(pathOption('custom:highway')?.textContent),
   )
-  check('下拉项带自己的颜色小色块', optionSwatch('custom:highway')?.style.backgroundColor === '#00aa88', String(optionSwatch('custom:highway')?.style.backgroundColor))
-  check('展开前下拉是收起的（不挡画布）', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
-  fireEvent(pathTrigger(), 'click')
-  check('点触发按钮后下拉展开', pathMenu()?.style.display === '' , String(pathMenu()?.style.display))
-  check(
-    '展开时往 document 上挂了「点外面收起」的监听',
-    (fakeDocument._listeners.get('pointerdown')?.size ?? 0) === 1,
-    String(fakeDocument._listeners.get('pointerdown')?.size),
-  )
-  // 真实浏览器里画布上的 pointerdown 会先经过 document 的捕获阶段；假 DOM 不模拟事件传播，
-  // 所以用 firePointerThroughDocument 按真实顺序走两跳（document → 画布），并尊重 stopPropagation。
-  const outsideClient = canvas._clientFor({ x: -200, y: 640 })
-  const outsideStrike = firePointerThroughDocument(fakeDocument, host, {
-    clientX: outsideClient.x,
-    clientY: outsideClient.y,
-    target: wrapper,
-  })
-  check('点在画布上（下拉外面）时下拉收起', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
-  check(
-    '这一击被拦下了 —— 没有落到画布上（否则用户只想收下拉，却顺手画出一个路径顶点）',
-    outsideStrike.reachedCanvas === false && editor.isDrafting() === false,
-    `reachedCanvas=${outsideStrike.reachedCanvas} drafting=${editor.isDrafting()}`,
-  )
-  check(
-    '收起之后监听被摘掉（不留全局残留）',
-    (fakeDocument._listeners.get('pointerdown')?.size ?? 0) === 0,
-    String(fakeDocument._listeners.get('pointerdown')?.size),
-  )
-  // 反向对照：下拉**没有**展开时，同样的一击必须正常到达画布。
-  // 没有这一条，上一条断言在「函数永远返回 reachedCanvas=false」时也会绿（空转）。
-  const controlStrike = firePointerThroughDocument(fakeDocument, host, {
-    clientX: outsideClient.x,
-    clientY: outsideClient.y,
-    target: wrapper,
-  })
-  check(
-    '反向对照：下拉收起时同一击会正常落到画布（证明上一条不是空转）',
-    controlStrike.reachedCanvas === true && editor.getStatus().draftPoints === 1,
-    `reachedCanvas=${controlStrike.reachedCanvas} draftPoints=${editor.getStatus().draftPoints}`,
-  )
-  editor.cancelDraft()
-  flushFrames()
-  check('对照用的顶点已被清掉，不影响后续断言', editor.isDrafting() === false)
-  fireEvent(pathTrigger(), 'click')
-  check('再点一次又展开', pathMenu()?.style.display === '', String(pathMenu()?.style.display))
-  fakeDocument.dispatchEvent({ type: 'pointerdown', target: pathOption('river'), stopPropagation() {} })
-  check('点在下拉**内部**时不收起（由选项自己的 handler 负责）', pathMenu()?.style.display === '', String(pathMenu()?.style.display))
-  fireEvent(pathOption('custom:highway'), 'click')
-  check('选中后下拉自动收起', pathMenu()?.style.display === 'none', String(pathMenu()?.style.display))
+  check('下拉带出编辑器当前类型', pathSelect()?.value === 'river', String(pathSelect()?.value))
+  // 用户操作就是原生 select 的 change
+  pathSelect().value = 'custom:highway'
+  fireEvent(pathSelect(), 'change')
   check('选中项就是编辑器当前类型', editor.getStatus().pathType === 'custom:highway', editor.getStatus().pathType)
-  frame()
-  check('触发按钮上写的是当前类型的名字', (pathTrigger().textContent ?? '').includes('官道'), String(pathTrigger().textContent))
-  check('触发按钮上的色块是当前类型的颜色', triggerSwatch()?.style.backgroundColor === '#00aa88', String(triggerSwatch()?.style.backgroundColor))
-  check('当前类型在下拉里高亮', pathOption('custom:highway')?.classList.contains('is-active') === true)
-  check('其它类型没有高亮', pathOption('river')?.classList.contains('is-active') === false)
+  flushFrames()
+  check('当前类型的色块跟着换成它的颜色', pathSwatch()?.style.backgroundColor === '#00aa88', String(pathSwatch()?.style.backgroundColor))
+  check('下拉的当前值也是它', pathSelect()?.value === 'custom:highway', String(pathSelect()?.value))
 
   // 用自定义类型画一条：颜色/线宽/虚线都来自目录，并且都存进文件
   const customPath = drawPath(-200, 400, 300, 500)
@@ -7976,11 +8026,15 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
     JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)),
   )
   frame()
-  check('工具条选项跟着减少', pathOptions().length === optionsBeforeDelete - 1, `${optionsBeforeDelete} → ${pathOptions().length}`)
   check(
-    '当前类型被删掉后，触发按钮显示「未知（custom:highway）」而不是空着',
-    (pathTrigger().textContent ?? '').includes('未知'),
-    String(pathTrigger().textContent),
+    '侧栏下拉里那条自定义类型已经消失（只剩内置 4 种 + 一条「未知」占位）',
+    pathOptions().filter((option) => option.value !== 'custom:highway').length === optionsBeforeDelete - 1,
+    `${optionsBeforeDelete} → ${pathOptions().map((option) => option.value).join(',')}`,
+  )
+  check(
+    '当前类型被删掉后，下拉补一条「未知（custom:highway）」并保持选中（不退回第一项）',
+    pathSelect()?.value === 'custom:highway' && (pathOption('custom:highway')?.textContent ?? '').includes('未知'),
+    `${String(pathSelect()?.value)} / ${String(pathOption('custom:highway')?.textContent)}`,
   )
   check(
     '被删掉定义的路径仍然在文档里（数据没被连带删除）',
@@ -7993,9 +8047,9 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
     JSON.stringify(strokeColors()),
   )
   check(
-    '触发按钮的色块换成回退色（未知类型也必须看得见，不能是透明）',
-    triggerSwatch()?.style.backgroundColor === FALLBACK_PATH_COLOR,
-    String(triggerSwatch()?.style.backgroundColor),
+    '当前类型的色块换成回退色（未知类型也必须看得见，不能是透明）',
+    pathSwatch()?.style.backgroundColor === FALLBACK_PATH_COLOR,
+    String(pathSwatch()?.style.backgroundColor),
   )
   // 定义没了还接着画：新路径必须拿到**回退参数**（这是"未知类型不消失"的另一半）
   const orphanPath = drawPath(-700, 600, -300, 700)
@@ -8661,12 +8715,13 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   /** 当前宿主（设置页或弹窗）底部那一行区域类型就地提示（按 `dataset.fcNote` 取） */
   const regionNote = () =>
     collectByClass(noteHost, 'fc-settings-note').find((el) => el.dataset?.fcNote === 'regionType')?.textContent ?? ''
-  const toolbarEl = () => collectByClass(wrapper, 'fc-toolbar')[0]
-  const regionOptions = () => collectByClass(toolbarEl(), 'fc-toolbar-region-option')
-  const regionOption = (id) => regionOptions().find((button) => button.dataset.regionType === id)
-  const regionTrigger = () => collectByClass(toolbarEl(), 'fc-toolbar-region-trigger')[0]
-  const regionMenu = () => collectByClass(toolbarEl(), 'fc-toolbar-region-menu')[0]
-  const triggerSwatch = () => collectByClass(regionTrigger(), 'fc-toolbar-swatch')[0]
+  // §F.2：区域类型也从自绘下拉换成侧栏里的原生 <select> + 当前类型的色块
+  // （与路径那一节同一处理，理由见那里：自绘菜单与它的 document 捕获监听一并退休）
+  const panel = await openMapPanel(app, plugin)
+  const regionSelect = () => inPanel(panel, 'fc-panel-type-select').find((el) => el.dataset.fcRegionType === '1')
+  const regionOptions = () => regionSelect()?.children ?? []
+  const regionOption = (id) => regionOptions().find((option) => option.value === id)
+  const regionSwatch = () => inPanel(panel, 'fc-panel-type-swatch').find((el) => el.dataset.fcRegionSwatch === '1')
   const entryOf = (id) => plugin.getSettings().regionTypes.find((entry) => entry.id === id)
   const legendRows = () => collectByClass(wrapper, 'fc-legend-row')
   const legendLabels = (kind) =>
@@ -8705,56 +8760,29 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     JSON.stringify([...new Set(frame().fills.map((fill) => fill.fillStyle))]),
   )
 
-  // ---------------------------------------------------------- 工具条：区域类型下拉
+  // ---------------------------------------------------------- 侧栏「工具」：区域类型下拉
   editor.setMode('paint')
   editor.setTool('region')
   flushFrames()
-  check('区域工具下有一个区域类型下拉（不再是一排色块按钮）', regionTrigger() !== undefined && regionMenu() !== undefined)
+  check('区域工具下侧栏有一个区域类型下拉（不再是一排色块按钮）', regionSelect() !== undefined)
   check(
     '下拉里有内置 6 种（王国/帝国/公国/教区/荒原/海域）',
     ['realm', 'empire', 'duchy', 'diocese', 'wilderness', 'sea'].every((id) => regionOption(id) !== undefined),
-    JSON.stringify(regionOptions().map((button) => button.dataset.regionType)),
+    JSON.stringify(regionOptions().map((option) => option.value)),
   )
-  check('下拉里没有「未知类型」这种选项（它只列设置里存在的选择）', regionOption(FOREIGN_TYPE) === undefined)
-  fireEvent(regionTrigger(), 'click')
-  check('点触发按钮展开菜单', regionMenu().style.display !== 'none', String(regionMenu().style.display))
-  fireEvent(regionOption('empire'), 'click')
-  check('选中「帝国」后菜单自动收起', regionMenu().style.display === 'none', String(regionMenu().style.display))
+  check('下拉里没有那个外来类型（它只列设置里存在的选择）', regionOption(FOREIGN_TYPE) === undefined)
+  // 用户操作就是原生 select 的 change（自绘菜单那套"展开/点外面收起/拦下那一击"随组件一起退休）
+  regionSelect().value = 'empire'
+  fireEvent(regionSelect(), 'change')
+  check('选中「帝国」写进编辑器', editor.getStatus().regionType === 'empire', editor.getStatus().regionType)
+  flushFrames()
   check(
-    '触发按钮显示当前类型的名字与色块',
-    collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent === '帝国' &&
-      triggerSwatch()?.style.backgroundColor === '#c94f4f',
-    `${collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent} / ${String(triggerSwatch()?.style.backgroundColor)}`,
+    '当前类型的名字与色块都在（名字是下拉的选中项，色块在它旁边）',
+    regionSelect()?.value === 'empire' &&
+      (regionOption('empire')?.textContent ?? '') === '帝国' &&
+      regionSwatch()?.style.backgroundColor === '#c94f4f',
+    `${String(regionOption('empire')?.textContent)} / ${String(regionSwatch()?.style.backgroundColor)}`,
   )
-
-  // 真实浏览器里画布上的 pointerdown 会先经过 document 的捕获阶段；假 DOM 不模拟事件传播，
-  // 所以用 firePointerThroughDocument 按真实顺序走两跳（document → 画布），并尊重 stopPropagation。
-  // 区域这条路径尤其重要：多出一个**区域顶点**比多出一个路径顶点更难发现（形状会悄悄变形）。
-  fireEvent(regionTrigger(), 'click')
-  const outsideClient = canvas._clientFor({ x: -100, y: 600 })
-  const outsideStrike = firePointerThroughDocument(fakeDocument, host, {
-    clientX: outsideClient.x,
-    clientY: outsideClient.y,
-    target: wrapper,
-  })
-  check('点在画布上（下拉外面）时区域菜单收起', regionMenu().style.display === 'none', String(regionMenu().style.display))
-  check(
-    '这一击被拦下了 —— 没有落到画布上（否则用户只想收菜单，却顺手多一个区域顶点）',
-    outsideStrike.reachedCanvas === false && editor.isDrafting() === false,
-  )
-  // 反向对照：菜单**没有**展开时，同样的一击必须正常到达画布。
-  // 没有这一条，上一条在「reachedCanvas 永远是 false」时也会绿（空转断言）。
-  const controlStrike = firePointerThroughDocument(fakeDocument, host, {
-    clientX: outsideClient.x,
-    clientY: outsideClient.y,
-    target: wrapper,
-  })
-  check(
-    '反向对照：菜单收起时同一击会正常落到画布（证明上一条不是空转）',
-    controlStrike.reachedCanvas === true && editor.getStatus().draftPoints === 1,
-    `reachedCanvas=${controlStrike.reachedCanvas} draftPoints=${editor.getStatus().draftPoints}`,
-  )
-  editor.cancelDraft()
 
   // ---------------------------------------------------------- 设置页：区域类型参数
   openSettings()
@@ -8885,9 +8913,9 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   editor.setTool('region')
   flushFrames()
   check(
-    '工具条区域下拉里立刻多出「边境侯国」（带自己的 ID 索引）',
-    regionOption('custom:march') !== undefined,
-    JSON.stringify(regionOptions().map((button) => button.dataset.regionType)),
+    '侧栏区域下拉里立刻多出「边境侯国」（值就是它的 ID）',
+    regionOption('custom:march') !== undefined && (regionOption('custom:march')?.textContent ?? '').includes('边境侯国'),
+    JSON.stringify(regionOptions().map((option) => option.value)),
   )
   editor.setRegionType('custom:march')
   const custom = drawRegion(500, 200, 900, 500)
@@ -8927,10 +8955,11 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     typeof orphan.color === 'string' && orphan.color.length > 0 && orphan.type === 'custom:march',
     JSON.stringify(orphan),
   )
+  flushFrames()
   check(
-    '工具条触发按钮显示「未知（custom:march）」而不是空着',
-    collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent === '未知（custom:march）',
-    String(collectByClass(regionTrigger(), 'fc-toolbar-region-label')[0]?.textContent),
+    '侧栏下拉显示「未知（custom:march）」而不是空着',
+    regionSelect()?.value === 'custom:march' && (regionOption('custom:march')?.textContent ?? '') === '未知（custom:march）',
+    `${String(regionSelect()?.value)} / ${String(regionOption('custom:march')?.textContent)}`,
   )
 
   // ------------------------- ID 留空 = 自动生成（用户实测：手打 ID 是没必要的负担）
@@ -11191,10 +11220,11 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
   drag(farA, farB, { altKey: true })
   check('Alt + 拖动 = 从选择里移出这一片', selected().length === 0, String(selected().length))
 
-  // ---- ⑤ 笔迹框选：切换模式走**工具条上的真实按钮** ----
-  const brushSelectButton = collectByClass(toolbarEl, 'fc-toolbar-select-brush')[0]
-  check('选择模式那一组在工具条上（矩形 / 笔迹框选）', brushSelectButton !== undefined)
-  press(brushSelectButton)
+  // ---- ⑤ 笔迹框选：切换模式走**侧栏里的真实按钮**（§F.2 之后选择方式在侧栏）----
+  flushFrames()
+  const brushSelectButton = () => inPanel(panel, 'fc-panel-selection-mode-button').find((el) => el.dataset.fcSelectionMode === 'brush')
+  check('选择方式那一组在侧栏（矩形 / 笔迹框选）', brushSelectButton() !== undefined)
+  press(brushSelectButton())
   check('点「笔迹框选」切换了选择子模式', editor.getStatus().selectionMode === 'brush', editor.getStatus().selectionMode)
 
   const nearB = canvas._clientFor({ x: 60, y: 0 })
@@ -11206,8 +11236,14 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
   )
 
   // ---- ⑥ 连通扩展：同地形六邻域，水挡住去路 ----
-  const expandButton = collectByClass(toolbarEl, 'fc-toolbar-select-expand')[0]
-  press(expandButton)
+  flushFrames()
+  const expandButton = () => inPanel(panel, 'fc-panel-selection-expand')[0]
+  check(
+    '有选择时「连通扩展」是可用的（没选择时才置灰 —— 点了没反应最容易被当成坏了）',
+    expandButton()?.disabled === false,
+    String(expandButton()?.disabled),
+  )
+  press(expandButton())
   check(
     '连通扩展：从种子扩到整片森林（12 格），两格水不进选择',
     selected().length === 12 && selected().includes('4_0') === false && selected().includes('0_3') === false,
@@ -11357,22 +11393,31 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   }
   const strokeAt = (world) => strokeThrough(world, world)
 
-  // 工具条上的**真实控件**（§E 的三条硬口径都长在这里，所以断言必须经过它们）
-  const brushFieldSelect = collectByClass(toolbarEl, 'fc-toolbar-brushfield-select')[0]
-  const brushValueInput = collectByClass(toolbarEl, 'fc-toolbar-brushvalue')[0]
-  const brushBiomeSelect = collectByClass(toolbarEl, 'fc-toolbar-brushbiome-select')[0]
-  const brushOpButton = (op) => collectByClass(toolbarEl, 'fc-toolbar-brushop').find((el) => el.dataset.fcBrushOp === op)
-  const brushOpGroupEl = () => brushOpButton('+')?.parentNode
+  // 侧栏「笔刷」里的**真实控件**（§E 的三条硬口径都长在这里，所以断言必须经过它们）。
+  //
+  // ⚠️ 两处与浮窗时期不同、必须照做的地方：
+  // 1. 面板是**整块重建**式重绘，控件元素每次重绘都是新的 —— 所以这里一律**现取**
+  //    （`brushValueInput()` 而不是一个常量），否则读到的是已经脱离 DOM 的旧元素；
+  // 2. 改完状态要 `flushFrames()` 面板才会重绘（排队在可控 rAF 里）。
+  const panel = await openMapPanel(app, plugin)
+  const brushFieldSelect = () => inPanel(panel, 'fc-panel-brush-field')[0]
+  const brushValueInput = () => inPanel(panel, 'fc-panel-brush-value')[0]
+  const brushBiomeSelect = () => inPanel(panel, 'fc-panel-brush-biome')[0]
+  const brushOpButton = (op) => inPanel(panel, 'fc-panel-brush-op').find((el) => el.dataset.fcBrushOp === op)
+  /** 数值字段才有 ＋−×÷（分类字段整组不渲染 —— 摆着点不动只会让人以为坏了） */
+  const brushOpCount = () => inPanel(panel, 'fc-panel-brush-op').length
   const statusEl = collectByClass(toolbarEl, 'fc-toolbar-status')[0]
-    const titleEl = collectByClass(toolbarEl, 'fc-toolbar-title')[0]
+  const titleEl = collectByClass(toolbarEl, 'fc-toolbar-title')[0]
   const chooseField = (value) => {
-    brushFieldSelect.value = value
-    fireEvent(brushFieldSelect, 'change')
+    brushFieldSelect().value = value
+    fireEvent(brushFieldSelect(), 'change')
+    flushFrames()
   }
   /** 用户按回车 / 点开别处 = 确认这个数 */
   const commitValue = (text) => {
-    brushValueInput.value = text
-    fireEvent(brushValueInput, 'change')
+    brushValueInput().value = text
+    fireEvent(brushValueInput(), 'change')
+    flushFrames()
   }
   const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
   const legendRows = (kind) => collectByClass(legendEl(), 'fc-legend-row').filter((row) => row.dataset.kind === kind)
@@ -11396,18 +11441,19 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
 
   // ---- ② 笔刷那一节的"层"下拉由**字段表**派生 ----
   press(collectByClass(toolbarEl, 'fc-toolbar-mode')[0])
-  check('点工具条上的模式按钮真的进了绘制模式', editor.getStatus().mode === 'paint', editor.getStatus().mode)
+  check('点浮窗上的模式按钮真的进了绘制模式', editor.getStatus().mode === 'paint', editor.getStatus().mode)
+  flushFrames()
   check(
-    '层下拉 = 地形 + 字段表里每一层（加一层只加一行，不手抄选项）',
-    brushFieldSelect.children.map((option) => option.value).join(',') === ',temperature,depth,biome',
-    brushFieldSelect.children.map((option) => option.value).join(','),
+    '侧栏「笔刷」的层下拉 = 地形 + 字段表里每一层（加一层只加一行，不手抄选项）',
+    brushFieldSelect().children.map((option) => option.value).join(',') === ',temperature,depth,biome',
+    brushFieldSelect().children.map((option) => option.value).join(','),
   )
 
   // ---- ③ 数值档：留空不生效 + 状态条说清原因（§E 第 2 条）----
   chooseField('temperature')
-  check('切到温度层后数值框是**空的**（不预填）', brushValueInput.value === '', brushValueInput.value)
-  check('数值字段才显示 ＋−×÷ 那组', brushOpGroupEl()?.style.display === '', String(brushOpGroupEl()?.style.display))
-  check('群系下拉在温度层下藏起来', brushBiomeSelect.style.display === 'none', brushBiomeSelect.style.display)
+  check('切到温度层后数值框是**空的**（不预填）', brushValueInput()?.value === '', String(brushValueInput()?.value))
+  check('数值字段才有那五个算法按钮（＝ ＋ − × ÷）', brushOpCount() === 5, String(brushOpCount()))
+  check('群系下拉在温度层下不渲染（不是"渲染了再藏"）', brushBiomeSelect() === undefined, String(brushBiomeSelect()))
   check(
     '状态条说清"为什么刷不动"（不是让用户猜）',
     statusEl.textContent === '编辑：数据层笔刷 · 请先填一个数值',
@@ -11421,16 +11467,19 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   )
 
   // ---- ④ 只键入还没回车：值不生效，而且**打字不会被冲掉** ----
-  brushValueInput.focus()
-  brushValueInput.value = '12'
-  fireEvent(brushValueInput, 'input')
+  brushValueInput().focus()
+  brushValueInput().value = '12'
+  fireEvent(brushValueInput(), 'input')
   check('键入把笔刷打回"未确认"（值不生效）', editor.getStatus().brushValueConfirmed === false)
+  // 面板这一版是"重建时把焦点与文字放回去"（`MapPanel.captureFocusedInput`）：
+  // 键入会写编辑器状态、可能触发重绘，光"有焦点就别改它的字"不够 —— 元素本身会被换掉。
+  flushFrames()
   check(
-    '刷新不会把用户正打的字冲掉（输入框有焦点时不改它的文字）',
-    brushValueInput.value === '12',
-    brushValueInput.value,
+    '重建不会把用户正打的字冲掉（文字与焦点都放回去）',
+    brushValueInput()?.value === '12',
+    String(brushValueInput()?.value),
   )
-  brushValueInput.blur()
+  brushValueInput().blur()
   strokeAt(worldOf(0, 0))
   check('没确认时也不落笔', document_.terrain[cellKey(0, 0)]?.temp === undefined)
 
@@ -11441,9 +11490,30 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   check('刷上了 12', document_.terrain[cellKey(0, 0)]?.temp === 12, JSON.stringify(document_.terrain[cellKey(0, 0)]))
   check('一笔 = 一条历史（Ctrl+Z 一次回到笔画前）', editor.getStatus().undo === 1, String(editor.getStatus().undo))
 
+  // ---- ⑤b 已确认之后再打字：打回未确认，且**重建时不会把用户打的字冲掉** ----
+  // 这才是 `MapPanel.captureFocusedInput` 真正要处理的那条路：键入把已确认的值清成未确认，
+  // 签名因此变了 → 面板重建（元素被换掉）→ 必须把文字与焦点放回新元素上。
+  brushValueInput().focus()
+  brushValueInput().value = '24'
+  fireEvent(brushValueInput(), 'input')
+  check(
+    '再打字会把已确认的值打回未确认（笔刷不生效，值也不是 24）',
+    editor.getStatus().brushValueConfirmed === false && editor.getStatus().brushValue === null,
+    JSON.stringify({ confirmed: editor.getStatus().brushValueConfirmed, value: editor.getStatus().brushValue }),
+  )
+  flushFrames()
+  check(
+    '重建后输入框里仍是用户打的那几个字，且焦点还在它上面',
+    brushValueInput()?.value === '24' && fakeDocument.activeElement === brushValueInput(),
+    `${String(brushValueInput()?.value)} / focused=${fakeDocument.activeElement === brushValueInput()}`,
+  )
+  // 把状态放回 ⑥ 期望的样子（12 已确认）
+  commitValue('12')
+
   // ---- ⑥ 换算法 → 打回未确认：数字保留，但笔要再"确认"一次（§E 第 3 条）----
   press(brushOpButton('+'))
-  check('换算法后数值**保留**（不用重打）', brushValueInput.value === '12', brushValueInput.value)
+  flushFrames()
+  check('换算法后数值**保留**（不用重打）', brushValueInput()?.value === '12', String(brushValueInput()?.value))
   check(
     '但笔刷被标成"未确认"，状态条提示回车',
     /按回车确认这个数值后笔刷才生效/.test(statusEl.textContent ?? ''),
@@ -11461,8 +11531,8 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   chooseField('depth')
   check(
     '换层后数字保留、但打回未确认（状态条提示回车）',
-    brushValueInput.value === '12' && /按回车确认这个数值后笔刷才生效/.test(statusEl.textContent ?? ''),
-    `${brushValueInput.value} / ${statusEl.textContent}`,
+    brushValueInput()?.value === '12' && /按回车确认这个数值后笔刷才生效/.test(statusEl.textContent ?? ''),
+    `${String(brushValueInput()?.value)} / ${statusEl.textContent}`,
   )
   strokeAt(worldOf(0, 0))
   check(
@@ -11499,9 +11569,9 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
 
   // ---- ⑧ 生物群系笔刷：设为某个 ID，且不动别的键 ----
   chooseField('biome')
-  check('分类字段没有 ＋−×÷（整组藏起来）', brushOpGroupEl()?.style.display === 'none')
-  check('分类字段没有"数值"框', brushValueInput.style.display === 'none')
-  check('分类字段才显示群系下拉', brushBiomeSelect.style.display === '')
+  check('分类字段没有 ＋−×÷（整组不渲染）', brushOpCount() === 0, String(brushOpCount()))
+  check('分类字段没有"数值"框', brushValueInput() === undefined, String(brushValueInput()))
+  check('分类字段才显示群系下拉', brushBiomeSelect() !== undefined)
   check(
     '没选群系就刷不动，状态条说明',
     statusEl.textContent === '编辑：数据层笔刷 · 请先选一个生物群系',
@@ -11510,7 +11580,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   strokeAt(worldOf(0, 0))
   check('未选群系时一笔都不落', document_.terrain[cellKey(0, 0)]?.biome === undefined)
 
-  const biomeOptions = brushBiomeSelect.children
+  const biomeOptions = brushBiomeSelect().children
   check(
     '群系下拉的选项由**现读的目录**给出（内置 34 条 + 一个占位项）',
     biomeOptions.length === 35 && biomeOptions[1]?.value !== '',
@@ -11522,8 +11592,9 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
     JSON.stringify(biomeOptions.filter((option) => ['ice-cap', 'desert'].includes(option.value)).map((o) => `${o.value}:${o.textContent}`)),
   )
 
-  brushBiomeSelect.value = 'desert'
-  fireEvent(brushBiomeSelect, 'change')
+  brushBiomeSelect().value = 'desert'
+  fireEvent(brushBiomeSelect(), 'change')
+  flushFrames()
   check('选完群系，状态条报出它的显示名', statusEl.textContent === '编辑：生物群系笔刷 · 沙漠', statusEl.textContent)
   strokeAt(worldOf(0, 0))
   check('刷上了沙漠', document_.terrain[cellKey(0, 0)]?.biome === 'desert', JSON.stringify(document_.terrain[cellKey(0, 0)]))
