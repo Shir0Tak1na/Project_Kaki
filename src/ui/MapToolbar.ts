@@ -208,10 +208,25 @@ export class MapToolbar {
   private filterButton: HTMLButtonElement | null = null
   private expandButton: HTMLButtonElement | null = null
   /**
-   * 状态条（施工文件 §F.3）：`空闲` / `编辑：地形笔刷 · 森林` / `选择：矩形框选 · 12 格`。
+   * 标题行：**这个浮框属于谁**（ISSUE-004）。
    *
-   * 工具浮窗**降级成状态显示**之后，这一行是用户判断"我现在处在什么状态"的唯一入口 ——
-   * 只读的详情（选中了哪些字段、统计）全在右上角的信息卡里，不在这里重复。
+   * 用户的反馈是"筛选和绘制在同一个框里，反直觉"。代码核查的结论是：**显隐早已按模式做对**
+   * （选择模式下看不到任何笔刷控件、绘制模式下看不到「筛选…」），真正缺的是**框的名字** ——
+   * 同一个位置、同一套外观，内容换了却看不出它现在归哪个工具。
+   *
+   * 因此这一行只回答"现在是什么状态"（`空闲` / `绘制 · 地形笔刷` / `选择 · 矩形框选 · 14 格`），
+   * **值、原因、细节一律留给副行**（`statusEl`）：两行各司其职，不重复说同一件事。
+   */
+  private readonly titleEl: HTMLElement
+  /**
+   * 副行（施工文件 §F.3）：绘制模式下的**参数或"为什么不能画"**。
+   *
+   * 它**不再**承担"这个框是谁"——那件事在标题行（上面）。文案保持既有口径不变
+   * （`编辑：温度笔刷 · ＝12` / `编辑：数据层笔刷 · 请先填一个数值`），
+   * 因为 §E 那三条硬口径与它们的断言都挂在这一行上。
+   *
+   * 没有额外信息时整行隐藏：选择模式下方式与格数已在标题里，非笔刷工具也没有参数可报 ——
+   * 留一行重复的字只会让浮框更长（浮框越长越容易压住画布）。
    */
   private readonly statusEl: HTMLElement
   private readonly hintEl: HTMLElement
@@ -243,6 +258,11 @@ export class MapToolbar {
     this.root = doc.createElement('div')
     this.root.className = 'fc-toolbar'
 
+    // 标题行放在**最前**且整行：它是这个框的名字（ISSUE-004），必须比所有控件先被看到
+    this.titleEl = doc.createElement('div')
+    this.titleEl.className = 'fc-toolbar-title'
+    this.titleEl.dataset.fcToolbarTitle = '1'
+    this.root.appendChild(this.titleEl)
     // 模式按钮
     this.modeButton = doc.createElement('button')
     this.modeButton.className = 'fc-toolbar-button fc-toolbar-mode'
@@ -318,13 +338,13 @@ export class MapToolbar {
 
     // 地形选择（仅笔刷工具下显示）：内置 9 种 + 用户自定义（排在后面）
     this.terrainGroup = doc.createElement('div')
-    this.terrainGroup.className = 'fc-toolbar-group fc-toolbar-terrain-group'
+    this.terrainGroup.className = 'fc-toolbar-group fc-toolbar-terrain-group is-params'
     this.rebuildTerrainButtons()
     this.root.appendChild(this.terrainGroup)
 
     // 标记图标选择（仅标记工具下显示）：内置 9 种 + 用户自定义（排在后面）
     this.iconGroup = doc.createElement('div')
-    this.iconGroup.className = 'fc-toolbar-group fc-toolbar-icon-group'
+    this.iconGroup.className = 'fc-toolbar-group fc-toolbar-icon-group is-params'
     this.rebuildMarkerButtons()
     this.root.appendChild(this.iconGroup)
 
@@ -332,7 +352,7 @@ export class MapToolbar {
     // 类型数量会随自定义类型增长（上限 32 + 内置 4），一排按钮会换行并挤掉其它控件。
     this.pathDropdown = new ToolbarDropdown(this.root, {
       skin: {
-        groupClass: 'fc-toolbar-group fc-toolbar-path-group',
+        groupClass: 'fc-toolbar-group fc-toolbar-path-group is-params',
         triggerClass: 'fc-toolbar-button fc-toolbar-path-trigger',
         triggerKey: 'fcPathTrigger',
         swatchKey: 'fcPathSwatch',
@@ -351,7 +371,7 @@ export class MapToolbar {
 
     // 几何模式（路径 / 区域工具下显示）：勾勒六边形边框 vs 直接穿过格子内部
     this.geometryGroup = doc.createElement('div')
-    this.geometryGroup.className = 'fc-toolbar-group fc-toolbar-geometry-group'
+    this.geometryGroup.className = 'fc-toolbar-group fc-toolbar-geometry-group is-params'
     for (const option of GEOMETRY_OPTIONS) {
       const button = doc.createElement('button')
       button.className = 'fc-toolbar-button fc-toolbar-geometry'
@@ -370,7 +390,7 @@ export class MapToolbar {
     // 以前是"每个预设一个色块按钮"，改成下拉之后自定义区域类型才排得下（上限 32 + 内置 6）。
     this.regionDropdown = new ToolbarDropdown(this.root, {
       skin: {
-        groupClass: 'fc-toolbar-group fc-toolbar-region-group',
+        groupClass: 'fc-toolbar-group fc-toolbar-region-group is-params',
         triggerClass: 'fc-toolbar-button fc-toolbar-region-trigger',
         triggerKey: 'fcRegionTrigger',
         swatchKey: 'fcRegionSwatch',
@@ -389,7 +409,7 @@ export class MapToolbar {
 
     // 笔刷大小（仅笔刷工具下显示）
     this.brushGroup = doc.createElement('div')
-    this.brushGroup.className = 'fc-toolbar-group fc-toolbar-brush-group'
+    this.brushGroup.className = 'fc-toolbar-group fc-toolbar-brush-group is-params'
     const smaller = doc.createElement('button')
     smaller.className = 'fc-toolbar-button'
     smaller.textContent = '−'
@@ -414,7 +434,7 @@ export class MapToolbar {
     // 数据层笔刷（§E）：层 + 算法 + 数值 / 群系。
     // 与"笔刷大小"同一组条件（绘制模式 + 笔刷工具），因为半径对两者都生效。
     this.brushFieldGroup = doc.createElement('div')
-    this.brushFieldGroup.className = 'fc-toolbar-group fc-toolbar-brushfield-group'
+    this.brushFieldGroup.className = 'fc-toolbar-group fc-toolbar-brushfield-group is-params'
 
     const fieldLabel = doc.createElement('span')
     fieldLabel.className = 'fc-toolbar-mini-label'
@@ -813,44 +833,65 @@ export class MapToolbar {
     // 状态条：笔刷不可用时把**原因**写在状态里（§E 第 2 条：用户不该靠猜"为什么刷不动"）
     if (isField && !status.brushReady.ok) {
       this.statusEl.textContent = `编辑：数据层笔刷 · ${status.brushReady.reason}`
+      // 原因本身就是这一行的内容：一并把行显示出来（`refresh()` 可能刚刚因为
+      // "没有额外信息"把它藏起来了 —— 顺序上是先写副行再走到这里）
+      this.statusEl.style.display = ''
     }
   }
 
   /**
-   * 状态条那一行（§F.3）。
+   * 标题行：这个框"现在属于谁"（ISSUE-004）。
    *
-   * 三种状态各有明确的说法：
-   * - 绘制模式 → `编辑：地形笔刷 · 森林`（把"正在用什么工具、什么值"说出来）；
-   * - 选择模式且有选择 → `选择：矩形框选 · 12 格`；
+   * 三种说法，与副行严格分工（**不重复说同一件事**）：
+   * - 绘制模式 → `绘制 · 地形笔刷` / `绘制 · 数据层笔刷` / `绘制 · 路径`；
+   * - 选择模式且有选择 → `选择 · 矩形框选 · 12 格`；
    * - 选择模式且没有选择 → `空闲`。
+   *
+   * 数据层笔刷刻意只写到「数据层笔刷」这一层：**具体是哪一层在副行里说**
+   * （`编辑：温度笔刷 · ＝12`）—— 否则标题与副行会把同一个词写两遍。
+   */
+  private titleLine(status: EditorStatus, painting: boolean): string {
+    if (!painting) {
+      const count = status.cellSelection.length
+      if (count === 0) return '空闲'
+      return `选择 · ${status.selectionMode === 'rect' ? '矩形框选' : '笔迹框选'} · ${count} 格`
+    }
+    if (status.tool === 'brush') {
+      return status.brushField === null ? '绘制 · 地形笔刷' : '绘制 · 数据层笔刷'
+    }
+    return `绘制 · ${TOOL_LABELS[status.tool].label}`
+  }
+
+  /**
+   * 副行（§F.3）：绘制模式下的**参数**（或"为什么现在画不出来"）。
+   *
+   * 文案与升级前逐字一致 —— §E 的三条硬口径（数值留空不生效 / 状态条写清原因 /
+   * 换层换算法打回未确认）以及它们的断言都挂在这一行上，不因为加了标题行而改变。
+   *
+   * 返回空串表示"这一行没有额外信息可报"，`refresh()` 会把它整行隐藏：
+   * 选择模式下方式与格数已经在标题里，非笔刷工具也没有参数 —— 重复只会让浮框更长。
    *
    * 地形显示名从**当前目录**现取（自定义地形也有名字），取不到就退回 ID —— 不显示空白。
    */
-  private statusLine(status: EditorStatus, painting: boolean): string {
-    if (painting) {
-      // 数据层笔刷（§E）：把"刷哪一层、怎么刷"说出来（不可用时由 `refreshBrushField` 换成原因）
-      if (status.tool === 'brush' && status.brushField !== null) {
-        const spec = OVERLAY_FIELDS.find((item) => item.id === status.brushField)
-        const label = spec?.label ?? status.brushField
-        if (spec !== undefined && !spec.numeric) {
-          const entry = status.brushBiome.length > 0 ? resolveBiomeStyle(status.brushBiome, []).label : '（未选）'
-          return `编辑：${label}笔刷 · ${entry}`
-        }
-        const op = status.brushOp === 'set' ? '＝' : status.brushOp
-        const value = status.brushValue === null ? '（未填）' : status.brushValue
-        return `编辑：${label}笔刷 · ${op}${value}`
+  private detailLine(status: EditorStatus, painting: boolean): string {
+    // 只有笔刷工具才有"参数"可报；其余工具的标题已经写明工具名
+    if (!painting || status.tool !== 'brush') return ''
+    if (status.brushField !== null) {
+      const spec = OVERLAY_FIELDS.find((item) => item.id === status.brushField)
+      const label = spec?.label ?? status.brushField
+      if (spec !== undefined && !spec.numeric) {
+        const entry = status.brushBiome.length > 0 ? resolveBiomeStyle(status.brushBiome, []).label : '（未选）'
+        return `编辑：${label}笔刷 · ${entry}`
       }
-      const tool = TOOL_LABELS[status.tool].label
-      if (status.tool !== 'brush') return `编辑：${tool}`
-      const terrain =
-        listResolvedTerrainStyles(this.options.getCustomTerrains?.() ?? []).find(
-          (style) => style.id === status.terrainType,
-        )?.label ?? status.terrainType
-      return `编辑：地形笔刷 · ${terrain}`
+      const op = status.brushOp === 'set' ? '＝' : status.brushOp
+      const value = status.brushValue === null ? '（未填）' : status.brushValue
+      return `编辑：${label}笔刷 · ${op}${value}`
     }
-    const count = status.cellSelection.length
-    if (count === 0) return '空闲'
-    return `选择：${status.selectionMode === 'rect' ? '矩形框选' : '笔迹框选'} · ${count} 格`
+    const terrain =
+      listResolvedTerrainStyles(this.options.getCustomTerrains?.() ?? []).find(
+        (style) => style.id === status.terrainType,
+      )?.label ?? status.terrainType
+    return `编辑：地形笔刷 · ${terrain}`
   }
 
   /** 按编辑器当前状态刷新按钮文案与可用性 */
@@ -877,8 +918,13 @@ export class MapToolbar {
     this.modeButton.classList.toggle('is-active', painting)
     this.modeButton.title = painting ? '退出绘制模式（Esc）' : '进入绘制模式（D）'
 
-    // 状态条：一行说清"现在是什么状态"（§F.3）。详情不在这一层 —— 那在右上角的信息卡里
-    this.statusEl.textContent = this.statusLine(status, painting)
+    // 标题行 = 这个框属于谁；副行 = 参数 / 原因（§F.3 + ISSUE-004）。
+    // 顺序**必须**是"先写副行，再让 `refreshBrushField` 用原因覆盖它" ——
+    // 那条原因（"请先填一个数值"）是 §E 第 2 条的硬口径，不能被状态描述盖掉。
+    this.titleEl.textContent = this.titleLine(status, painting)
+    const detail = this.detailLine(status, painting)
+    this.statusEl.textContent = detail
+    this.statusEl.style.display = detail.length === 0 ? 'none' : ''
     this.refreshBrushField(status, painting)
 
     for (const [tool, button] of this.toolButtons) {

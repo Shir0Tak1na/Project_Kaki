@@ -2634,7 +2634,24 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   await new Promise((resolve) => setTimeout(resolve, 20))
   const editor = layers.getEditor(canvasPath)
   check('编辑器已创建并进入绘制模式', editor !== null && editor.mode === 'paint', String(editor?.mode))
-  check('工具条显示为绘制中', toolbarEl.children[0].textContent.includes('绘制'), toolbarEl.children[0].textContent)
+  const toolbarTitle = () => collectByClass(toolbarEl, 'fc-toolbar-title')[0]
+  const modeButtonEl = () => collectByClass(toolbarEl, 'fc-toolbar-mode')[0]
+  check('工具条显示为绘制中', (modeButtonEl()?.textContent ?? '').includes('绘制'), String(modeButtonEl()?.textContent))
+  // ISSUE-004：这个浮框必须有**标题行**（它是这个框的名字），且标题说明"这个框现在归谁"。
+  // 用户的原话是"筛选和绘制在同一个框里，反直觉"—— 显隐早已按模式做对，缺的就是这一行。
+  check('工具条有标题行，写着"绘制 · <工具>"', /^绘制 · .+/.test(toolbarTitle()?.textContent ?? ''), String(toolbarTitle()?.textContent))
+  check('标题行是工具条的**第一个**元素（身份要最先被看到）', toolbarEl.children[0] === toolbarTitle(), String(toolbarEl.children[0]?.className))
+  check(
+    '当前工具的参数组带 is-params（与"工具切换/模式"分开，不再连成一片）',
+    collectByClass(toolbarEl, 'fc-toolbar-terrain-group').every((el) => el.classList.contains('is-params')) &&
+      collectByClass(toolbarEl, 'fc-toolbar-brushfield-group').every((el) => el.classList.contains('is-params')),
+    `${collectByClass(toolbarEl, 'fc-toolbar-terrain-group').map((el) => el.className).join('|')} / ${collectByClass(toolbarEl, 'fc-toolbar-brushfield-group').map((el) => el.className).join('|')}`,
+  )
+  check(
+    '绘制模式下看不到"筛选…"那一组（显隐按模式做对，别回归）',
+    collectByClass(toolbarEl, 'fc-toolbar-select-group')[0]?.style.display === 'none',
+    String(collectByClass(toolbarEl, 'fc-toolbar-select-group')[0]?.style.display),
+  )
   check('进入绘制模式后覆盖层仍不参与命中测试', overlayContainer.style.pointerEvents !== 'auto')
 
   // 工具条的点击必须放行：它和 canvas 在同一个视图容器里，
@@ -11069,6 +11086,8 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
 
   const cardEl = () => collectByClass(wrapper, 'fc-selection-card')[0]
   const statusEl = () => collectByClass(toolbarEl, 'fc-toolbar-status')[0]
+    // ISSUE-004：框的「身份」在标题行（`fc-toolbar-title`），旧断言绑在副行上会误报 —— 这里补一个取标题的辅助
+    const titleEl = () => collectByClass(toolbarEl, 'fc-toolbar-title')[0]
   const cardRows = () => {
     const map = new Map()
     for (const row of collectByClass(cardEl(), 'fc-selection-card-row')) {
@@ -11103,8 +11122,8 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
     String(cardRows().get('温度 缺数据')),
   )
   check(
-    '状态条写清"当前是哪种框选、选了多少格"',
-    statusEl()?.textContent === '选择：矩形框选 · 14 格',
+    '标题行写清"当前是哪种框选、选了多少格"（ISSUE-004：信息在标题行）',
+    titleEl()?.textContent === '选择 · 矩形框选 · 14 格',
     String(statusEl()?.textContent),
   )
 
@@ -11280,7 +11299,11 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
   editor.clearAllSelection()
   check('一键清空后选择为空', selected().length === 0 && editor.getSelection() === null)
   check('没有选择时整张卡片收起（不是显示一张空的）', cardEl().classList.contains('is-empty') === true)
-  check('状态条回到"空闲"', statusEl()?.textContent === '空闲', String(statusEl()?.textContent))
+  check(
+      '标题行回到"空闲"（副行整行隐藏，不再重复同一句话）',
+      titleEl()?.textContent === '空闲' && statusEl()?.style.display === 'none',
+      `${String(titleEl()?.textContent)} / display=${String(statusEl()?.style.display)}`,
+    )
 
   console.log('  （场景 48 结束）')
   plugin.onunload()
@@ -11341,6 +11364,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   const brushOpButton = (op) => collectByClass(toolbarEl, 'fc-toolbar-brushop').find((el) => el.dataset.fcBrushOp === op)
   const brushOpGroupEl = () => brushOpButton('+')?.parentNode
   const statusEl = collectByClass(toolbarEl, 'fc-toolbar-status')[0]
+    const titleEl = collectByClass(toolbarEl, 'fc-toolbar-title')[0]
   const chooseField = (value) => {
     brushFieldSelect.value = value
     fireEvent(brushFieldSelect, 'change')

@@ -25,7 +25,7 @@
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
 - 单元测试：634 个通过
-- 冒烟测试：50 个场景、1422 条断言全部通过
+- 冒烟测试：50 个场景、1426 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - **最新一轮（§F：侧栏「显示」三组 —— 底图 / 地物 / 数据层参数，每个开关只出现一次；
   数据层参数与设置页「共用同一份控件渲染」（新建 `src/ui/settingsSections.ts`）见
