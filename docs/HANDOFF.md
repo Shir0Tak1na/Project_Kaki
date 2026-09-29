@@ -33,7 +33,7 @@
   （`main.ts` 的 `exportResourceBundle()` / `importResourceBundle()`，本轮由 private 改公开）。
   用户可见口径见 `CHANGELOG.md`，流水见 `DEVLOG.md` §2g，验收清单见 `PLAN.md` §2.1，
   教训见 `ENGINEERING-NOTES.md` §5.62。
-  **下一步只剩 `PLAN.md` §3 的最后一项：左上角状态浮窗与 Obsidian 原生控件是否重叠的实机确认（需要你）**；
+  **下一步只剩 `PLAN.md` §3 的最后一项：左上角状态浮窗与 Obsidian 原生控件是否重叠的实机确认（需要你，步骤见 `PLAN.md` §2.3 第 ① 条）**；
   再往前是「§F：侧栏「显示」三组」、
   「§D + §E：生物群系的分类字段渲染 /
   逐条配色 / 图例按群系分行，与数据层笔刷的「设为 ID」与「＋ − × ÷」三条硬口径」、
