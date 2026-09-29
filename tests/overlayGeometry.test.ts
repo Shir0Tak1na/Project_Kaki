@@ -9,7 +9,7 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
-import { describeOverlayCollisions, rectFromBounds, rectsOverlap, type ElementRect } from '../src/dev/overlayGeometry.ts'
+import { describeOverlayCollisions, describeSelectorCoverage, rectFromBounds, rectsOverlap, type ElementRect } from '../src/dev/overlayGeometry.ts'
 
 function rect(name: string, left: number, top: number, right: number, bottom: number): ElementRect {
   return { name, left, top, right, bottom }
@@ -81,3 +81,20 @@ test('describeOverlayCollisions：零尺寸的浮层不算数（隐藏元素 get
   )
   assert.ok(lines.some((line) => line.includes('我方浮层（1）')), lines.join('\n'))
 })
+
+test('describeSelectorCoverage：全部命中时明说命中数', () => {
+  const line = describeSelectorCoverage(
+    ['.fc-toolbar', '.fc-legend'],
+    [rect('.fc-toolbar', 8, 8, 128, 48), rect('.fc-legend', 8, 8, 100, 60)],
+  )
+  assert.equal(line, '- 选择器命中：2 / 2（全部命中）')
+})
+
+test('describeSelectorCoverage：没命中的选择器要点名（类名会随 Obsidian 版本变化）', () => {
+  assert.equal(
+    describeSelectorCoverage(['.fc-toolbar', '.fc-selection-card', '.fc-legend'], [rect('.fc-toolbar', 8, 8, 128, 48)]),
+    '- 选择器命中：1 / 3（未找到：`.fc-selection-card` / `.fc-legend`）',
+  )
+  assert.equal(describeSelectorCoverage(['.a'], []), '- 选择器命中：0 / 1（未找到：`.a`）', '一个都没找到时要显眼，不能只说 0 / 1')
+})
+

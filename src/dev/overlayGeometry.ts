@@ -99,3 +99,20 @@ export function describeOverlayCollisions(overlays: ElementRect[], natives: Elem
   )
   return lines
 }
+
+/**
+ * 选择器命中情况 —— 「一个都没找到」与「找到了但没重叠」必须能分开读。
+ *
+ * `measured` 是实际量到矩形的列表（`measureRects` 的返回值，名字就是选择器）；
+ * 命中只表示选择器找到了元素，**零尺寸的也算命中**（逐对比较时才会忽略零尺寸）。
+ * 少了一个选择器通常意味着 Obsidian 改了类名 —— 这行会把它点名出来。
+ */
+export function describeSelectorCoverage(selectors: readonly string[], measured: readonly ElementRect[]): string {
+  const hits = new Set(measured.map((rect) => rect.name))
+  const missing = selectors.filter((selector) => !hits.has(selector))
+  const hit = selectors.length - missing.length
+  const head = '- 选择器命中：' + hit + ' / ' + selectors.length
+  if (missing.length === 0) return head + '（全部命中）'
+  return head + '（未找到：' + missing.map((selector) => '`' + selector + '`').join(' / ') + '）'
+}
+

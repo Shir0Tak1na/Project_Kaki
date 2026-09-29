@@ -24,8 +24,8 @@
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
-- 单元测试：640 个通过
-- 冒烟测试：50 个场景、1438 条断言全部通过
+- 单元测试：642 个通过
+- 冒烟测试：50 个场景、1440 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - **最新一轮（D 可测量化：浮层会不会和宿主界面撞）** —— **新建**纯几何模块
   `src/dev/overlayGeometry.ts`（**不 import obsidian**，所以能进单测）+ `tests/overlayGeometry.test.ts`；

@@ -29,7 +29,7 @@ import {
 } from '../canvas/CanvasAdapter.ts'
 import { clientToWorld, quantumNoiseBound, worldToClient, type ClientProjection } from '../core/projection.ts'
 import { screenToWorld, viewportWorldBBox, type Viewport } from '../core/viewport.ts'
-import { describeOverlayCollisions, rectFromBounds, type ElementRect } from './overlayGeometry.ts'
+import { describeOverlayCollisions, describeSelectorCoverage, rectFromBounds, type ElementRect } from './overlayGeometry.ts'
 
 interface RoundTripRow {
   client: string
@@ -503,6 +503,8 @@ export function buildDiagnosticReport(app: App): string {
     out.push('- 读不到视图容器（`view.containerEl` 的 `querySelector` 不可用）—— 这一条只能人工看左上角。')
   } else {
     out.push(...describeOverlayCollisions(overlayRects, nativeRects))
+    out.push(describeSelectorCoverage(OVERLAY_SELECTORS, overlayRects))
+    out.push(describeSelectorCoverage(NATIVE_SELECTORS, nativeRects))
   }
   out.push('- 判定口径：**重叠面积 > 0 才算重叠**（只是贴边不算）；浮层挂在未变换的 `wrapperEl` 上，所以不随画布缩放。')
   out.push('- 人工确认（真实库）：打开一张 Canvas 并启用地图层，看左上角浮窗有没有盖住视图标题栏 / 标签页 / 侧栏按钮；绘制与选择两种状态各看一遍。')

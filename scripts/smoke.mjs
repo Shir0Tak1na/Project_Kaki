@@ -2232,6 +2232,13 @@ console.log('场景 1：真实结构与对抗性 tx/ty（tx/ty 故意不等于�
   check('原结论一节顺延成第 9 节（不重号）', report.includes('## 9. 结论与下一步') && !report.includes('## 8. 结论与下一步'))
   check('真的量到尺寸并逐对比较（1 个浮层 × 2 个原生控件 = 2 组）', report.includes('- ✅ 逐对比较 2 组，没有一组重叠'), report.match(/- (✅|⚠️)[^\n]*/)?.[0] ?? '(缺判定行)')
   check('两边的清单都写清了是谁', report.includes('`.fc-toolbar`') && report.includes('`.view-header`') && report.includes('`.canvas-controls`'))
+  // 命中情况：类名随 Obsidian 版本漂移时，「一个都没查到」不能被读成「没有重叠」
+  check(
+    '写清我方浮层选择器命中几个（未命中的点名）',
+    report.includes('- 选择器命中：1 / 3（未找到：`.fc-selection-card` / `.fc-legend`）'),
+    report.match(/- 选择器命中[^\n]*/)?.[0] ?? '(缺命中行)',
+  )
+  check('写清原生控件选择器命中几个（未命中的点名）', report.includes('- 选择器命中：2 / 4（未找到：`.canvas-card-menu` / `.canvas-menu`）'))
   // 反例控制：把浮层挪到标题栏上方再跑一次 —— 同一段代码必须报出重叠与尺寸，否则上面那条 ✅ 是空转
   const diagRects = app.workspace.getLeavesOfType('canvas')[0].view.containerEl.__fcRects
   const toolbarRect = diagRects.find((entry) => entry.selector === '.fc-toolbar').rect
