@@ -18,10 +18,12 @@ import {
   estimateQuantum,
   isProjection,
   projectionFrom,
+  resolveProjection,
   worldToClient,
   type ClientProjection,
   type OriginCalibration,
   type Point,
+  type ProjectionDecision,
   type QuantumEstimate,
 } from '../core/projection.ts'
 import { isViewport, type Viewport } from '../core/viewport.ts'
@@ -397,7 +399,7 @@ export function readScale(canvas: CanvasLike): { scale: number | null; source: s
 export interface ProjectionResult {
   projection: ClientProjection | null
   /** 锚点来源：标定校准 / 单点 posFromEvt / 闭式推导（可带偏差修正） */
-  anchorSource: 'closed-form' | 'posFromEvt' | 'posFromClient' | 'none'
+  anchorSource: 'closed-form' | 'posFromEvt' | 'posFromClient' | 'mixed' | 'none'
   scale: number | null
   scaleSource: string
   viewportRect: ScreenRect | null
@@ -640,8 +642,22 @@ export function buildProjection(canvas: CanvasLike, options: ProjectionOptions =
 
   // 运行时原点：**纯闭式**（来自精确 CSS 值，无量化抖动）。
   // 不施加标定测出的偏差 —— 实测该偏差落在量化噪声上界之内，修正只会注入噪声。
-  const origin: Point | null = derivedOrigin
-  if (origin) anchorSource = 'closed-form'
+  const closedFormOrigin: Point | null = derivedOrigin
+  // 但闭式只是**一次实测**的归纳：换版本 / 换布局时它可能带一个与缩放有关的偏移，
+  // 而投影唯一可见的消费者是标记 / 文字那层 DOM billboard（症状：放大缩小时地标移动不准）。
+  // 所以这里用 Obsidian 自己的 posFromEvt 采两个点做一次**裁决**：一致就用闭式，不一致就信它。
+  const decision = verifyProjectionAgainstCanvas(canvas, viewportRect, scale, closedFormOrigin, host?.matrix ?? null)
+  const effectiveScale = decision?.scale ?? scale
+  if (decision !== null) {
+    if (decision.scaleDelta !== null && decision.scaleDelta > 0.01 * effectiveScale) {
+      notes.push(`矩阵缩放与 posFromEvt 采样不一致（差 ${decision.scaleDelta.toFixed(6)}）⇒ 已改用采样缩放`)
+    }
+    if (decision.originDeltaPx !== null && decision.originDeltaPx > 1.5 * 0.707) {
+      notes.push(`闭式原点与 posFromEvt 采样差 ${decision.originDeltaPx.toFixed(2)}px ⇒ 已改用 ${decision.source}`)
+    }
+  }
+  const origin: Point | null = decision?.origin ?? closedFormOrigin
+  if (origin) anchorSource = decision ? decision.source : 'closed-form'
 
   if (options.calibrate && viewportRect) {
     const result = calibrateFromCanvas(canvas, viewportRect, scale, derivedOrigin)
@@ -718,8 +734,11 @@ export function buildProjection(canvas: CanvasLike, options: ProjectionOptions =
   }
 
   // 用视口中心做锚点：数值条件更好，且与原点表示等价
-  const anchorWorld = { x: (anchorClient.x - origin.x) / scale, y: (anchorClient.y - origin.y) / scale }
-  const projection = projectionFrom(anchorClient, anchorWorld, scale)
+  const anchorWorld = {
+    x: (anchorClient.x - origin.x) / effectiveScale,
+    y: (anchorClient.y - origin.y) / effectiveScale,
+  }
+  const projection = projectionFrom(anchorClient, anchorWorld, effectiveScale)
   if (!isProjection(projection)) {
     notes.push('构建出的投影未通过形状校验')
     return fail()
@@ -767,6 +786,63 @@ export function buildProjection(canvas: CanvasLike, options: ProjectionOptions =
 }
 
 // ---------------------------------------------------------------- 坐标转换
+
+/** 采样校验的缓存：同一画布 + 同一变换指纹只采一次（缩放动画期间每帧都变，也就每帧采一次） */
+const projectionCheckCache = new WeakMap<object, { key: string; decision: ProjectionDecision | null }>()
+
+/**
+ * 用 Obsidian 自己的 `posFromEvt` 采两个彼此远离的点，裁决「闭式原点 / 矩阵缩放」是否可信。
+ *
+ * 为什么不用采样值无脑替换：`posFromEvt` 实测被量化到 1 CSS 像素，直接用它当唯一来源等于
+ * 把噪声引进每帧的投影；而闭式（`wrapperRect.topLeft + matrix(e,f)`）在实测环境里精确到 0.03 px。
+ * 所以**一致就用闭式、不一致才信采样** —— 长裁决逻辑见 `src/core/projection.ts` 的 `resolveProjection`。
+ */
+function verifyProjectionAgainstCanvas(
+  canvas: CanvasLike,
+  viewportRect: ScreenRect,
+  scale: number,
+  closedFormOrigin: Point | null,
+  matrix: Matrix2D | null,
+): ProjectionDecision | null {
+  const posFromEvt = asFn(canvas.posFromEvt)
+  if (!posFromEvt || closedFormOrigin === null) return null
+
+  // 指纹要含矩阵（a/e/f）：平移一变，闭式原点就变，缓存必须失效；否则视口一动位置就被冻住
+  const key = [
+    scale,
+    matrix ? matrix.a : 'na',
+    matrix ? matrix.e : 'na',
+    matrix ? matrix.f : 'na',
+    viewportRect.left,
+    viewportRect.top,
+    viewportRect.width,
+    viewportRect.height,
+  ].join('|')
+  const cached = projectionCheckCache.get(canvas as unknown as object)
+  if (cached !== undefined && cached.key === key) return cached.decision
+
+  const samples: Array<{ client: Point; world: Point }> = []
+  const y = viewportRect.top + viewportRect.height / 2
+  for (const ratio of [0.2, 0.8]) {
+    const client = { x: viewportRect.left + viewportRect.width * ratio, y }
+    const evt = syntheticMouseEvent(client)
+    if (!evt) break
+    try {
+      const raw = (posFromEvt as unknown as (e: MouseEvent) => unknown).call(canvas, evt)
+      const rec = asRecord(raw)
+      const x = rec ? asNumber(rec.x) : null
+      const worldY = rec ? asNumber(rec.y) : null
+      if (x !== null && worldY !== null) samples.push({ client, world: { x, y: worldY } })
+    } catch {
+      // 采样失败就当这一轮没有证据：保持闭式（行为与升级前一致）
+    }
+  }
+
+  const decision =
+    samples.length > 0 ? resolveProjection({ closedFormOrigin, matrixScale: scale, samples }) : null
+  projectionCheckCache.set(canvas as unknown as object, { key, decision })
+  return decision
+}
 
 /** 指针事件 → 世界坐标。posFromEvt 是权威来源；投影作为兜底。 */
 export function pointerToWorld(

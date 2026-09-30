@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 客户端坐标 ↔ 世界坐标的投影 —— 纯函数模块。
  *
  * 为什么不是「中心 + 缩放」公式：Obsidian 的 `.canvas` 是视口大小的盒子，
@@ -116,6 +116,115 @@ export function projectionWorldBBox(
     y: viewportRect.top + viewportRect.height,
   })
   return { minX: topLeft.x, minY: topLeft.y, maxX: bottomRight.x, maxY: bottomRight.y }
+}
+
+/**
+ * 运行时投影的**裁决**：闭式原点/缩放与 Obsidian 自己 `posFromEvt` 采样出的原点/缩放不一致时，信谁。
+ *
+ * 为什么需要它：闭式关系 `origin = wrapperRect.topLeft + matrix(e,f)` 来自 **Phase 0 的一次实测**
+ * （1.13.7，scale≈0.447，吻合 0.03 px）。它是精确值、无量化噪声，**但不能假设在所有版本/布局下都成立** ——
+ * 一旦宿主元素、`transform-origin` 或矩阵语义变了，闭式原点会带上一个**与缩放有关的偏移**；
+ * 而投影的用户可见消费者恰恰是**标记 / 文字那层 DOM billboard**：症状就是「放大缩小时地标移动不准」。
+ *
+ * 采样是权威来源（Obsidian 自己的映射），代价是**量化到 1 CSS 像素**（实测，噪声上界 0.707 px）。
+ * 裁决规则：**两者一致就用闭式（平滑、无噪声）；不一致就信采样（权威）**。
+ */
+export interface ProjectionEvidence {
+  /** 闭式原点（client 坐标）；没有宿主矩阵时为 null */
+  closedFormOrigin: Point | null
+  /** 矩阵缩放（精确值）；未知时为 null */
+  matrixScale: number | null
+  /** 两个（或更多）彼此远离的权威采样点：client ↔ world */
+  samples: ReadonlyArray<{ client: Point; world: Point }>
+  /** 采样噪声上界（px）；Phase 0 实测 posFromEvt 量化到 1 CSS px ⇒ 0.707 */
+  noiseBoundPx?: number
+  /** 缩放不一致的容忍比例（默认 1%：长基线下采样噪声远小于它） */
+  scaleTolerance?: number
+}
+
+export interface ProjectionDecision {
+  scale: number
+  origin: Point
+  /** 这次用了谁：闭式 / 采样 / 缩放取矩阵而原点取采样 */
+  source: 'closed-form' | 'posFromEvt' | 'mixed'
+  /** 采样缩放与矩阵缩放之差（绝对比例）；不可比时为 null */
+  scaleDelta: number | null
+  /** 闭式原点与采样原点之差（px）；不可比时为 null */
+  originDeltaPx: number | null
+}
+
+export function resolveProjection(evidence: ProjectionEvidence): ProjectionDecision | null {
+  const noise = evidence.noiseBoundPx ?? 0.707
+  const tolerance = evidence.scaleTolerance ?? 0.01
+  const samples = evidence.samples
+  const first = samples[0]
+
+  const sampleOriginFor = (scale: number): Point | null => {
+    if (!first) return null
+    return { x: first.client.x - first.world.x * scale, y: first.client.y - first.world.y * scale }
+  }
+
+  // 采样缩放：取**彼此最远**的一对（长基线把 1px 量化压到可忽略）
+  let sampleScale: number | null = null
+  if (samples.length >= 2) {
+    let best: { a: { client: Point; world: Point }; b: { client: Point; world: Point }; distance: number } | null = null
+    for (let i = 0; i < samples.length; i += 1) {
+      for (let j = i + 1; j < samples.length; j += 1) {
+        const a = samples[i]!
+        const b = samples[j]!
+        const distance = Math.hypot(b.client.x - a.client.x, b.client.y - a.client.y)
+        if (best === null || distance > best.distance) best = { a, b, distance }
+      }
+    }
+    if (best !== null && best.distance > 1e-6) {
+      const pair = projectionFromPair(best.a, best.b)
+      if (pair !== null) sampleScale = pair.scale
+    }
+  }
+
+  const matrixScale = evidence.matrixScale !== null && evidence.matrixScale > 0 ? evidence.matrixScale : null
+  const closedForm = evidence.closedFormOrigin
+
+  const scaleDelta = matrixScale !== null && sampleScale !== null ? Math.abs(sampleScale - matrixScale) : null
+  const chooseScale = (): { scale: number; fromSample: boolean } | null => {
+    if (matrixScale !== null && sampleScale !== null) {
+      return Math.abs(sampleScale - matrixScale) > tolerance * matrixScale
+        ? { scale: sampleScale, fromSample: true }
+        : { scale: matrixScale, fromSample: false }
+    }
+    if (matrixScale !== null) return { scale: matrixScale, fromSample: false }
+    if (sampleScale !== null) return { scale: sampleScale, fromSample: true }
+    return null
+  }
+
+  const chosen = chooseScale()
+  if (chosen === null) return null
+
+  const sampleOrigin = sampleOriginFor(chosen.scale)
+  let origin: Point | null = null
+  let source: ProjectionDecision['source'] = chosen.fromSample ? 'posFromEvt' : 'closed-form'
+  let originDeltaPx: number | null = null
+
+  if (closedForm !== null && sampleOrigin !== null) {
+    originDeltaPx = Math.hypot(sampleOrigin.x - closedForm.x, sampleOrigin.y - closedForm.y)
+    // 采样带 1px 量化 ⇒ 只有**超出噪声上界**才认为闭式真的偏了
+    if (originDeltaPx > noise * 1.5) {
+      origin = sampleOrigin
+      source = 'posFromEvt'
+    } else {
+      origin = closedForm
+      source = chosen.fromSample ? 'mixed' : 'closed-form'
+    }
+  } else if (sampleOrigin !== null) {
+    origin = sampleOrigin
+    source = 'posFromEvt'
+  } else if (closedForm !== null) {
+    origin = closedForm
+    source = chosen.fromSample ? 'mixed' : 'closed-form'
+  }
+
+  if (origin === null) return null
+  return { scale: chosen.scale, origin, source, scaleDelta, originDeltaPx }
 }
 
 /** 投影是否等价（用于视口去重：锚点变化但世界坐标没变时应视为同一视口） */

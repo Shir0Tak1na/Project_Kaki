@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 投影模块的单元测试。
  * 回归依据：Phase 0 在 Obsidian 1.13.7 上实测得到的一组真实对应点（见 docs/archive/PHASE-0-RESULTS.md）。
  */
@@ -15,6 +15,7 @@ import {
   projectionFromPair,
   projectionWorldBBox,
   quantumNoiseBound,
+  resolveProjection,
   worldToClient,
   type ClientProjection,
   type Point,
@@ -326,4 +327,72 @@ test('量化噪声上界为每轴半个量子的二维合成', () => {
   // 该量用于判定"两个来源是否一致"：0.63 px 的差异在 1 px 量子下不应被判为异常
   const boundPx = quantumNoiseBound(1)
   assert.ok(0.634 < boundPx, '0.634 px 应落在上界之内（实测中确实如此）')
+})
+
+// ---------------------------------------------------------------- 运行时投影的裁决（W8）
+
+test('resolveProjection：闭式与采样一致（差在噪声内）⇒ 用闭式，不把量化噪声引进每帧', () => {
+  const decision = resolveProjection({
+    closedFormOrigin: { x: 644, y: 366.9 },
+    matrixScale: REAL_SCALE,
+    samples: [
+      { client: { x: 300, y: 400 }, world: { x: (300 - 644.5) / REAL_SCALE, y: (400 - 366.9) / REAL_SCALE } },
+      { client: { x: 900, y: 400 }, world: { x: (900 - 644.5) / REAL_SCALE, y: (400 - 366.9) / REAL_SCALE } },
+    ],
+  })
+  assert.notEqual(decision, null)
+  assert.equal(decision!.source, 'closed-form')
+  assert.equal(decision!.origin.x, 644)
+  assert.ok(decision!.originDeltaPx !== null && decision!.originDeltaPx < 1)
+})
+
+test('resolveProjection：闭式偏了（超过噪声上界）⇒ 信采样（地标漂移那类缺陷的兜底）', () => {
+  const decision = resolveProjection({
+    closedFormOrigin: { x: 644, y: 366.9 },
+    matrixScale: REAL_SCALE,
+    samples: [
+      { client: { x: 300, y: 400 }, world: { x: (300 - 644.5) / REAL_SCALE - 40, y: (400 - 366.9) / REAL_SCALE } },
+      { client: { x: 900, y: 400 }, world: { x: (900 - 644.5) / REAL_SCALE - 40, y: (400 - 366.9) / REAL_SCALE } },
+    ],
+  })
+  assert.notEqual(decision, null)
+  assert.equal(decision!.source, 'posFromEvt')
+  assert.ok(decision!.originDeltaPx !== null && decision!.originDeltaPx > 10)
+})
+
+test('resolveProjection：矩阵缩放与采样缩放不一致 ⇒ 缩放与原点都用采样的（宿主元素认错时的兜底）', () => {
+  const sampleScale = REAL_SCALE * 1.2
+  const decision = resolveProjection({
+    closedFormOrigin: { x: 644, y: 366.9 },
+    matrixScale: REAL_SCALE,
+    samples: [
+      { client: { x: 0, y: 0 }, world: { x: 0, y: 0 } },
+      { client: { x: 600, y: 0 }, world: { x: 600 / sampleScale, y: 0 } },
+    ],
+  })
+  assert.notEqual(decision, null)
+  assert.ok(Math.abs(decision!.scale - sampleScale) < 1e-9)
+  assert.ok(decision!.scaleDelta !== null && decision!.scaleDelta > 0.01 * REAL_SCALE)
+})
+
+test('resolveProjection：只有一侧证据就给那一侧；两侧都没有 ⇒ null', () => {
+  const onlyClosed = resolveProjection({ closedFormOrigin: { x: 1, y: 2 }, matrixScale: 0.5, samples: [] })
+  assert.equal(onlyClosed?.source, 'closed-form')
+  assert.deepEqual(onlyClosed?.origin, { x: 1, y: 2 })
+  const onlySample = resolveProjection({
+    closedFormOrigin: null,
+    matrixScale: 0.5,
+    samples: [{ client: { x: 0, y: 0 }, world: { x: 0, y: 0 } }],
+  })
+  assert.equal(onlySample?.source, 'posFromEvt')
+  assert.equal(resolveProjection({ closedFormOrigin: null, matrixScale: null, samples: [] }), null)
+})
+
+test('resolveProjection：采样噪声（约 0.5px）不该触发切换（阈值是噪声上界的 1.5 倍）', () => {
+  const samples = [
+    { client: { x: 300, y: 400 }, world: { x: (300 - 644.5) / REAL_SCALE, y: (400 - 366.9) / REAL_SCALE } },
+    { client: { x: 900, y: 400 }, world: { x: (900 - 644.5) / REAL_SCALE, y: (400 - 366.9) / REAL_SCALE } },
+  ]
+  const decision = resolveProjection({ closedFormOrigin: { x: 644, y: 366.9 }, matrixScale: REAL_SCALE, samples })
+  assert.equal(decision?.source, 'closed-form')
 })

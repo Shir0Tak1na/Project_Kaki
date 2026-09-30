@@ -24,8 +24,8 @@
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
-- 单元测试：687 个通过
-- 冒烟测试：52 个场景、1565 条断言全部通过
+- 单元测试：694 个通过
+- 冒烟测试：52 个场景、1566 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - **最新一轮（数据层 UI W2 + W3，2026-09-30）**：色带从「每个锚点一行」改成**一条轴**（可拖动锚点、两端端帽、
   新建 / 删除、检视行精确输入）；出厂数值类（不透明度 / 显示方式 / 单位 / 等值线 / 写数值）**搬进设置页**；

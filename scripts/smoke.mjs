@@ -3058,6 +3058,21 @@ console.log('\n场景 14：标记与文字标注（放置、渲染、点击打�
     /translate3d\([\d.-]+px, [\d.-]+px, 0\)/.test(markerEl?.style?.transform ?? ''),
     String(markerEl?.style?.transform),
   )
+  // W8 回归（用户报的「地标在放大缩小视图时移动不准」）：标记的屏幕位置必须等于
+  // **Obsidian 自己的映射**（posFromEvt）换算出来的位置 —— 投影原点若与权威映射不一致，这条会红。
+  {
+    const expected = canvas._clientFor({ x: marker.p[0], y: marker.p[1] })
+    const parsed = /translate3d\(([\d.-]+)px, ([\d.-]+)px, 0\)/.exec(markerEl?.style?.transform ?? '')
+    const expectedX = expected.x - REAL.wrapperRect.left
+    const expectedY = expected.y - REAL.wrapperRect.top
+    const dx = Number(parsed?.[1]) - expectedX
+    const dy = Number(parsed?.[2]) - expectedY
+    check(
+      '标记的屏幕位置 = Obsidian 自己映射出来的位置（投影与权威源不一致时这条会红）',
+      parsed !== null && Math.hypot(dx, dy) <= 1.5,
+      `Δ=(${dx.toFixed(2)}, ${dy.toFixed(2)}) 期望=(${expectedX.toFixed(2)}, ${expectedY.toFixed(2)})`,
+    )
+  }
 
   // 拖动不会放置标记（否则一拖就放一片）
   const dragStart = canvas._clientFor({ x: 200, y: 200 })
