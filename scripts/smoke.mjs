@@ -67,13 +67,13 @@ const capturedReports = []
  *
  * 为什么需要它：报告面板打不开时，插件会把报告正文**打到控制台**当作退路
  * （否则这次排查就白做了）。那条退路必须能被断言 —— 而 `capturedReports`
- * 只认诊断报告的前缀（`# Project Kaki — Phase 0`），状态报告不在其列。
+ * 只认诊断报告的前缀（`# Project Kaki — 运行时诊断`），状态报告不在其列。
  */
 const consoleLines = []
 const realConsoleLog = console.log.bind(console)
 console.log = (first, ...rest) => {
   if (typeof first === 'string') consoleLines.push(first)
-  if (typeof first === 'string' && first.startsWith('# Project Kaki — Phase 0')) {
+  if (typeof first === 'string' && first.startsWith('# Project Kaki — 运行时诊断')) {
     capturedReports.push(first)
     if (verbose) realConsoleLog(first)
     return
@@ -2230,28 +2230,44 @@ function fireEvent(element, type, init = {}) {
 
 console.log('Project Kaki — 运行时冒烟测试\n')
 
-console.log('场景 1：真实结构与对抗性 tx/ty（tx/ty 故意不等于视口中心）')
+console.log('场景 1：运行时诊断报告（此刻状态 / 投影裁决 / 规模与 DOM）')
 {
   const app = makeApp(makeCanvas())
   const { report } = await runDiagnostics(app)
   check('报告已生成并被捕获', report.length > 0)
+  check('标题已从 Phase 0 改成运行时诊断', report.startsWith('# Project Kaki — 运行时诊断'))
   check('报告包含 Canvas 叶子小节', report.includes('## 1. Canvas 叶子'), report.slice(0, 60))
   check('报告列出了活动画布路径', report.includes('Maps/World.canvas'))
 
-  check('识别出 zoom 是 tZoom 的别名', report.includes('`zoom` 是 `tZoom` 的**别名**'))
-  check('识别出 scale = 2^tZoom', report.includes('线性比例用 `scale` 字段最直接'))
+  // (a) 这一刻系统是什么状态
+  check('报告给出地图文档小节（未绑定时如实说明）', report.includes('## 2. 地图文档') && report.includes('未绑定地图文档'))
+  check('报告给出图层/覆盖层的解析来源', report.includes('## 3. 图层与覆盖层的解析来源') && report.includes('库级模板（当前没有绑定地图）'))
+  check('报告给出当前选中与内容规模', report.includes('## 4. 当前选中与内容规模') && report.includes('当前选中：无'))
+  check('内容规模在无文档时如实说无法计算', report.includes('内容规模：无已加载的地图文档'))
 
+  // (b) 投影是怎么判的 —— 本轮重点
+  check('报告新增投影裁决小节', report.includes('## 5. 投影是怎么判的'))
   check('挂载点判定为 div.canvas', report.includes('世界层挂载点 = `div.canvas`'), report.match(/世界层挂载点[^\n]*/)?.[0] ?? '(缺少判定行)')
   check('挂载点不是卡片菜单或节点', !/世界层挂载点 = `div\.canvas-(card-menu|node|controls|control)/.test(report))
-  check('候选表标记出了 ★ 世界层', report.includes('| ★ |'))
-  check('候选表列出了菜单与节点的矩阵', report.includes('canvas-card-menu') && report.includes('canvas-node'))
+  check('给出缩放与来源', report.includes('缩放：0.446697327（来源：变换矩阵 a 分量）'), report.match(/- 缩放：[^\n]*/)?.[0] ?? '')
+  check('给出投影原点', report.includes('- 原点：(643.975, 366.888)'), report.match(/- 原点：[^\n]*/)?.[0] ?? '')
+  check('给出判定来源（闭式与采样一致 ⇒ closed-form）', report.includes('判定来源：closed-form'), report.match(/- 判定来源：[^\n]*/)?.[0] ?? '')
+  check('给出闭式与采样的差（本轮重点）', report.includes('闭式 vs 采样：originDeltaPx=0.1754 · scaleDelta=0.000657'), report.match(/- 闭式 vs 采样[^\n]*/)?.[0] ?? '')
+  check('明确写出是否发生切换', report.includes('是否发生切换：否（闭式与采样一致，仍用闭式）'))
+  check('给出 posFromClient 往返偏差', report.includes('posFromClient 往返偏差：0.1256 px'))
+  check('给出视口矩形', report.includes('视口矩形：left=344.60 top=78.90 681×724'))
+  check('给出 world bbox', report.includes('world bbox：x∈[-670.2, 854.3] y∈[-644.7, 976.1]'), report.match(/world bbox[^\n]*/)?.[0] ?? '')
 
-  // D：浮层有没有压住 Obsidian 原生控件 —— 报告里给数字，而不是只留一句"请人工确认"（§F.3）
-  check('报告新增第 8 节「浮层与原生控件是否重叠」', report.includes('## 8. 浮层与原生控件是否重叠'), report.match(/## 8[^\n]*/)?.[0] ?? '(缺第 8 节)')
-  check('原结论一节顺延成第 9 节（不重号）', report.includes('## 9. 结论与下一步') && !report.includes('## 8. 结论与下一步'))
+  // (c) 规模与 DOM
+  check('报告新增规模与 DOM 小节', report.includes('## 6. 规模与 DOM'))
+  check('无地图时如实说无法计算规模', report.includes('无法计算：缺少地图文档、投影或视口矩形'))
+  check('给出浮层元素数', report.includes('浮层元素：我方 1 个 · 原生控件 2 个'))
+
+  // 保留的两节：浮层重叠 + 选择器命中
+  check('报告保留「浮层与原生控件是否重叠」为第 7 节', report.includes('## 7. 浮层与原生控件是否重叠'))
+  check('报告保留「CSS 选择器命中」为第 8 节', report.includes('## 8. CSS 选择器命中'))
   check('真的量到尺寸并逐对比较（1 个浮层 × 2 个原生控件 = 2 组）', report.includes('- ✅ 逐对比较 2 组，没有一组重叠'), report.match(/- (✅|⚠️)[^\n]*/)?.[0] ?? '(缺判定行)')
   check('两边的清单都写清了是谁', report.includes('`.fc-toolbar`') && report.includes('`.view-header`') && report.includes('`.canvas-controls`'))
-  // 命中情况：类名随 Obsidian 版本漂移时，「一个都没查到」不能被读成「没有重叠」
   check(
     '写清我方浮层选择器命中几个（未命中的点名）',
     report.includes('- 选择器命中：1 / 3（未找到：`.fc-selection-card` / `.fc-legend`）'),
@@ -2270,79 +2286,86 @@ console.log('场景 1：真实结构与对抗性 tx/ty（tx/ty 故意不等于�
   )
   toolbarRect.top = 48
 
-  // 量化探测：桩环境按 1 CSS 像素取整（实测结论），且 dpr=1.65 ≠ 1
-  check('识别出 posFromEvt 存在量化', report.includes('存在量化'), report.match(/判定：[^\n]*/)?.[0] ?? '')
-  check('量子被识别为 1 CSS px', /量子 = \*\*1\.0000\d\d CSS px\*\*/.test(report), report.match(/量子 =[^\n]*/)?.[0] ?? '')
-  check(
-    '正确判定量化粒度是 CSS 像素而非设备像素',
-    report.includes('量化粒度是 **CSS 像素**'),
-    report.match(/换算到设备像素[^\n]*/)?.[0] ?? '',
-  )
-  check('给出量化噪声上界', /二维合成 [\d.]+ 世界单位/.test(report))
+  // Phase 0 的三节必须真的退休（不再逐次重算历史量）
+  check('报告不再有量子探测', !report.includes('存在量化') && !report.includes('未观察到量化'))
+  check('报告不再有中心公式判定', !report.includes('中心公式判定'))
+  check('报告不再有 25 点标定', !report.includes('多点标定'))
+  check('报告不再有挂载点候选表', !report.includes('挂载点探测') && !report.includes('| ★ |'))
+  check('报告保留 Phase 0 历史结论的引用', report.includes('## 9. 历史结论') && report.includes('PHASE-0-RESULTS.md'))
 
-  // 多点标定：应把真实原点还原到半个量子（0.5 CSS px）以内
-  const calibrationMatch = report.match(/多点标定：(\d+) 点中位数 → 原点 \(([\d.-]+), ([\d.-]+)\)/)
-  check('报告给出了多点标定结果', calibrationMatch !== null)
-  if (calibrationMatch) {
-    const sampleCount = Number(calibrationMatch[1])
-    const calibrated = { x: Number(calibrationMatch[2]), y: Number(calibrationMatch[3]) }
-    const trueOrigin = { x: REAL.wrapperRect.left + REAL.matrixE, y: REAL.wrapperRect.top + REAL.matrixF }
-    const error = Math.hypot(calibrated.x - trueOrigin.x, calibrated.y - trueOrigin.y)
-    check(`标定用满 ${sampleCount} 个样本`, sampleCount === 25, `实际 ${sampleCount}`)
-    check(
-      `标定原点误差 ${error.toFixed(4)} px 在半个量子内`,
-      error <= REAL.quantumCssPx / 2 + 0.05,
-      `标定 (${calibrated.x}, ${calibrated.y}) vs 真实 (${trueOrigin.x}, ${trueOrigin.y})`,
-    )
-  }
-
-  check('留出样本残差已到达量化精度极限', report.includes('已经到达可分辨精度的极限'), report.match(/留出样本残差[^\n]*/)?.[0] ?? '')
-  check('运行时不施加偏差修正（差异在噪声内）', report.includes('不构成闭式关系有偏的证据'), report.match(/标定原点与闭式原点的差异[^\n]*/)?.[0] ?? '')
-  check('对抗性 tx/ty 下中心公式被判为不可用', report.includes('❌ 中心公式与 posFromEvt 不一致'), report.match(/中心公式判定[^\n]*/)?.[0] ?? '')
-  check('结论为可进入 Phase 1', report.includes('可进入 Phase 1'))
   // 诊断命令现在**只**打开报告面板：不再自动复制剪贴板、也不再自动写库内文件。
-  // 那两件事是面板上的两个按钮（用户自己决定要不要做）—— 自动复制对"只想看一眼"的人是噪音，
-  // 自动写文件则在库里留下没人清理的 FC-diagnostics.md。
   check('诊断命令不再自动写库内文件（写文件是面板上的按钮）', app.vault.files.has('FC-diagnostics.md') === false)
   check('诊断命令不再自动写剪贴板', clipboardWrites.length === 0, clipboardWrites.join(' | ').slice(0, 80))
 }
-
-console.log('\n场景 1b：闭式关系被人为偏移时应判为「可能有系统偏差」（鉴别力对照）')
+console.log('\n场景 1b：闭式被人为偏移时投影裁决应改用采样（鉴别力对照）')
 {
   const { report } = await runDiagnostics(makeApp(makeCanvas({ closedFormOffset: { x: 4, y: -3 } })))
-  check(
-    '判为超出量化噪声上界',
-    report.includes('超出量化噪声上界') && report.includes('可能有系统偏差'),
-    report.match(/标定原点与闭式原点的差异[^\n]*/)?.[0] ?? '',
-  )
+  check('判定来源改成采样', report.includes('判定来源：posFromEvt'), report.match(/- 判定来源[^\n]*/)?.[0] ?? '')
+  check('明确写出发生了切换', report.includes('是否发生切换：是（闭式与采样不一致，已改用采样）'))
+  check('报出闭式与采样的差（约 5.15 px）', /originDeltaPx=5\.1\d*/.test(report), report.match(/- 闭式 vs 采样[^\n]*/)?.[0] ?? '')
+  check('留下「已改用采样」的备注', report.includes('已改用 posFromEvt'))
 }
-
-console.log('\n场景 2：tx/ty 恰好等于视口中心时应判中心公式可用（证明探针有鉴别力）')
+console.log('\n场景 2：运行时诊断的当下状态（a）—— 地图 / 版本 / definitions / 解析来源 / 条数')
 {
-  const { report } = await runDiagnostics(makeApp(makeCanvas({ txTyAtViewportCenter: true })))
-  check(
-    '中心公式在量化噪声内被判为成立',
-    report.includes('✅ 与 posFromEvt 的偏差在量化步长') || report.includes('✅ 中心公式与 posFromEvt 一致'),
-    report.match(/中心公式判定[^\n]*/)?.[0] ?? '',
-  )
-  check('投影可用且未判为失败', !report.includes('❌ 仍有偏差'))
-}
+  const app = makeApp(makeCanvas())
+  const PluginClass = loadBundleAsCjs()
+  const plugin = new PluginClass(app, { id: 'project-kaki' })
+  plugin._data = JSON.stringify({
+    layers: { terrain: true },
+    mapViews: {
+      'Maps/World.map.md': { layers: { terrain: false }, overlays: { temperature: { opacity: 0.2 } } },
+    },
+  })
+  await plugin.onload()
+  await plugin.setDeveloperMode(true)
+  const store = plugin.getStore()
+  const world = await store.createMap({
+    name: 'World',
+    folder: 'Maps',
+    canvasPath: 'Maps/World.canvas',
+    definitions: plugin.libraryDefinitionsBlock(),
+  })
+  const loaded = await store.load(world)
+  loaded.document.terrain['0_0'] = { t: 'forest' }
+  loaded.document.markers.push({ id: 'm1', label: '营地', p: [0, 0], icon: 'pin' })
+  loaded.document.labels.push({ id: 'l1', text: '名字', p: [0, 0] })
+  await store.writeNow(world, loaded.document, loaded.frontmatter.name ?? 'World', loaded.frontmatter.canvases, loaded.frontmatter.rest)
+  await settleEvents()
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 90))
 
+  const before = capturedReports.length
+  runCommand(plugin, 'diagnose-canvas')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const report = capturedReports[before] ?? ''
+
+  check('报告给出地图文档路径', report.includes('地图文档：Maps/World.map.md'), report.match(/- 地图文档：[^\n]*/)?.[0] ?? '')
+  check('报告给出文件版本 v2 与 definitions 在文件里', report.includes('文件版本：v2') && report.includes('definitions：在文件里（以文件为准）'), report.match(/- 文件版本[^\n]*/)?.[0] ?? '')
+  check('图层解析来源点名 mapViews[该图]', report.includes('图层可见性：`mapViews[Maps/World.map.md]`（这张图自己那一份）'), report.match(/- 图层可见性[^\n]*/)?.[0] ?? '')
+  check('覆盖层解析来源同样点名这张图', report.includes('覆盖层参数：`mapViews[Maps/World.map.md]`'))
+  check('内容规模列出地形 / 标记 / 文字', report.includes('内容规模：地形 1 格 · 标记 1 · 文字 1'), report.match(/- 内容规模[^\n]*/)?.[0] ?? '')
+  check('展平图元与裁剪比（地形层被关 ⇒ 0 格）', report.includes('展平图元：地形 0 格（裁剪 0）'), report.match(/- 展平图元[^\n]*/)?.[0] ?? '')
+  check('placement 数（marker / label）', report.includes('placement：marker 1/1（保留 100.0%）· label 1/1（保留 100.0%）'), report.match(/- placement[^\n]*/)?.[0] ?? '')
+
+  plugin.onunload()
+}
 console.log('\n场景 3：矩阵缩放与 tZoom 字段不一致时应报警，且结构证据仍能找到挂载点')
 {
   const { report } = await runDiagnostics(makeApp(makeCanvas({ scale: REAL.scale, matrixScale: 0.65 })))
   check('报出矩阵缩放与 tZoom 推算不一致', report.includes('与 tZoom 推算') && report.includes('不一致'), report.match(/矩阵缩放[^\n]*/)?.[0] ?? '')
   check('仍靠结构证据选中 div.canvas', report.includes('世界层挂载点 = `div.canvas`'))
-  check('投影仍以矩阵缩放为准', report.includes('缩放=变换矩阵 a 分量'))
+  check('投影仍以矩阵缩放为准', report.includes('（来源：变换矩阵 a 分量）'), report.match(/- 缩放：[^\n]*/)?.[0] ?? '')
 }
 
-console.log('\n场景 4：不量化时应判为连续输出（对照组，避免量化探测误报）')
+console.log('\n场景 4：采样不量化时闭式与采样完全吻合（投影裁决的对照组）')
 {
   const { report } = await runDiagnostics(makeApp(makeCanvas({ quantize: false })))
-  check('未观察到量化', report.includes('未观察到量化'), report.match(/判定：[^\n]*/)?.[0] ?? '')
+  check('判定来源为闭式', report.includes('判定来源：closed-form'), report.match(/- 判定来源[^\n]*/)?.[0] ?? '')
+  check('闭式与采样的差为 0', report.includes('闭式 vs 采样：originDeltaPx=0.0000 · scaleDelta=0.000000'), report.match(/- 闭式 vs 采样[^\n]*/)?.[0] ?? '')
+  check('没有发生切换', report.includes('是否发生切换：否'))
+  check('posFromClient 往返偏差为 0', report.includes('posFromClient 往返偏差：0.0000 px'))
 }
-
-console.log('\n场景 4：视口事件去重统计与补丁还原')
+console.log('\n场景 4：投影监视（每次有效变化打印 scale / origin / source / 是否切换）')
 {
   const canvas = makeCanvas()
   const originalMethod = canvas.markViewportChanged
@@ -2367,14 +2390,17 @@ console.log('\n场景 4：视口事件去重统计与补丁还原')
 
   runCommand(plugin, 'toggle-viewport-watch')
   const stopNotice = noticeLog.at(-1) ?? ''
-  check('事件总数统计为 4', stopNotice.includes('事件 4 次'), stopNotice)
-  check('有效变化统计为 2（首次 + 真实变化）', stopNotice.includes('有效视口变化 2 次'), stopNotice)
-  check('去重比例被算出', stopNotice.includes('重复 50%'), stopNotice)
+  check('有效投影变化统计为 2（首次 + 真实变化）', stopNotice.includes('有效投影变化 2 次'), stopNotice)
+  check('来源切换统计为 0', stopNotice.includes('来源切换 0 次'), stopNotice)
+  check(
+    '停止提示带上最近一次的 scale / origin / source / 是否切换',
+    stopNotice.includes('scale=') && stopNotice.includes('origin=') && stopNotice.includes('source=closed-form') && stopNotice.includes('切换=否'),
+    stopNotice,
+  )
   check('卸载后原方法已还原', canvas.markViewportChanged === originalMethod)
 
   plugin.onunload()
 }
-
 console.log('\n场景 5：没有打开 Canvas 时的降级提示')
 {
   const app = makeApp(makeCanvas())

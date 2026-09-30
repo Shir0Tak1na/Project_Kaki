@@ -28,7 +28,7 @@ import {
   isFactoryDefinitionSet,
   type MapDefinitionSet,
 } from './data/mapDefinitions.ts'
-import { buildDiagnosticReport } from './dev/diagnostics.ts'
+import { buildDiagnosticReport, type DiagnosticRuntime } from './dev/diagnostics.ts'
 import { disposeViewportWatch, getWatchStatus, startViewportWatch, stopViewportWatch } from './dev/viewport-watch.ts'
 import { MapEditor } from './editor/MapEditor.ts'
 import { MapLayerManager } from './render/MapLayerManager.ts'
@@ -3553,9 +3553,9 @@ export default class ProjectKakiPlugin extends Plugin {
     return ['图例：', ...legendLines(entries).map((line) => `  ${line}`)]
   }
 
-  // ------------------------------------------------------------ Phase 0 探针
+  // ------------------------------------------------------------ 运行时探针
   /**
-   * 诊断当前 Canvas。
+   * 诊断当前 Canvas（运行时诊断）。
    *
    * 报告与状态报告走**同一个面板**（`openReport`）：这里不再自动复制剪贴板、也不再自动写文件 ——
    * 那两件事现在是面板上的两个按钮，由用户决定要不要做、做到哪里。
@@ -3569,14 +3569,66 @@ export default class ProjectKakiPlugin extends Plugin {
       return
     }
 
-    const report = buildDiagnosticReport(this.app)
+    const report = buildDiagnosticReport(this.app, await this.diagnosticRuntime())
     console.log(report)
     this.openReport({
-      title: '诊断报告（Phase 0 探针）',
+      title: '运行时诊断',
       text: report,
       // 沿用原来的固定文件名：老用户会去库里找这个名字
       fileName: DIAGNOSTIC_FALLBACK_PATH,
     })
+  }
+
+  /**
+   * 组装报告需要的“当下运行时状态”。
+   *
+   * `buildDiagnosticReport` 只认识 `app`，而地图文档 / 版本 / definitions / 图层解析来源 /
+   * 当前选中都住在插件这一层 —— 所以在这里查一次、拍成一份**纯标量 + 文档对象**的快照。
+   * 文档对象只用来算规模与 placement，报告本身绝不序列化它。
+   */
+  private async diagnosticRuntime(): Promise<DiagnosticRuntime> {
+    const mapPath = this.activeViewMapPath()
+    const views = mapPath !== null ? this.pluginSettings.mapViews[mapPath] : undefined
+    let document_ = this.layers?.getActiveDocument() ?? null
+    let mapVersion: number | null = null
+    let mapReadOnly = false
+    let definitionsInFile: boolean | null = null
+
+    if (mapPath !== null && this.store) {
+      const abstract = this.app.vault.getAbstractFileByPath(mapPath)
+      if (abstract instanceof TFile) {
+        const loaded = await this.store.load(abstract)
+        if (loaded.document !== null) {
+          mapVersion = loaded.document.version
+          mapReadOnly = loaded.readOnly
+          definitionsInFile = loaded.document.definitions !== undefined
+          if (document_ === null) document_ = loaded.document
+        }
+      }
+    }
+
+    return {
+      mapPath,
+      mapVersion,
+      mapReadOnly,
+      definitionsInFile,
+      layers: this.layersFor(mapPath),
+      layersSource: mapPath === null ? 'none' : views?.layers !== undefined ? 'map' : 'library',
+      overlaysSource: mapPath === null ? 'none' : views?.overlays !== undefined ? 'map' : 'library',
+      showLegendSource: mapPath === null ? 'none' : views?.showLegend !== undefined ? 'map' : 'library',
+      showLegend: this.showLegendFor(mapPath),
+      selection: this.describeSelectionLine(),
+      document: document_,
+      customMarkers: this.definitionsOf(document_).markers,
+    }
+  }
+
+  /** 当前选中（一行标量；没有选中时 null） */
+  private describeSelectionLine(): string | null {
+    const status = this.layers?.getInspectorEditor()?.getStatus() ?? null
+    if (status === null || status.selection === null) return null
+    const primary = `${status.selection.kind} \`${status.selection.id}\``
+    return status.objectSelection.length > 1 ? `${primary}（共 ${status.objectSelection.length} 项）` : primary
   }
 
   private toggleViewportWatch(): void {
@@ -3584,13 +3636,13 @@ export default class ProjectKakiPlugin extends Plugin {
 
     if (current.active) {
       const finalStatus = stopViewportWatch()
-      if (finalStatus.samples.length > 0) console.log('[project-kaki] 视口采样：', finalStatus.samples.join(' | '))
-      const duplicateRatio =
-        finalStatus.totalCount > 0 ? Math.round((1 - finalStatus.effectiveCount / finalStatus.totalCount) * 100) : 0
+      if (finalStatus.samples.length > 0) console.log('[project-kaki] 投影采样：', finalStatus.samples.join(' | '))
+      const lastSample = finalStatus.samples.at(-1) ?? ''
       new Notice(
-        `已停止监视：\n事件 ${finalStatus.totalCount} 次，有效视口变化 ${finalStatus.effectiveCount} 次（重复 ${duplicateRatio}%）。\n` +
-          (finalStatus.totalCount > 0
-            ? '判定：markViewportChanged 可用于事件驱动重绘 ✅'
+        `已停止监视：\n有效投影变化 ${finalStatus.changedCount} 次，来源切换 ${finalStatus.switchedCount} 次。\n` +
+          (lastSample.length > 0 ? `最近一次：${lastSample}\n` : '') +
+          (finalStatus.changedCount > 0
+            ? '判定：每帧投影都能重判，来源切换可查 ✅'
             : '判定：一次都没触发，需检查是否真的平移/缩放过 ❌'),
         NOTICE_MAX_MS,
       )
@@ -3602,6 +3654,6 @@ export default class ProjectKakiPlugin extends Plugin {
       new Notice(`监视启动失败：${status.message}`, NOTICE_MAX_MS)
       return
     }
-    new Notice(`开始在 ${status.canvasPath} 上监视视口变化。\n现在去平移/缩放画布，然后再次运行本命令查看计数。`, NOTICE_MAX_MS)
+    new Notice(`开始在 ${status.canvasPath} 上监视投影。\n现在去平移/缩放画布，然后再次运行本命令查看 scale / origin / source。`, NOTICE_MAX_MS)
   }
 }

@@ -1,24 +1,25 @@
 /**
- * 视口变化监视（Phase 0 的 P3 探针）。
+ * 投影监视（开发探针）。
  *
- * 用 around() 包装 markViewportChanged 统计触发情况。首轮实测（Obsidian 1.13.7）：
- * 3 次平移 + 3 次缩放触发 168 次回调，说明它在动画期间逐帧触发。
- * 因此这里同时统计两个数：
- *   - 事件总数：回调被调用的次数
- *   - 有效变化数：投影（锚点 + 缩放）确实发生变化的次数
- * 两者之比就是 Phase 1 必须做去重的依据。
+ * 它**不再是** Phase 0 的「回调总数 vs 有效数」——那件事已经固化：`markViewportChanged`
+ * 在一次平移/缩放中会逐帧触发多次，调用方必须去重。现在它回答**当下**的问题：
+ * 每一次有效变化，投影到底被判成什么样。
+ *
+ * 每次有效变化打印 `scale` / `origin` / `source`，以及来源是否发生了切换
+ * （闭式 ↔ 采样）。真机上"闭式与采样确实不一致"（1.2.1 那条修复）在这个监视里应当看得见。
  */
 
 import type { App } from 'obsidian'
-import { activeCanvasHandle, buildProjection, watchViewportChanges } from '../canvas/CanvasAdapter.ts'
+import { activeCanvasHandle, buildProjection, watchViewportChanges, type ProjectionResult } from '../canvas/CanvasAdapter.ts'
 import { projectionEquals, type ClientProjection } from '../core/projection.ts'
 import type { Uninstaller } from '../util/patch.ts'
 
 interface WatchState {
   stop: Uninstaller
-  totalCount: number
-  effectiveCount: number
+  changedCount: number
+  switchedCount: number
   lastProjection: ClientProjection | null
+  lastSource: ProjectionResult['anchorSource'] | null
   canvasPath: string
   samples: string[]
 }
@@ -29,24 +30,32 @@ export interface WatchStatus {
   active: boolean
   /** 补丁是否成功装上；false 表示必须降级到 rAF 轮询 */
   patched: boolean
-  totalCount: number
-  effectiveCount: number
+  /** 投影确实发生变化（去重后）的次数 */
+  changedCount: number
+  /** 其中来源发生切换（closed-form ↔ posFromEvt）的次数 */
+  switchedCount: number
   canvasPath: string | null
+  /** 最近几次有效变化的标量摘要（最多 8 条） */
   samples: string[]
+  /** 最近一次的投影来源 */
+  lastSource: string | null
   message: string
 }
 
+function emptyStatus(message: string): WatchStatus {
+  return { active: false, patched: false, changedCount: 0, switchedCount: 0, canvasPath: null, samples: [], lastSource: null, message }
+}
+
 function statusFrom(message: string): WatchStatus {
-  if (!state) {
-    return { active: false, patched: false, totalCount: 0, effectiveCount: 0, canvasPath: null, samples: [], message }
-  }
+  if (!state) return emptyStatus(message)
   return {
     active: true,
     patched: true,
-    totalCount: state.totalCount,
-    effectiveCount: state.effectiveCount,
+    changedCount: state.changedCount,
+    switchedCount: state.switchedCount,
     canvasPath: state.canvasPath,
     samples: [...state.samples],
+    lastSource: state.lastSource,
     message,
   }
 }
@@ -55,63 +64,51 @@ export function getWatchStatus(): WatchStatus {
   return statusFrom(state ? '监视中' : '未监视')
 }
 
+/** 一行标量摘要：scale / origin / source / 是否切换 */
+function describeSample(projection: ClientProjection, source: string, switched: boolean, index: number): string {
+  const originX = projection.anchorClient.x - projection.anchorWorld.x * projection.scale
+  const originY = projection.anchorClient.y - projection.anchorWorld.y * projection.scale
+  return (
+    '#' + index + ' scale=' + projection.scale.toFixed(6) +
+    ' origin=(' + originX.toFixed(1) + ', ' + originY.toFixed(1) + ')' +
+    ' source=' + source + ' 切换=' + (switched ? '是' : '否')
+  )
+}
+
 /** 开始监视当前 Canvas（会先停掉已有的监视） */
 export function startViewportWatch(app: App): WatchStatus {
   stopViewportWatch()
 
   const handle = activeCanvasHandle(app)
-  if (!handle) {
-    return {
-      active: false,
-      patched: false,
-      totalCount: 0,
-      effectiveCount: 0,
-      canvasPath: null,
-      samples: [],
-      message: '没有已加载的 Canvas 视图',
-    }
-  }
+  if (!handle) return emptyStatus('没有已加载的 Canvas 视图')
 
   const canvasPath = handle.file?.path ?? '(未知路径)'
   const samples: string[] = []
 
   const stop = watchViewportChanges(handle.canvas, () => {
     if (!state) return
-    state.totalCount += 1
-
     const result = buildProjection(handle.canvas)
     const projection = result.projection
-    const changed = projection !== null && (state.lastProjection === null || !projectionEquals(state.lastProjection, projection))
-    if (changed) {
-      state.effectiveCount += 1
-      state.lastProjection = projection
-    }
+    if (projection === null) return
+    // 事件会逐帧触发，只有投影真的变了才算一次"有效变化"
+    if (state.lastProjection !== null && projectionEquals(state.lastProjection, projection)) return
 
-    if (state.samples.length < 6) {
-      state.samples.push(
-        projection
-          ? `#${state.totalCount} ${changed ? '变化' : '重复'} scale=${projection.scale.toFixed(6)} origin=(${(
-              projection.anchorClient.x - projection.anchorWorld.x * projection.scale
-            ).toFixed(1)}, ${(projection.anchorClient.y - projection.anchorWorld.y * projection.scale).toFixed(1)})`
-          : `#${state.totalCount} 投影不可用`,
-      )
+    state.changedCount += 1
+    const switched = state.lastSource !== null && state.lastSource !== result.anchorSource
+    if (switched) state.switchedCount += 1
+    state.lastProjection = projection
+    state.lastSource = result.anchorSource
+    if (state.samples.length < 8) {
+      state.samples.push(describeSample(projection, result.anchorSource, switched, state.changedCount))
     }
   })
 
   if (!stop) {
-    return {
-      active: false,
-      patched: false,
-      totalCount: 0,
-      effectiveCount: 0,
-      canvasPath,
-      samples: [],
-      message: 'markViewportChanged 无法包装，需要降级到 rAF 轮询',
-    }
+    return { ...emptyStatus('markViewportChanged 无法包装，需要降级到 rAF 轮询'), canvasPath }
   }
 
-  state = { stop, totalCount: 0, effectiveCount: 0, lastProjection: null, canvasPath, samples }
-  return statusFrom(`已在 ${canvasPath} 上开始监视`)
+  state = { stop, changedCount: 0, switchedCount: 0, lastProjection: null, lastSource: null, canvasPath, samples }
+  return statusFrom('已在 ' + canvasPath + ' 上开始投影监视')
 }
 
 export function stopViewportWatch(): WatchStatus {
@@ -126,11 +123,12 @@ export function stopViewportWatch(): WatchStatus {
   return {
     active: false,
     patched: true,
-    totalCount: finalState.totalCount,
-    effectiveCount: finalState.effectiveCount,
+    changedCount: finalState.changedCount,
+    switchedCount: finalState.switchedCount,
     canvasPath: finalState.canvasPath,
     samples: finalState.samples,
-    message: `已停止监视：事件 ${finalState.totalCount} 次，其中有效视口变化 ${finalState.effectiveCount} 次`,
+    lastSource: finalState.lastSource,
+    message: '已停止监视：有效投影变化 ' + finalState.changedCount + ' 次，来源切换 ' + finalState.switchedCount + ' 次',
   }
 }
 

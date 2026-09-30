@@ -3,7 +3,7 @@
  *
  * ⚠️ 重要：本模块的公式是**推导**结果，不是 Obsidian 源码引用。
  * 唯一权威的指针 → 世界转换是 Canvas 内部的 posFromEvt()；
- * 本模块的公式只在这些私有方法不可用时兜底，并必须由 Phase 0 的 P4 探针实测校准。
+ * 本模块的公式只在这些私有方法不可用时兜底，并已由 Phase 0 的实测结论校准（见 `docs/archive/PHASE-0-RESULTS.md`）。
  */
 
 export interface Point {

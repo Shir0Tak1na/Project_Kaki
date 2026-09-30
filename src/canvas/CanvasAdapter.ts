@@ -406,6 +406,10 @@ export interface ProjectionResult {
   host: TransformCandidate | null
   /** posFromClient 与 posFromEvt 的差异（px），用于验证两者语义是否一致 */
   crossCheckDelta: number | null
+  /** 闭式原点与 posFromEvt 采样原点之差（px）；这一帧没有采样证据时为 null */
+  originDeltaPx: number | null
+  /** 采样缩放与矩阵缩放之差（绝对比例）；不可比时为 null */
+  scaleDelta: number | null
   /** 闭式推导出的原点（wrapperRect.topLeft + 矩阵平移），未含偏差修正 */
   derivedOrigin: Point | null
   /** 闭式原点（含偏差修正）与投影自身原点的差异（px） */
@@ -608,6 +612,8 @@ export function buildProjection(canvas: CanvasLike, options: ProjectionOptions =
     viewportRect,
     host,
     crossCheckDelta: null,
+    originDeltaPx: null,
+    scaleDelta: null,
     derivedOrigin,
     derivedOriginDelta: null,
     calibration: null,
@@ -724,6 +730,8 @@ export function buildProjection(canvas: CanvasLike, options: ProjectionOptions =
       viewportRect,
       host,
       crossCheckDelta: null,
+      originDeltaPx: decision?.originDeltaPx ?? null,
+      scaleDelta: decision?.scaleDelta ?? null,
       derivedOrigin,
       derivedOriginDelta: null,
       calibration,
@@ -776,6 +784,8 @@ export function buildProjection(canvas: CanvasLike, options: ProjectionOptions =
     viewportRect,
     host,
     crossCheckDelta,
+    originDeltaPx: decision?.originDeltaPx ?? null,
+    scaleDelta: decision?.scaleDelta ?? null,
     derivedOrigin,
     derivedOriginDelta,
     calibration,

@@ -31,7 +31,7 @@ Project Kaki（译名 Project 垣）是一个 Obsidian 六边形客制化地图�
 | Phase 6 · 移动端 / 触控笔 | ⏳ 未开始 | — |
 | Phase 7 · 自定义资源的定义文件 | 🔄 导入 / 导出已实现（W4-3 起是**搬运工具**） | 设置页「定义文件（导入 / 导出）」两个按钮 + 两个命令（同一份实现，见 `resourceBundle.ts`）：导的是**当前地图的定义集**（整套路径 / 区域类型目录，含内置项的参数）；导入默认**只增不删**、同名冲突逐条列出来让用户选「覆盖」（见 §5.75） |
 
-**验证强度**：`tsc` 0 错 · **695 个单元测试** · **52 个冒烟场景 / 1583 条断言**
+**验证强度**：`tsc` 0 错 · **695 个单元测试** · **52 个冒烟场景 / 1601 条断言**
 （端到端加载真实打包产物；断言总数由 `scripts/smoke.mjs` 自己数出来并在末尾打印）。
 场景数沿用一直以来的口径 —— **最后一个场景的编号**：`smoke.mjs` 里另有 `场景 1b` 与一个重号的
 `场景 4`，所以按 `console.log('场景 …')` 数出来的块数是 52；两个数字都别目测（§5.19）。
@@ -181,13 +181,13 @@ src/
     collapsible.ts        **默认收起**的 `<details>` 组的唯一实现（设置页 / 弹窗 / 面板共用，见 §5.37）
     settingsModel.ts      设置的纯数据模型与迁移（**不 import obsidian**，故可单测）
   dev/
-    diagnostics.ts        Phase 0 探针报告（挂载点、矩阵、量化校准、第 8 节浮层重叠 + 选择器命中）
+    diagnostics.ts        运行时诊断报告（此刻状态 / 投影裁决 / 规模与 DOM + 第 7 节浮层重叠、第 8 节选择器命中）
     overlayGeometry.ts    **纯几何**：矩形相交 + 浮层/原生控件重叠报告 + 选择器命中统计（**不 import obsidian**，故可单测）
-    viewport-watch.ts     markViewportChanged 采样
+    viewport-watch.ts     投影监视（每次有效变化打印 scale / origin / source / 是否切换）
 tests/                    675 个单元测试（node:test，纯函数优先）
 scripts/
   build.mjs               自研构建（无 esbuild 的替代方案）
-  smoke.mjs               假 Obsidian 环境 + 52 个端到端场景 / 1583 条断言（**最值钱的资产**）
+  smoke.mjs               假 Obsidian 环境 + 52 个端到端场景 / 1601 条断言（**最值钱的资产**）
   deploy.mjs              部署到 test-vault
 docs/
   archive/TECHNICAL-DESIGN-v2.md  设计文档（含 17 条原始假设的勘误表）
@@ -1799,7 +1799,7 @@ D（左上角状态浮窗会不会压住 Obsidian 原生控件）在文档里躺
 
 这一轮把它拆成可读的数字：新建 `src/dev/overlayGeometry.ts`（**纯函数，不 import obsidian** ——
 否则单测跑不起来，见 `tests/quickStart.test.ts` 顶部那条），`rectsOverlap()` 用「面积 > 0」判定
-（贴边不算重叠），`describeOverlayCollisions()` 输出两份清单与逐对的 `宽×高 px`；诊断报告第 8 节
+（贴边不算重叠），`describeOverlayCollisions()` 输出两份清单与逐对的 `宽×高 px`；诊断报告第 7 节
 在 `view.containerEl` 里查 `.fc-toolbar` / `.fc-selection-card` / `.fc-legend`（我方）与
 `.canvas-controls` / `.canvas-card-menu` / `.canvas-menu` / `.view-header`（原生），量
 `getBoundingClientRect()` 后逐对比较。
