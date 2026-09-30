@@ -15,6 +15,7 @@ import { createEmptyMapDocument, type MapDocument } from '../src/data/mapDocumen
 import { DEFAULT_OVERLAY_STYLES } from '../src/render/overlayFields.ts'
 import { buildSelectionCard, type SelectionCardInput } from '../src/render/selectionCard.ts'
 import { normalizeSelection, summarizeSelection } from '../src/render/selectionSet.ts'
+import { SELECTION_TEXT } from '../src/ui/strings.ts'
 
 const TERRAIN_LABELS: Record<string, string> = { forest: '森林', water: '水' }
 const BIOME_LABELS: Record<string, string> = { forest: '温带森林', tundra: '苔原' }
@@ -53,7 +54,7 @@ test('单选：坐标写进标题、地形与生物群系翻成显示名、没�
   assert.equal(rows.get('生物群系'), '温带森林')
   assert.match(rows.get('温度') ?? '', /^12/)
   // 深度这一格没填 → "未填"，而不是 0（0 是海平面，是一个合法读数）
-  assert.equal(rows.get('深度 / 海拔'), '未填')
+  assert.equal(rows.get('深度 / 海拔'), SELECTION_TEXT.unfilled)
 })
 
 test('多选：众数与平均数分开给，且缺数据 / 兜底格都单独说明', () => {
@@ -67,7 +68,7 @@ test('多选：众数与平均数分开给，且缺数据 / 兜底格都单独�
   const model = buildSelectionCard(input(document, [cellKey(0, 0), cellKey(1, 0), cellKey(2, 0)]))
   assert.equal(model.kind, 'multi')
   if (model.kind !== 'multi') return
-  assert.equal(model.title, '已选 3 格')
+  assert.equal(model.title, SELECTION_TEXT.multiTitle(3))
   const rows = new Map(rowsOf(model))
   assert.match(rows.get('温度 众数') ?? '', /^20/)
   assert.match(rows.get('温度 平均') ?? '', /^20/)
@@ -77,7 +78,7 @@ test('多选：众数与平均数分开给，且缺数据 / 兜底格都单独�
   assert.match(rows.get('地形种类') ?? '', /森林 2/)
   assert.match(rows.get('地形种类') ?? '', /水 1/)
   assert.equal(rows.get('生物群系'), '温带森林 · 苔原', '生物群系要的是清单，不是个数')
-  assert.equal(rows.get('坐标范围'), 'q 0–2 · r 0–0')
+  assert.equal(rows.get(SELECTION_TEXT.rangeLabel), 'q 0–2 · r 0–0')
   assert.equal(rows.has('已不存在'), false, '没有不存在的格时不该出现这一行')
 })
 
@@ -89,7 +90,7 @@ test('多选：选择里混进"地图里已经没有的格"时单独报出来（
   assert.equal(model.kind, 'multi')
   if (model.kind !== 'multi') return
   const rows = new Map(rowsOf(model))
-  assert.equal(model.title, '已选 2 格')
+  assert.equal(model.title, SELECTION_TEXT.multiTitle(2))
   assert.equal(rows.get('已不存在'), '1 格')
 })
 
@@ -103,7 +104,7 @@ test('悬停压在对象上：标题写"种类：名称"，正文给那一行补
   )
   assert.equal(model.kind, 'object')
   if (model.kind !== 'object') return
-  assert.equal(model.title, '标记：港口')
+  assert.equal(model.title, SELECTION_TEXT.objectTitle('标记', '港口'))
   assert.deepEqual(rowsOf(model), [['信息', '位于 (10, 20)']])
 })
 

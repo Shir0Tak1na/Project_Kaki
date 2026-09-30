@@ -30,6 +30,7 @@ import {
   summarizeSelection,
 } from '../src/render/selectionSet.ts'
 import { emptyRuleGroup, type RuleGroup } from '../src/render/selectionRules.ts'
+import { SELECTION_TEXT } from '../src/ui/strings.ts'
 
 function makeDocument(): MapDocument {
   return {
@@ -161,7 +162,7 @@ test('单格详情：没有的字段写"未填"（不猜 0），读数与图例�
   assert.equal(byLabel.get('地形'), 'forest')
   assert.equal(byLabel.get('温度'), '20℃')
   assert.equal(byLabel.get('深度 / 海拔'), '0 m', '后缀与图例同源（带单位的写法有一个前导空格）')
-  assert.equal(byLabel.get('生物群系'), '未填', '没有生物群系 → 未填，而不是空串或 0')
+  assert.equal(byLabel.get('生物群系'), SELECTION_TEXT.unfilled, '没有生物群系 → 未填，而不是空串或 0')
 
   // 换成千米后读数跟着变（读数只有一个来源：`formatFieldReading`）
   const km = describeCellDetails(
@@ -171,5 +172,5 @@ test('单格详情：没有的字段写"未填"（不猜 0），读数与图例�
   )
   assert.equal(new Map(km.map((row) => [row.label, row.value])).get('深度 / 海拔'), '5 km')
   // 没有温度 → 未填
-  assert.equal(new Map(km.map((row) => [row.label, row.value])).get('温度'), '未填')
+  assert.equal(new Map(km.map((row) => [row.label, row.value])).get('温度'), SELECTION_TEXT.unfilled)
 })

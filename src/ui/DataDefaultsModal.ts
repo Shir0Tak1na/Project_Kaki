@@ -21,6 +21,7 @@
 import { Modal, Setting, type App } from 'obsidian'
 import { normalizeDataDefaults, parseDefaultInput, type DataDefaults } from '../render/dataDefaults.ts'
 import type { NumericDefaultRow } from '../render/overlayFields.ts'
+import { MODAL_ACTIONS } from './strings.ts'
 
 export interface DataDefaultsModalOptions {
   /** 当前默认值；`null` = 这张地图还没有这一段（不兜底） */
@@ -95,14 +96,14 @@ export class DataDefaultsModal extends Modal {
         button.setButtonText('取消').onClick(() => this.close())
       })
       .addButton((button) => {
-        button.setButtonText('清空全部').onClick(() => {
+        button.setButtonText(MODAL_ACTIONS.clearAll).onClick(() => {
           // 清空 = 删掉这一段（回到"不兜底"），与"每个字段都填 0"是两件事
           this.options.onSubmit(null)
           this.close()
         })
       })
       .addButton((button) => {
-        button.setButtonText('保存').setCta()
+        button.setButtonText(MODAL_ACTIONS.save).setCta()
         this.saveButtonEl = button.buttonEl
         if (this.saveButtonEl !== null) this.saveButtonEl.dataset.fcDataDefault = 'save'
         button.onClick(() => this.submit())

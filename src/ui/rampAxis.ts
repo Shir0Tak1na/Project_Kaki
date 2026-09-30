@@ -30,6 +30,7 @@ import {
   type ColorStop,
   type RampSpec,
 } from '../render/colorRamp.ts'
+import { RAMP_AXIS_LABELS } from './strings.ts'
 
 export interface RampAxisOptions {
   /** 稳定标记（冒烟用）：如 `temperature` / `depth` */
@@ -170,7 +171,7 @@ export function renderRampAxis(containerEl: HTMLElement, options: RampAxisOption
     const edgeIndex = side === 'under' ? 0 : stops.length - 1
     const edge = stops[edgeIndex]
     if (edge === undefined) return emptyHint()
-    box.createEl('span', { cls: 'fc-ramp-who', text: side === 'under' ? '低于最低限度' : '高于最高限度' })
+    box.createEl('span', { cls: 'fc-ramp-who', text: side === 'under' ? RAMP_AXIS_LABELS.underMin : RAMP_AXIS_LABELS.overMax })
     const limitInput = box.createEl('input', { cls: 'fc-ramp-input' })
     limitInput.type = 'text'
     limitInput.dataset.fcRampLimit = side

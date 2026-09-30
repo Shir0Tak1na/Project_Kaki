@@ -59,6 +59,7 @@ import { AssetSuggestModal, type AssetPickerKind, type AssetPickerOptions, type 
 import { MapPanelView, MAP_PANEL_VIEW_TYPE, type BatchEditInfo, type PluginAction } from './ui/MapPanel.ts'
 import type { ToolControlsHost } from './ui/toolSections.ts'
 import { resolveVaultResourceUrl } from './base/vaultResource.ts'
+import { COMMAND_NAMES, DIALOG_LABELS, NOTICES, SELECTION_TEXT, STATUS_SECTIONS } from './ui/strings.ts'
 import type { SelectionFieldValue } from './editor/selection.ts'
 import { SELECTION_KINDS } from './editor/selection.ts'
 import {
@@ -455,7 +456,7 @@ export default class ProjectKakiPlugin extends Plugin {
     return [
       {
         id: 'open-map-panel',
-        name: '打开地图面板',
+        name: COMMAND_NAMES.openPanel,
         icon: 'sidebar-right',
         group: 'panel',
         /**
@@ -470,7 +471,7 @@ export default class ProjectKakiPlugin extends Plugin {
       },
       {
         id: 'toggle-map-layer',
-        name: '启用/停用当前 Canvas 的地图层',
+        name: COMMAND_NAMES.toggleLayer,
         icon: 'layers',
         group: 'map',
         describe: () => {
@@ -621,7 +622,7 @@ export default class ProjectKakiPlugin extends Plugin {
       },
       {
         id: 'export-map-svg',
-        name: '导出当前地图为 SVG',
+        name: COMMAND_NAMES.exportSvg,
         icon: 'image-down',
         group: 'file',
         available: hasLayer,
@@ -1022,7 +1023,7 @@ export default class ProjectKakiPlugin extends Plugin {
     if (editor.getCellSelection().length > 1) return null
     const custom = this.definitionsOf(document_).biomes
     return describeCellReadings(document_, selection.id, this.overlaysFor(this.activeViewMapPath())).map((row) =>
-      row.label === '生物群系' && row.value !== '未填'
+      row.label === '生物群系' && row.value !== SELECTION_TEXT.unfilled
         ? { ...row, value: resolveBiomeStyle(row.value, custom).label }
         : row,
     )
@@ -1272,7 +1273,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const mapPath = maps[0]!.path
     const basePath = `${mapPath.replace(/\.map\.md$/i, '')}.base`
     if (this.app.vault.getAbstractFileByPath(basePath)) {
-      new Notice(`已存在同名 Base 文件，未覆盖：${basePath}`, NOTICE_MAX_MS)
+      new Notice(`${NOTICES.baseExists}，未覆盖：${basePath}`, NOTICE_MAX_MS)
       return
     }
     try {
@@ -1300,7 +1301,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const mapPath = this.store?.mapFilePathForCanvas(canvasPath)
     const document = this.layers.getDocument(canvasPath)
     if (!mapPath || !document) {
-      new Notice('当前 Canvas 没有可导出的地图。请先启用地图层。', NOTICE_MAX_MS)
+      new Notice(NOTICES.noExportableMap, NOTICE_MAX_MS)
       return null
     }
     return { canvasPath, mapPath, document }
@@ -1381,7 +1382,7 @@ export default class ProjectKakiPlugin extends Plugin {
     if (format === 'svg') {
       try {
         const created = await this.app.vault.create(exportPath, svg)
-        new Notice(`已导出地图 SVG：${created.path}\n（${resolved.description}）${overlaySuffix}`, NOTICE_MAX_MS)
+        new Notice(`${NOTICES.svgExportedPrefix}：${created.path}\n（${resolved.description}）${overlaySuffix}`, NOTICE_MAX_MS)
         void this.app.workspace.openLinkText(created.path, '', false)
         return true
       } catch (error) {
@@ -1394,7 +1395,7 @@ export default class ProjectKakiPlugin extends Plugin {
     try {
       const result = await rasterizeSvgToPng(svg, { width: EXPORT_WIDTH, height: EXPORT_HEIGHT }, this.pngRasterDeps ?? {})
       if (!result.ok) {
-        new Notice(`导出 PNG 失败：${result.reason}`, NOTICE_MAX_MS)
+        new Notice(`${NOTICES.pngFailedPrefix}：${result.reason}`, NOTICE_MAX_MS)
         return false
       }
       const created = await this.app.vault.createBinary(exportPath, await result.blob.arrayBuffer())
@@ -1403,7 +1404,7 @@ export default class ProjectKakiPlugin extends Plugin {
       return true
     } catch (error) {
       console.error('[project-kaki] 导出 PNG 失败', error)
-      new Notice(`导出 PNG 失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
+      new Notice(`${NOTICES.pngFailedPrefix}：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
       return false
     }
   }
@@ -3147,7 +3148,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const files = this.app.vault.getFiles()
     const candidates = listBundlePaths(files.map((file) => file.path))
     this.openAssetPicker({
-      title: '导入定义文件',
+      title: DIALOG_LABELS.importDefinitions,
       files: candidates,
       kind: 'bundle',
       emptyHint: emptyBundleListHint(),
@@ -3248,7 +3249,7 @@ export default class ProjectKakiPlugin extends Plugin {
         pathTypes: plan.result.pathTypes,
         regionTypes: plan.result.regionTypes,
       }),
-      '导入定义文件',
+      DIALOG_LABELS.importDefinitions,
       target,
     )
     if (!written.ok) return { ok: false, reason: written.problem }
@@ -3372,7 +3373,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const stats = status.stats
     new Notice(
       [
-        `已启用地图层：${canvasPath}`,
+        `${NOTICES.layerEnabled}：${canvasPath}`,
         `地图：${status.mapPath}`,
         `挂载点：${stats?.hostClass ?? '未知'}`,
         `本帧绘制：地形 ${stats?.lastCellCount ?? 0} 格 · 裁剪 ${stats?.lastCulledCells ?? 0} 格 · 网格 ${stats?.lastGridCells ?? 0} 格`,
@@ -3508,7 +3509,7 @@ export default class ProjectKakiPlugin extends Plugin {
     // 报告进面板，不再用 15 秒的 Notice：那份文本是要**看**与**复制**的，
     // 而 Notice 会盖住右上角的侧边栏按钮、等很久才消失、文字还选不中（用户的原始反馈）。
     this.openReport({
-      title: '地图状态报告',
+      title: COMMAND_NAMES.statusReport,
       text: [
         `地图：${mapPath}`,
         `版本 v${loaded.document.version}${loaded.readOnly ? '（只读：版本高于本插件）' : ''}`,
@@ -3541,16 +3542,16 @@ export default class ProjectKakiPlugin extends Plugin {
     const visibility = this.layersFor(this.activeViewMapPath())
     const hidden = hiddenLayerLabels(visibility)
     if (allLayersHidden(visibility)) {
-      return '图层：全部隐藏（地图上看不到任何东西，这是设置导致的，数据仍在）'
+      return `${STATUS_SECTIONS.layerPrefix}全部隐藏（地图上看不到任何东西，这是设置导致的，数据仍在）`
     }
-    return hidden.length === 0 ? '图层：全部显示' : `图层：已隐藏 ${hidden.join(' / ')}`
+    return hidden.length === 0 ? STATUS_SECTIONS.layersAllVisible : `${STATUS_SECTIONS.layerPrefix}已隐藏 ${hidden.join(' / ')}`
   }
 
   /** 图例条目（从地图实际内容生成；受图层开关约束） */
   private describeLegend(canvasPath: string): string[] {
     const entries = this.layers?.buildLegendFor(canvasPath) ?? []
-    if (entries.length === 0) return ['图例：（地图还是空的，或相关图层被隐藏）']
-    return ['图例：', ...legendLines(entries).map((line) => `  ${line}`)]
+    if (entries.length === 0) return [`${STATUS_SECTIONS.legendPrefix}（地图还是空的，或相关图层被隐藏）`]
+    return [STATUS_SECTIONS.legendPrefix, ...legendLines(entries).map((line) => `  ${line}`)]
   }
 
   // ------------------------------------------------------------ 运行时探针

@@ -25,6 +25,7 @@ import {
   type OverlayStyles,
 } from './overlayFields.ts'
 import { describeCellDetails, type CellDetailRow, type CellSelection, type SelectionSummary } from './selectionSet.ts'
+import { SELECTION_TEXT } from '../ui/strings.ts'
 
 /** 卡片的一行（`label` 是左侧的粗体小标题，`value` 是右侧的读数） */
 export type SelectionCardRow = CellDetailRow
@@ -82,8 +83,8 @@ function statRows(summary: SelectionSummary, styles: OverlayStyles, calibration:
   const rows: SelectionCardRow[] = []
   for (const stat of summary.fields) {
     // 多选用的是**众数 / 平均数**：众数回答"这一片最常见是多少"，平均数回答"平均下来多深"
-    const mode = stat.mode === null ? '未填' : readingOf(stat.key, stat.mode, styles, calibration)
-    const average = stat.average === null ? '未填' : readingOf(stat.key, stat.average, styles, calibration)
+    const mode = stat.mode === null ? SELECTION_TEXT.unfilled : readingOf(stat.key, stat.mode, styles, calibration)
+    const average = stat.average === null ? SELECTION_TEXT.unfilled : readingOf(stat.key, stat.average, styles, calibration)
     rows.push({ label: `${stat.label} 众数`, value: mode })
     rows.push({ label: `${stat.label} 平均`, value: average })
     if (stat.missing > 0) {
@@ -115,7 +116,7 @@ export function selectionStatRows(
   const rows: SelectionCardRow[] = []
   if (summary.range !== null) {
     const { minQ, maxQ, minR, maxR } = summary.range
-    rows.push({ label: '坐标范围', value: `q ${minQ}–${maxQ} · r ${minR}–${maxR}` })
+    rows.push({ label: SELECTION_TEXT.rangeLabel, value: `q ${minQ}–${maxQ} · r ${minR}–${maxR}` })
   }
   rows.push(...statRows(summary, styles, calibration))
   // 生物群系要的是**清单**（"各有哪些"），不是个数 —— 用户明确要求
@@ -135,10 +136,10 @@ function singleCellModel(input: SelectionCardInput, key: string): SelectionCardM
   if (input.document === null) return { kind: 'cell', title, rows: [{ label: '格', value: key }] }
   const rows = describeCellDetails(input.document, key, input.styles).map((row) =>
     // 详情里用的是**原始 ID**（纯函数不认识目录）；显示名在这里翻一次
-    row.label === '地形' && row.value !== '未填' ? { ...row, value: input.terrainLabel(row.value) } : row,
+    row.label === '地形' && row.value !== SELECTION_TEXT.unfilled ? { ...row, value: input.terrainLabel(row.value) } : row,
   )
   const biome = rows.find((row) => row.label === '生物群系')
-  if (biome !== undefined && biome.value !== '未填') biome.value = input.biomeLabel(biome.value)
+  if (biome !== undefined && biome.value !== SELECTION_TEXT.unfilled) biome.value = input.biomeLabel(biome.value)
   return { kind: 'cell', title, rows }
 }
 
@@ -155,7 +156,7 @@ export function buildSelectionCard(input: SelectionCardInput): SelectionCardMode
     if (input.hover.kind === 'object') {
       return {
         kind: 'object',
-        title: `${input.hover.kindLabel}：${input.hover.label}`,
+        title: SELECTION_TEXT.objectTitle(input.hover.kindLabel, input.hover.label),
         rows: [{ label: '信息', value: input.hover.detail }],
       }
     }
@@ -168,7 +169,7 @@ export function buildSelectionCard(input: SelectionCardInput): SelectionCardMode
   // ---- 多选 ----
   const summary = input.summary
   const rows: SelectionCardRow[] = [{ label: '格数', value: `${count} 格` }]
-  if (summary === null) return { kind: 'multi', title: `已选 ${count} 格`, rows }
+  if (summary === null) return { kind: 'multi', title: SELECTION_TEXT.multiTitle(count), rows }
 
   if (summary.terrains.length > 0) {
     rows.push({
@@ -186,5 +187,5 @@ export function buildSelectionCard(input: SelectionCardInput): SelectionCardMode
       input.biomeLabel,
     ),
   )
-  return { kind: 'multi', title: `已选 ${count} 格`, rows }
+  return { kind: 'multi', title: SELECTION_TEXT.multiTitle(count), rows }
 }

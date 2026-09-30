@@ -17,6 +17,7 @@ import { matchesGroup, type RuleGroup, type SelectionRuleContext } from './selec
 import { iterateCells, visibleCellBounds } from './hexGrid.ts'
 import { DEFAULT_ELEVATION_CALIBRATION } from './elevationUnits.ts'
 import { formatFieldReading, OVERLAY_FIELDS, overlayUnitSuffix, type OverlayStyles } from './overlayFields.ts'
+import { SELECTION_TEXT } from '../ui/strings.ts'
 
 /** 一份格选择：**有序去重的格键**（`"q_r"`）。排序后存放 → 断言与缓存都稳定 */
 export type CellSelection = readonly string[]
@@ -365,10 +366,10 @@ export function describeCellReadings(
     // 而不是把字段的权威单位（米）硬拼上去 —— 那会和图例对不上
     rows.push({
       label: spec.label,
-      value: value === undefined ? '未填' : `${formatFieldReading(spec, value, style, calibration)}${overlayUnitSuffix(spec, style)}`,
+      value: value === undefined ? SELECTION_TEXT.unfilled : `${formatFieldReading(spec, value, style, calibration)}${overlayUnitSuffix(spec, style)}`,
     })
   }
-  rows.push({ label: '生物群系', value: cell?.biome ?? '未填' })
+  rows.push({ label: '生物群系', value: cell?.biome ?? SELECTION_TEXT.unfilled })
   return rows
 }
 
@@ -388,7 +389,7 @@ export function describeCellDetails(
   const cell = document.terrain[key]
   return [
     { label: '坐标', value: `(${axial.q}, ${axial.r})` },
-    { label: '地形', value: cell?.t ?? '未填' },
+    { label: '地形', value: cell?.t ?? SELECTION_TEXT.unfilled },
     ...describeCellReadings(document, key, styles),
   ]
 }

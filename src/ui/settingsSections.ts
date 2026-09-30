@@ -33,7 +33,8 @@ import type { DepthDisplayUnit } from '../render/elevationUnits.ts'
 import { DEFAULT_CONTOUR_LABEL_SPACING_FACTOR } from '../render/fieldPlan.ts'
 import type { RampSpec } from '../render/colorRamp.ts'
 import { renderRampAxis } from './rampAxis.ts'
-import { OVERLAY_CONTROL_LABELS } from './strings.ts'
+import { OVERLAY_CONTROL_LABELS, SETTINGS_LABELS } from './strings.ts'
+
 
 /** 分类字段的一行"地图上用到过"的记录（设置页与侧栏面板共用这个形状） */
 export interface CategoryUsageRow {
@@ -149,7 +150,7 @@ export function renderOverlayFieldSection(
           : '当前就是出厂配色。',
       )
       .addButton((button) =>
-        button.setButtonText('恢复默认').onClick(() => {
+        button.setButtonText(SETTINGS_LABELS.resetRampButton).onClick(() => {
           void Promise.resolve(host.resetOverlayRamp(spec.id)).then(rerender)
         }),
       )

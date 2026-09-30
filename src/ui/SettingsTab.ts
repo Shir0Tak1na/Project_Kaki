@@ -25,6 +25,7 @@ import { OVERLAY_FIELDS, type OverlayFieldSpec } from '../render/overlayFields.t
 import { createCollapsibleGroup } from './collapsible.ts'
 import { QUICK_START_SETTINGS } from './quickStart.ts'
 import { renderOverlayFieldSection, type OverlaySectionHost } from './settingsSections.ts'
+import { SETTINGS_LABELS } from './strings.ts'
 
 /**
  * 数据模型在 `settingsModel.ts`（纯函数、不 import obsidian，因此可单测）。
@@ -149,7 +150,7 @@ export class CartographerSettingTab extends PluginSettingTab {
       )
 
     new Setting(containerEl)
-      .setName('开发者模式')
+      .setName(SETTINGS_LABELS.developerMode)
       .setDesc(
         '开发者工具：诊断当前 Canvas、监视视口变化。' +
           '它们平时会被从命令面板里隐藏，避免误触。地图面板里也会多出「开发工具」一组。',
@@ -172,7 +173,7 @@ export class CartographerSettingTab extends PluginSettingTab {
         titleCls: 'fc-settings-group-title',
       })
       new Setting(advanced)
-        .setName('当前实际字号')
+        .setName(SETTINGS_LABELS.currentLabelPx)
         .setDesc(
           attached?.stats?.labelCssPx
             ? `路径 ${attached.stats.labelCssPx.path} px · 区域 ${attached.stats.labelCssPx.region} px` +
@@ -230,11 +231,11 @@ export class CartographerSettingTab extends PluginSettingTab {
     })
 
     new Setting(defaults)
-      .setName('名称字体')
+      .setName(SETTINGS_LABELS.labelFont)
       .setDesc('留空 = 跟随主题；只填字体名，例：Noto Serif SC, serif。')
       .addText((text) =>
         text
-          .setPlaceholder('留空 = 跟随主题')
+          .setPlaceholder(SETTINGS_LABELS.labelFontPlaceholder)
           .setValue(settings.labelFontFamily)
           .onChange((value) => {
             void this.plugin.setLabelFontFamily(value)
@@ -320,7 +321,7 @@ export class CartographerSettingTab extends PluginSettingTab {
     row.createEl('span', { cls: 'fc-quickstart-restore-text', text: '快速上手提示已隐藏。' })
     const show = row.createEl('button', { cls: 'fc-quickstart-action' })
     show.dataset.fcRole = 'quickstart-show'
-    show.textContent = '重新显示'
+    show.textContent = SETTINGS_LABELS.quickStartShowAgain
     show.addEventListener('click', () => {
       void this.plugin.setQuickStartHidden('settings', false).then(() => this.rerenderKeepingScroll())
     })

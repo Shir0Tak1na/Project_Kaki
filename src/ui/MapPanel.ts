@@ -18,7 +18,7 @@
  * - **只在可见时重绘**，并且同一帧内的多次请求合并成一次（`requestAnimationFrame`）。
  */
 
-import { unknownTypeLabel } from './strings.ts'
+import { MODAL_ACTIONS, PANEL_SECTION_TITLES, PANEL_TITLES, devToolsSectionTitle, unknownTypeLabel } from './strings.ts'
 import { ItemView, setIcon, type WorkspaceLeaf } from 'obsidian'
 import {
   formatSelectionFieldValue,
@@ -276,16 +276,16 @@ export interface BatchEditInfo {
 const GROUP_ORDER: ReadonlyArray<{ group: PanelActionGroup; title: string }> = [
   // 「panel」只含「打开地图面板」，而它已 `panelHidden`（面板里点它必然没反应）⇒ 这一组通常是空的
   { group: 'panel', title: '' },
-  { group: 'map', title: '地图层' },
+  { group: 'map', title: PANEL_SECTION_TITLES.mapLayers },
   // 定义管理（增删改自定义地形/标记/路径类型/区域类型）：从设置页搬来之后单独成组，
   // 摆在地图层之后 —— 它既不是画布操作，也不是文件导入导出
-  { group: 'def', title: '地图定义' },
-  { group: 'file', title: '文件与导出' },
-  { group: 'dev', title: '开发工具（仅开发者模式）' },
+  { group: 'def', title: PANEL_SECTION_TITLES.definitions },
+  { group: 'file', title: PANEL_SECTION_TITLES.fileExport },
+  { group: 'dev', title: devToolsSectionTitle() },
 ]
 
 /** 「编辑」那一组的标题（位置由 `renderEditSection` 决定，不在 `GROUP_ORDER` 里） */
-const EDIT_GROUP_TITLE = '编辑'
+const EDIT_GROUP_TITLE: string = PANEL_SECTION_TITLES.edit
 
 /**
  * 按 `dataset` 的键值找第一个后代元素（面板用来在重建后认回"同一个控件"）。
@@ -403,7 +403,7 @@ const SELECTION_ACTION_RENDERERS: Record<SelectionActionId, (context: SelectionA
     const row = block.createEl('div', { cls: 'fc-selection-buttons' })
     const button = row.createEl('button', { cls: 'fc-panel-button fc-selection-button mod-warning' })
     button.dataset.fcRole = 'delete'
-    button.createEl('span', { cls: 'fc-panel-button-label', text: '删除' })
+    button.createEl('span', { cls: 'fc-panel-button-label', text: MODAL_ACTIONS.delete })
     button.addEventListener('click', () => deps.onDeleteSelection())
   },
 }
@@ -1019,7 +1019,7 @@ export class MapPanelView extends ItemView {
   private renderBatchEdit(root: HTMLElement, info: BatchEditInfo): void {
     const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-batch' })
     block.dataset.fcBatch = 'group'
-    block.createEl('div', { cls: 'fc-panel-group-title', text: `整批编辑（${info.count} 格）` })
+    block.createEl('div', { cls: 'fc-panel-group-title', text: PANEL_TITLES.batchEdit(info.count) })
     // 头部**一行摘要**：否则这一节进去就是一片输入框（用户原话"不要裸着"）
     const summaryLine = block.createEl('div', { cls: 'fc-batch-summary', text: info.summary })
     summaryLine.dataset.fcBatchSummary = '1'
@@ -1116,7 +1116,7 @@ export class MapPanelView extends ItemView {
     const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-selection' })
     block.dataset.fcSelectionPanel = '1'
     const titleRow = block.createEl('div', { cls: 'fc-selection-title-row' })
-    titleRow.createEl('div', { cls: 'fc-panel-group-title', text: '数据显示' })
+    titleRow.createEl('div', { cls: 'fc-panel-group-title', text: PANEL_SECTION_TITLES.data })
     /**
      * 「清空选择」**在侧栏**（§2.6：侧栏是"选择"的唯一家）。
      *
@@ -1199,7 +1199,7 @@ export class MapPanelView extends ItemView {
    */
   private renderViewSection(root: HTMLElement, visibility: LayerVisibility): void {
     const group = this.createSection(root, {
-      title: '视图',
+      title: PANEL_SECTION_TITLES.view,
       role: 'panel-view',
       cls: 'fc-panel-view',
       dataKey: 'fcView',
@@ -1324,7 +1324,7 @@ export class MapPanelView extends ItemView {
    */
   private renderObjectBatch(root: HTMLElement, info: ObjectBatchInfo): void {
     const head = root.createEl('div', { cls: 'fc-selection-head' })
-    head.createEl('span', { cls: 'fc-selection-kind', text: `已选 ${info.count} 个${info.kindLabel}` })
+    head.createEl('span', { cls: 'fc-selection-kind', text: PANEL_TITLES.objectBatch(info.count, info.kindLabel) })
     head.createEl('span', { cls: 'fc-selection-detail', text: 'Shift 点选加进来 · Alt 点选移出去' })
 
     const list = root.createEl('div', { cls: 'fc-object-items' })
@@ -1354,7 +1354,7 @@ export class MapPanelView extends ItemView {
       const options = [...this.deps.getSelectionTypeOptions()]
       // 各不相同：留空并写清"各不相同"，**不猜**（首个选项是一句占位，不是可提交的值）
       if (info.typeValue === null) {
-        const placeholder = select.createEl('option', { text: '（各不相同 · 选一个就能统一）' })
+        const placeholder = select.createEl('option', { text: PANEL_TITLES.typeMixed })
         placeholder.value = ''
       } else if (options.every((option) => option.value !== info.typeValue)) {
         // 当前值不在候选里（本机没有这个定义）：补一条「未知（ID）」，用户因此改得掉它
@@ -1405,7 +1405,7 @@ export class MapPanelView extends ItemView {
       const buttons = root.createEl('div', { cls: 'fc-selection-buttons' })
       const button = buttons.createEl('button', { cls: 'fc-panel-button fc-selection-button mod-warning' })
       button.dataset.fcRole = 'objects-delete'
-      button.createEl('span', { cls: 'fc-panel-button-label', text: `删除这 ${info.count} 个` })
+      button.createEl('span', { cls: 'fc-panel-button-label', text: PANEL_TITLES.deleteMany(info.count) })
       button.title = '一次提交 = 一条历史（Ctrl/Cmd+Z 一次全回来）'
       button.addEventListener('click', () => {
         this.lastSignature = null

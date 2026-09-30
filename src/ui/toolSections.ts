@@ -52,7 +52,7 @@ import {
 import { biomeCatalogSignature, listResolvedBiomeStyles, type CustomBiome } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS, type FieldId } from '../render/overlayFields.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
-import { DRAW_MODE_HINTS, DRAW_MODE_LABELS, unknownTypeLabel } from './strings.ts'
+import { DRAW_MODE_HINTS, DRAW_MODE_LABELS, PANEL_SECTION_TITLES, unknownTypeLabel } from './strings.ts'
 
 /** 没有启用的地图层时，三节共同的那句话 */
 export const NO_LAYER_HINT = '当前没有启用的地图层：打开一张地图并启用地图层之后，这里才有可改的东西。'
@@ -246,7 +246,7 @@ export function renderToolSection(parent: HTMLElement, host: ToolControlsHost): 
   const status = host.getStatus()
   // 「工具」是首屏一定要看的那一节（我现在是什么工具 + 它的参数），默认展开
   const group = sectionShell(parent, host, {
-    title: '工具',
+    title: PANEL_SECTION_TITLES.tools,
     role: 'panel-tools',
     cls: 'fc-panel-tools',
     dataKey: 'fcTools',
@@ -404,7 +404,7 @@ export function renderBrushSection(parent: HTMLElement, host: ToolControlsHost):
   // 用标记或路径时它整块是灰的，展开只是把真正要用的东西挤出屏幕（用户报的"一大坨"）。
   // 没有地图层时展开，否则 `NO_LAYER_HINT` 被收在折叠里 = 用户看不到"为什么这里是空的"。
   const group = sectionShell(parent, host, {
-    title: '笔刷',
+    title: PANEL_SECTION_TITLES.brush,
     role: 'panel-brush',
     cls: 'fc-panel-brush',
     dataKey: 'fcBrush',
@@ -573,7 +573,7 @@ export function renderSelectionModeSection(parent: HTMLElement, host: ToolContro
   const status = host.getStatus()
   // 默认只在"选择"这一档展开：这节的按钮在绘制模式下全是灰的，展开没有意义
   const group = sectionShell(parent, host, {
-    title: '选择方式',
+    title: PANEL_SECTION_TITLES.selectionMode,
     role: 'panel-selection-mode',
     cls: 'fc-panel-selection-mode',
     dataKey: 'fcSelectionMode',

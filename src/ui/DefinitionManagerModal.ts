@@ -51,6 +51,7 @@ import { createCollapsibleGroup } from './collapsible.ts'
 import { MARKER_ICONS } from '../data/mapDocument.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
 import { resolveVaultResourceUrl } from '../base/vaultResource.ts'
+import { DEFINITION_MODAL_LABELS, MODAL_ACTIONS } from './strings.ts'
 import {
   CUSTOM_REGION_TYPE_PREFIX,
   DEFAULT_CUSTOM_REGION_COLOR,
@@ -217,7 +218,7 @@ export class DefinitionManagerModal extends Modal {
   }
 
   private renderBody(contentEl: HTMLElement): void {
-    contentEl.createEl('h2', { text: '地图定义' })
+    contentEl.createEl('h2', { text: DEFINITION_MODAL_LABELS.title })
     contentEl.createEl('div', { cls: 'fc-settings-note', text: MODAL_INTRO })
 
     // "这些定义属于谁"——用户最需要知道的一句话（定义随图之后，它不再是全局的）
@@ -404,12 +405,12 @@ export class DefinitionManagerModal extends Modal {
           }),
         )
         .addButton((button) =>
-          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.renameId).setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
             this.plugin.openRenameDefinitionModal('terrain', terrain.id, terrain.label)
           }),
         )
         .addButton((button) =>
-          button.setButtonText('删除').setWarning().onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.delete).setWarning().onClick(() => {
             // 有引用 → 弹影响面确认框；没有引用 → 直接删（见 requestRemoveCustomDefinition）
             this.plugin.requestRemoveCustomDefinition('terrain', terrain.id)
           }),
@@ -519,7 +520,7 @@ export class DefinitionManagerModal extends Modal {
     }
 
     new Setting(containerEl)
-      .setName('新增自定义地形')
+      .setName(DEFINITION_MODAL_LABELS.addTerrain)
       .setDesc(atLimit ? `已达上限（${MAX_CUSTOM_TERRAINS} 个）` : 'ID 可以留空 —— 留空就按显示名自动生成。')
       .addText((text) => {
         text
@@ -603,12 +604,12 @@ export class DefinitionManagerModal extends Modal {
             }),
         )
         .addButton((button) =>
-          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.renameId).setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
             this.plugin.openRenameDefinitionModal('marker', marker.id, marker.label)
           }),
         )
         .addButton((button) =>
-          button.setButtonText('删除').setWarning().onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.delete).setWarning().onClick(() => {
             this.plugin.requestRemoveCustomDefinition('marker', marker.id)
           }),
         )
@@ -716,7 +717,7 @@ export class DefinitionManagerModal extends Modal {
     }
 
     new Setting(containerEl)
-      .setName('新增自定义标记')
+      .setName(DEFINITION_MODAL_LABELS.addMarker)
       .setDesc(atLimit ? `已达上限（${MAX_CUSTOM_MARKERS} 个）` : 'ID 可以留空 —— 留空就按显示名自动生成。')
       .addText((text) => {
         text
@@ -788,12 +789,12 @@ export class DefinitionManagerModal extends Modal {
         .setName(`名称 · ${entry.label}`)
         .setDesc(`ID ${entry.id}（不可改 —— 改它等于换一种路径类型）。`)
         .addButton((button) => {
-          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.renameId).setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
             this.plugin.openRenameDefinitionModal('path', entry.id, entry.label)
           })
         })
         .addButton((button) => {
-          button.setButtonText('删除').setWarning().setTooltip(`删除自定义类型 ${entry.id}`).onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.delete).setWarning().setTooltip(`删除自定义类型 ${entry.id}`).onClick(() => {
             this.plugin.requestRemoveCustomDefinition('path', entry.id)
           })
         })
@@ -813,7 +814,7 @@ export class DefinitionManagerModal extends Modal {
     }
 
     new Setting(containerEl)
-      .setName('新增自定义路径类型')
+      .setName(DEFINITION_MODAL_LABELS.addPathType)
       .setDesc(atLimit ? `已达上限（${MAX_CUSTOM_PATH_TYPES} 个）` : 'ID 可以留空 —— 留空就按显示名自动生成。')
       .addText((text) => {
         text
@@ -973,12 +974,12 @@ export class DefinitionManagerModal extends Modal {
         .setName(`名称 · ${entry.label}`)
         .setDesc(`ID ${entry.id}（不可改 —— 改它等于换一种区域类型）。`)
         .addButton((button) => {
-          button.setButtonText('改 ID…').setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.renameId).setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
             this.plugin.openRenameDefinitionModal('region', entry.id, entry.label)
           })
         })
         .addButton((button) => {
-          button.setButtonText('删除').setWarning().setTooltip(`删除自定义区域类型 ${entry.id}`).onClick(() => {
+          button.setButtonText(MODAL_ACTIONS.delete).setWarning().setTooltip(`删除自定义区域类型 ${entry.id}`).onClick(() => {
             this.plugin.requestRemoveCustomDefinition('region', entry.id)
           })
         })
@@ -1006,7 +1007,7 @@ export class DefinitionManagerModal extends Modal {
     }
 
     new Setting(containerEl)
-      .setName('新增自定义区域类型')
+      .setName(DEFINITION_MODAL_LABELS.addRegionType)
       .setDesc(atLimit ? `已达上限（${MAX_CUSTOM_REGION_TYPES} 个）` : 'ID 可以留空 —— 留空就按显示名自动生成。')
       .addText((text) => {
         text

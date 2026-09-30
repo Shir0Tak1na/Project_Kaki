@@ -20,6 +20,7 @@
  */
 
 import { Modal, Notice, Setting, type App } from 'obsidian'
+import { DIALOG_LABELS } from './strings.ts'
 
 /** 导入失败提示的时长（与导出对话框同一套约定，不超过 6000ms） */
 const IMPORT_FAIL_NOTICE_MS = 6000
@@ -96,7 +97,7 @@ export class ImportBundleModal extends Modal {
   override onOpen(): void {
     const { contentEl } = this
     contentEl.addClass('fc-import')
-    contentEl.createEl('h3', { cls: 'fc-import-title', text: '导入定义文件' })
+    contentEl.createEl('h3', { cls: 'fc-import-title', text: DIALOG_LABELS.importDefinitions })
     contentEl.createEl('div', { cls: 'fc-import-source', text: `来源：${this.options.source}` })
     // W4-3：导入落的是**当前地图的定义集** —— 这句话必须写在最显眼处（用户要知道改的是哪张图）
     const target = contentEl.createEl('div', { cls: 'fc-import-target', text: `导入到：${this.options.target}` })
@@ -165,7 +166,7 @@ export class ImportBundleModal extends Modal {
       .setName('全都是文件里的版本')
       .setDesc('把上面每一条都拨到「覆盖」—— 搬一整套线宽时用这个。')
       .addButton((button) =>
-        button.setButtonText('全部设为覆盖').onClick(() => {
+        button.setButtonText(DIALOG_LABELS.overwriteAll).onClick(() => {
           for (const conflict of this.options.conflicts) this.overwrite.add(conflict.id)
           for (const toggle of toggles) toggle.setValue(true)
           this.applyReplan()

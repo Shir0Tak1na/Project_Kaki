@@ -20,6 +20,7 @@ import {
   previewCalibrationTable,
   type ElevationCalibration,
 } from '../render/elevationUnits.ts'
+import { MODAL_ACTIONS } from './strings.ts'
 
 export interface ElevationCalibrationModalOptions {
   /** 当前标定；`null` = 这张地图还没有这一段（未标定） */
@@ -93,7 +94,7 @@ export class ElevationCalibrationModal extends Modal {
         })
       })
       .addButton((button) => {
-        button.setButtonText('保存').setCta()
+        button.setButtonText(MODAL_ACTIONS.save).setCta()
         this.saveButtonEl = button.buttonEl
         if (this.saveButtonEl !== null) this.saveButtonEl.dataset.fcElevation = 'save'
         button.onClick(() => this.submit())

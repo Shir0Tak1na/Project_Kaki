@@ -19,6 +19,7 @@
  */
 
 import { Modal, Notice, Setting, type App } from 'obsidian'
+import { MODAL_ACTIONS } from './strings.ts'
 
 /** 失败提示的时长（与其它对话框同一套约定，不超过 6000ms） */
 const DELETE_FAIL_NOTICE_MS = 6000
@@ -77,7 +78,7 @@ export class ConfirmDefinitionDeleteModal extends Modal {
         button.setButtonText('取消').onClick(() => this.close())
       })
       .addButton((button) => {
-        button.setButtonText('删除').setWarning()
+        button.setButtonText(MODAL_ACTIONS.delete).setWarning()
         this.confirmButtonEl = button.buttonEl
         if (this.confirmButtonEl !== null) this.confirmButtonEl.dataset.fcDeleteRole = 'confirm'
         button.onClick(() => {

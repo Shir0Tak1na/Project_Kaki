@@ -39,6 +39,7 @@ import { resolveTerrainStyle, type CustomTerrain } from './terrainCatalog.ts'
 import { biomeColorMap, resolveBiomeStyle, type CustomBiome } from './biomeCatalog.ts'
 import { MapLegend } from '../ui/MapLegend.ts'
 import { resolveVaultResourceUrl } from '../base/vaultResource.ts'
+import { MODAL_ACTIONS } from '../ui/strings.ts'
 
 export interface LayerStatus {
   canvasPath: string
@@ -367,7 +368,7 @@ export class MapLayerManager {
             : '留空将清除名称。',
         placeholder: hit.kind === 'path' ? '例如：北境商路' : '例如：北境领',
         initialValue: current,
-        cta: mode === 'create' ? '命名' : '保存',
+        cta: mode === 'create' ? '命名' : MODAL_ACTIONS.save,
         allowEmpty: true,
         fieldName: '名称',
       },

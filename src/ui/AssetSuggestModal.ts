@@ -25,6 +25,7 @@ import {
   listImagePaths,
   listNotePaths,
 } from '../base/assetFiles.ts'
+import { DIALOG_LABELS } from './strings.ts'
 
 /**
  * 候选属于哪一类。**必须由调用方显式给出**，不能在弹窗里靠扩展名猜 ——
@@ -56,7 +57,7 @@ export interface AssetPickerOptions {
 
 /** 搜索框占位文案：按类别给；调用方显式传了 `title` 就以它为准 */
 function defaultPickerPlaceholder(kind: AssetPickerKind): string {
-  if (kind === 'bundle') return '选择定义文件…'
+  if (kind === 'bundle') return DIALOG_LABELS.pickDefinitionFile
   if (kind === 'note') return '选择要链接的笔记…'
   if (kind === 'folder') return '选择导出位置…'
   return '选择库内图片…'

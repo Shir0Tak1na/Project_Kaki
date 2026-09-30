@@ -1006,6 +1006,61 @@ W4-1 / W4-2 让参数变成"每张地图各自一份"，于是定义文件这件
 - **`MapToolbar` 浮窗**只读 `drawModeLabel` / `drawModeHint`，因此新模式的浮窗文案是自动跟上的（没有单独改代码，也就没有单独的断言）。
 
 ---
+## 十一、C4 文案集中化（第二批：四个表面，2026-10-01）
+
+> 施工口径见 `docs/UI-COPY-REVIEW.md` §4/§8；判据与教训见 `docs/ENGINEERING-NOTES.md` §5.78。
+
+**做了什么**：把四个表面里**被 `scripts/smoke.mjs` / `tests/**` 逐字比较**的界面串收进
+`src/ui/strings.ts`（沿用「常量 + `as const` + 一句为什么收它」的写法），实现与断言共读同一常量。
+按表面分 11 组、共 **49 个具名常量**（`PANEL_SECTION_TITLES.definitions` 直接引用 `DEFINITION_MODAL_LABELS.title`，
+独立字面量 **48 个**）：
+
+| 表面 | 常量组（个数） |
+|---|---|
+| 设置页 | `SETTINGS_LABELS`(6) · `RAMP_AXIS_LABELS`(2) · `MODAL_ACTIONS`(4) |
+| 侧栏各面板 | `PANEL_SECTION_TITLES`(9) · `devToolsSectionTitle()` · `PANEL_TITLES`(4) |
+| 工具条 / 弹窗 | `DEFINITION_MODAL_LABELS`(5) · `DIALOG_LABELS`(3) · `SELECTION_TEXT`(4) |
+| 命令名与 Notice | `COMMAND_NAMES`(4) · `STATUS_SECTIONS`(3) · `NOTICES`(5) |
+
+**明确不收**（照 §5.78 的判据）：描述性长说明（`desc` / hint / 段首解释，如 `layerVisibility.ts` 的
+`describe` 长句、`SettingsTab` 的段首说明）、错误 / 诊断文案（`tests/**` 里被正则断言的多半是它们）、
+长说明里「提到了某个词」的片段（`hint.textContent.includes(地图定义)`）、以及测试夹具 / 用户输入的名字
+（`北境领` / `龙脊城` / `官道` 这类不是界面文案）。
+
+**四道门**：构建 **91 模块 / 1602.2 KiB** · `tsc` **0 错** · 单测 **700** · 冒烟 **52 场景 / 1626 断言**。
+
+**终局验证（C4 的核心判据）**：写了一次性脚本 `scripts/.c4-mutation.mjs`（跑完即删），对 **48 个独立字面量逐个**
+注入变异词（值后追加 `⟪变异⟫`）、**先 `build.mjs` 重建**再跑单测与冒烟。结果 **47/48 全绿**；
+唯一红的是 `SELECTION_TEXT.unfilled`：`src/render/selectionSet.ts` 与 `tests/selectionSet.test.ts`
+还各钉着一份字面量 —— 搬完这两处后重跑，**GREEN**。这正是判据的价值：「收进来了」不等于「收口了」。
+
+**空转（如实记）**：`RAMP_AXIS_LABELS.overMax` · `DEFINITION_MODAL_LABELS.addRegionType` · `PANEL_TITLES.typeMixed`
+没有任何断言引用它们，改词不会红 —— 它们的变异「验证」没有鉴别力（只有「实现仍能编译」兜底）。
+
+**没做 / 未验证**：
+
+- **工具条状态行的动态模板没收**：`空闲` / `选择 · 矩形框选 · 14 格` / `编辑：温度笔刷 · ＝12` /
+  `编辑：数值图层笔刷 · 请先填一个数值` 这些逐字断言过的模板仍在 `MapToolbar` / `MapEditor` 里写字面量，
+  下一批按同一判据收（它们带数字与校验原因，要做成函数而不是常量）；
+- **其余 ① 类串**：`MapLegend` / `MapBasesView` 的列名与摘要、`DefinitionManagerModal` 的一批
+  `.setName(名称 · <名>)` 模板、以及若干动态标题（`已选 N 格` 系列之外）未收；
+- **实机观感没看过**：本轮只改「字符串取自哪里」，不改任何文案内容，理论上界面一字不变；
+  但仍需在真实 Obsidian 里扫一眼设置页 / 侧栏 / 弹窗；
+- **部署**：只跑 `node scripts/deploy.mjs`（test-vault）；**没有**动真实库、没有 commit / push。
+
+**可判伪的实机验收步骤**：
+
+1. 打开设置页：底部仍有「定义文件（导入 / 导出）」两个按钮；「名称字体」输入框的浅色占位仍是
+   `留空 = 跟随主题`；开发者模式打开后「开发者选项：当前实际字号」组还在、标题没串成别的组；
+2. 侧栏面板从上到下的节标题仍是：数据显示 → 工具 → 笔刷 → 选择方式 → 编辑 → 视图 → 地图层 →
+   地图定义 → 文件与导出（少一个、多一个或换位都算错）；
+3. 点侧栏「地图定义」→「管理地图定义…」：弹窗标题是「地图定义」，四组折叠标题仍是地形 / 标记 /
+   路径类型 / 区域类型，每行按钮仍是「改 ID…」与「删除」；
+4. 命令面板搜「导出当前地图为 SVG」「打开地图面板」「启用/停用当前 Canvas 的地图层」三条仍在；
+5. 未启用地图层时点「导出当前地图为 SVG」：Notice 仍是「当前 Canvas 没有可导出的地图。请先启用地图层。」；
+   启用后状态报告的图层行仍是「图层：全部显示」与「图例：」。
+
+---
 ## 十、历史与归档
 
 - 本周期之前的实施记录：`archive/PHASE-0-RESULTS.md` / `archive/PHASE-1-NOTES.md` / `archive/PHASE-3-BASE-VIEW.md` /
