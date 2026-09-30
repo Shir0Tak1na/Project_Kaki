@@ -341,24 +341,22 @@ export interface CellDetailRow {
 }
 
 /**
- * 单格详情（信息卡的"单选"形态）：没有的字段写"未填"，**不猜 0**。
+ * 单格的**数据读数**（温度 / 深度 / 生物群系）—— 侧栏「数据显示」与画布信息卡共用这一份。
  *
- * 读数走 `formatFieldReading`（与画布 / 图例**同一个**格式化函数），所以"换成千米"之后
- * 卡片上的数字跟着变 —— 两处各写一遍必然分叉（本项目老毛病）。
+ * 为什么要单独一个函数（§2.6 定的分工落点）：侧栏是"选择"的家、卡片只做**进行中**的事，
+ * 于是同一行读数会在两处出现。两处各算一遍必然分叉 —— 这项目已经在"读数"上踩过一次
+ * （色带 / 展示单位改了口径而某一处没跟上，§5.65）。所以读数只在这里算，两边都调它。
+ *
+ * 没有的字段写「未填」，**不猜 0**（0 ℃ / 海平面都是合法读数，猜出来的 0 与"没量过"是两回事）。
  */
-export function describeCellDetails(
+export function describeCellReadings(
   document: MapDocument,
   key: string,
   styles: OverlayStyles,
 ): CellDetailRow[] {
-  const axial = parseCellKey(key)
-  if (axial === null) return [{ label: '格', value: key }]
   const cell = document.terrain[key]
   const calibration = document.elevation ?? DEFAULT_ELEVATION_CALIBRATION
-  const rows: CellDetailRow[] = [
-    { label: '坐标', value: `(${axial.q}, ${axial.r})` },
-    { label: '地形', value: cell?.t ?? '未填' },
-  ]
+  const rows: CellDetailRow[] = []
   for (const spec of OVERLAY_FIELDS) {
     if (!spec.numeric) continue
     const value = spec.read(cell)
@@ -372,4 +370,25 @@ export function describeCellDetails(
   }
   rows.push({ label: '生物群系', value: cell?.biome ?? '未填' })
   return rows
+}
+
+/**
+ * 单格详情（信息卡的"单选"形态）：没有的字段写"未填"，**不猜 0**。
+ *
+ * 读数走 `formatFieldReading`（与画布 / 图例**同一个**格式化函数），所以"换成千米"之后
+ * 卡片上的数字跟着变 —— 两处各写一遍必然分叉（本项目老毛病）。
+ */
+export function describeCellDetails(
+  document: MapDocument,
+  key: string,
+  styles: OverlayStyles,
+): CellDetailRow[] {
+  const axial = parseCellKey(key)
+  if (axial === null) return [{ label: '格', value: key }]
+  const cell = document.terrain[key]
+  return [
+    { label: '坐标', value: `(${axial.q}, ${axial.r})` },
+    { label: '地形', value: cell?.t ?? '未填' },
+    ...describeCellReadings(document, key, styles),
+  ]
 }

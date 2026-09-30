@@ -34,6 +34,7 @@ import { pointerToWorld, readScale, type CanvasHandle } from '../canvas/CanvasAd
 import { TERRAIN_TYPES, type TerrainType } from '../data/mapDocument.ts'
 import { isClickGesture } from '../render/markerPlacement.ts'
 import type { SelectionOperation } from '../render/selectionSet.ts'
+import type { HoverReadout } from './selection.ts'
 import type { EditorTool, MapEditor } from './MapEditor.ts'
 
 export interface MapInteractionOptions {
@@ -53,6 +54,14 @@ export interface MapInteractionOptions {
   getUiExclusions?: () => Array<HTMLElement | null>
   /** 悬停预览（高亮笔刷落点），传 null 清除 */
   onHover: (hover: { x: number; y: number; radius: number } | null) => void
+  /**
+   * 悬停**读数**（§2.6）：指针下面是什么（命中对象报对象名、否则报格读数）。
+   *
+   * 与 `onHover`（笔刷落点高亮，只在绘制模式下有意义）分开：这一条在**选择模式**下工作，
+   * 是"信息卡只做进行中的事"里那件"进行中"的事。读数的**计算**在编辑器里
+   * （命中顺序与点击同一套），这里只负责"指针动了 / 离开了"。
+   */
+  onHoverReadout?: (readout: HoverReadout) => void
   onModeChanged: (mode: 'select' | 'paint') => void
   /** 请求在某个世界坐标放置标记 / 文字标注（由上层弹对话框并写入文档） */
   onPlaceRequest?: (tool: 'marker' | 'label', world: { x: number; y: number }) => void
@@ -331,8 +340,22 @@ export class MapInteraction {
         return
       }
 
-      if (editor.mode !== 'paint') return
-      if (!insideHost(event)) return
+      if (editor.mode !== 'paint') {
+        /**
+         * **选择模式下的悬停读数**（§2.6）：指针下面是什么 —— 命中对象报对象名、
+         * 否则报格读数（判定在编辑器里，与点击共用同一套命中顺序）。
+         * 指针移出画布时上报 `none`：否则卡片会一直停在最后一次读数上。
+         */
+        if (!insideHost(event)) {
+          this.options.onHoverReadout?.({ kind: 'none' })
+          return
+        }
+        const world = this.worldFromEvent(event)
+        if (!world) return
+        const scale = readScale(this.options.handle.canvas).scale ?? 1
+        this.options.onHoverReadout?.(editor.probeHoverAt(world, SHAPE_HIT_TOLERANCE_PX / scale))
+        return
+      }
 
       const world = this.worldFromEvent(event)
       if (!world) return
@@ -394,8 +417,16 @@ export class MapInteraction {
               const scale = readScale(this.options.handle.canvas).scale ?? 1
               editor.selectAtPoint(world, SHAPE_HIT_TOLERANCE_PX / scale)
             } else {
-              // Shift / Alt 的单击形态：只作用于"这一格"，不是拖动
-              editor.toggleCellAt(world, this.selectOperation)
+              /**
+               * Shift / Alt 的单击形态：**先问对象**，命中对象就并入 / 移出**对象选择**
+               * （§2.6 授权的"同类多对象选择"）；没命中对象才回退到既有的"这一格"语义。
+               *
+               * 顺序不能反：Shift 点一个标记，用户想要的是"把这个标记也选上"，
+               * 而不是"选中它底下那一格"。而命中地块 / 空处时格语义照旧（§C.1 的手感）。
+               */
+              const scale = readScale(this.options.handle.canvas).scale ?? 1
+              const handled = editor.toggleObjectAt(world, SHAPE_HIT_TOLERANCE_PX / scale, this.selectOperation)
+              if (!handled) editor.toggleCellAt(world, this.selectOperation)
             }
           }
         }

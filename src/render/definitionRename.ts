@@ -10,6 +10,7 @@
  */
 
 import type { MapDocument } from '../data/mapDocument.ts'
+import type { MapDefinitionSet } from '../data/mapDefinitions.ts'
 import { markerIdProblem, normalizeMarkerId } from './markerCatalog.ts'
 import { normalizePathTypeId, pathTypeIdProblem } from './pathTypeCatalog.ts'
 import { normalizeRegionTypeId, regionTypeIdProblem } from './regionTypeCatalog.ts'
@@ -126,6 +127,47 @@ export interface RenameResult {
   document: MapDocument
   /** 实际改动的引用条数（0 = 这份文档不受影响，调用方可以不写盘） */
   changed: number
+}
+
+/**
+ * 把**定义集里**某一类的定义 ID 换掉（定义随图：定义本体住在地图文件里）。
+ *
+ * 为什么与 `renameReferences` 分开：那个改的是"对象引用的类型 ID"（`paths[].type` 之类），
+ * 这个改的是 `definitions` 段里那一条定义自己 —— 两件事都必须做，
+ * 只做前者会留下一条没人引用的旧定义，只做后者会让所有已画对象变成"未知"。
+ *
+ * 返回**新集合**；没改到时**原样返回同一个对象引用**，调用方据此判断"要不要写盘"
+ * （与 `renameReferences` 用 `changed: 0` 表达同一件事，口径一致）。
+ */
+export function renameDefinitionEntry(
+  set: MapDefinitionSet,
+  kind: DefinitionKind,
+  fromId: string,
+  toId: string,
+): MapDefinitionSet {
+  if (fromId === toId) return set
+  const rename = <T extends { id: string }>(list: T[]): T[] | null => {
+    if (!list.some((item) => item.id === fromId)) return null
+    return list.map((item) => (item.id === fromId ? { ...item, id: toId } : item))
+  }
+  switch (kind) {
+    case 'terrain': {
+      const list = rename(set.terrains)
+      return list === null ? set : { ...set, terrains: list }
+    }
+    case 'marker': {
+      const list = rename(set.markers)
+      return list === null ? set : { ...set, markers: list }
+    }
+    case 'path': {
+      const list = rename(set.pathTypes)
+      return list === null ? set : { ...set, pathTypes: list }
+    }
+    case 'region': {
+      const list = rename(set.regionTypes)
+      return list === null ? set : { ...set, regionTypes: list }
+    }
+  }
 }
 
 /**

@@ -1,44 +1,26 @@
 /**
  * 插件设置。
  *
- * ## 这一页现在只管三件事（A3 瘦身之后）
+ * ## 这一页现在只管这些（存储轮 W4-1b 之后的定稿）
  *
  * 1. **引导**：顶部一份「快速上手」清单（讲怎么开始画、以及"改单个对象去侧栏"）；
- * 2. **全局开关**：字号、开发者模式、`图层`（默认收起，含图例）；
- * 3. **新对象默认值**：路径类型与区域类型的参数、名称字体族、恢复出厂（默认收起）；
- * 4. **定义文件（导入 / 导出）**：从侧栏「文件与导出」组搬来（施工文件 §F.2）——
- *    它不依赖地图层、平时也不在画布上做，命令面板里那两条命令照旧存在（同一个 `run`）。
+ * 2. **全局开关**：字号、开发者模式（`图层` 一组已经不在这里 —— 见 §F.1）；
+ * 3. **新对象默认值**：只剩**名称字体族** + 一行指路。路径 / 区域类型的**参数**
+ *    在 W4-1b 搬进了「地图定义…」弹窗 —— 定义随图之后它们是**每张地图各自一份**，
+ *    而这一页的设置是全局的（两处都能改就必然分叉，§1 判据 1）；
+ * 4. **数据层**：色带 / 越界两端 / 不透明度 / 显示方式（**按地图**，见 `DATA-LAYER-UI-BRIEF`）；
+ * 5. **定义文件（导入 / 导出）**：从侧栏「文件与导出」组搬来（施工文件 §F.2）。
  *
  * ## 为什么定义管理搬走了
  *
- * 分界线不是"重不重要"，而是**改动会不会波及已画的对象**：
- * - 自定义地形 / 标记的**定义内容**会影响已画对象 → 属于「定义」，搬进「地图定义…」弹窗
- *   （面板 → 地图定义 → 管理地图定义…，见 `DefinitionManagerModal`）；
- * - 路径类型 / 区域类型的**参数**只影响**新画**的对象（已画对象把参数存在地图文件里）
- *   → 它们是「新对象默认值」，留在这里。
- *
- * 一条重要边界：样式设置只决定**新画的对象**用什么颜色。
- * 已经画好的对象把颜色存在地图文件里（`path.color` / `region.color`），
- * 改设置**不会**悄悄改掉你已有的地图。
+ * 分界线是**改动会不会波及已画的对象 / 是不是"这张图的事实"**：
+ * - 自定义地形 / 标记 / 路径类型 / 区域类型的**定义内容**都属于地图文件（方案 B）
+ *   → 全部搬进「地图定义」弹窗（`DefinitionManagerModal`）；
+ * - **名称字体族**只是"怎么看" → 留在这一页。
  */
 
 import { PluginSettingTab, Setting, type App } from 'obsidian'
 import type ProjectKakiPlugin from '../main.ts'
-import {
-  PATH_CAP_LABELS,
-  PATH_JOIN_LABELS,
-  describePathTypeParams,
-  isDefaultPathTypeStyles,
-  listPathTypeEntries,
-  parsePathDashInput,
-  resolvePathType,
-} from '../render/pathTypeCatalog.ts'
-import {
-  describeRegionTypeParams,
-  isDefaultRegionTypeStyles,
-  resolveRegionType,
-} from '../render/regionTypeCatalog.ts'
-import { LAYER_TABLE, isLayerVisible } from '../render/layerVisibility.ts'
 import { OVERLAY_FIELDS, type OverlayFieldSpec } from '../render/overlayFields.ts'
 import { createCollapsibleGroup } from './collapsible.ts'
 import { QUICK_START_SETTINGS } from './quickStart.ts'
@@ -62,18 +44,15 @@ export {
   LABEL_SCALE_MAX,
   LABEL_SCALE_MIN,
   LABEL_SCALE_STEP,
+  normalizeExportFolder,
   normalizeLabelScale,
   normalizeSettings,
   paletteOf,
 } from './settingsModel.ts'
-export type { CartographerSettings } from './settingsModel.ts'
+export type { CartographerSettings, MapViewSettings } from './settingsModel.ts'
 
 export class CartographerSettingTab extends PluginSettingTab {
   private readonly plugin: ProjectKakiPlugin
-  /** 路径类型区底部那一行就地提示（参数编辑出错时显示在**出问题的那一节**下面） */
-  private pathTypeNoteEl: HTMLElement | null = null
-  /** 区域类型区底部那一行就地提示（同上） */
-  private regionTypeNoteEl: HTMLElement | null = null
   constructor(app: App, plugin: ProjectKakiPlugin) {
     super(app, plugin)
     this.plugin = plugin
@@ -202,48 +181,16 @@ export class CartographerSettingTab extends PluginSettingTab {
         )
     }
 
-    // ---- 2. 图层（地形 / 网格 / 区域 / 路径 / 标记 / 名称）：默认收起 ----
-    const layerGroup = createCollapsibleGroup(containerEl, {
-      title: '图层',
-      role: 'layers',
-      cls: 'fc-settings-group',
-      titleCls: 'fc-settings-group-title',
-    })
-    layerGroup.createEl('div', {
-      cls: 'fc-settings-note',
-      text:
-        '图层开关只决定"看不看"，不写进地图数据 —— 关掉某层再打开，内容原样还在。' +
-        '网格也在这一组里（画布工具条上的几个按钮切的是同一份设置）。',
-    })
-
-    for (const spec of LAYER_TABLE) {
-      new Setting(layerGroup)
-        .setName(`显示${spec.label}`)
-        .setDesc(spec.describe)
-        .addToggle((toggle) =>
-          toggle.setValue(isLayerVisible(settings.layers, spec.id)).onChange((value) => {
-            void this.plugin.setLayerVisible(spec.id, value)
-            this.rerenderKeepingScroll()
-          }),
-        )
-    }
-
-    new Setting(layerGroup)
-      .setName('显示图例')
-      .setDesc(
-        '在画布右下角显示图例。内容由地图上**实际有的**地形、路径、区域生成（不是固定清单），' +
-          '所以它永远与画面一致；工具条上也有一个「图例」按钮。',
-      )
-      .addToggle((toggle) =>
-        toggle.setValue(settings.showLegend).onChange((value) => {
-          void this.plugin.setShowLegend(value)
-          this.rerenderKeepingScroll()
-        }),
-      )
+    // ---- 2. 图层开关**不在这一页**（UI 整理 W1c）----
+    //
+    // 用户 m01803 第 6 条（逐字）：「图层开关属于高频使用的功能，建议只留在侧栏里。」
+    // ⇒ 侧栏「底图」「地物」两组是它们的**唯一家**（画布工具条那个「图例」按钮是画布表面的快捷入口）。
+    // 这一页原来那一组（9 个图层开关 + 「显示图例」）已整组移除 —— 同一件事在两个表面各长一份
+    // 就是"一个设置两个家"（§1 判据 1 / §5.60），而且它正是"改成中英不一致、两处说法不同"的来源。
 
     // ---- 3. 数据层（温度 / 深度…）：默认收起 ----
     //
-    // **开关不在这里**：它和别的图层一起在「图层」一组与侧栏面板顶部（表驱动，加一层只加一行）。
+    // **开关不在这里**：它在侧栏「底图」一组里（表驱动，加一层只加一行）。
     // 这一组只管"怎么看"：色带、越界两端、不透明度、要不要在每个格上写数值。
     const dataGroup = createCollapsibleGroup(containerEl, {
       title: '数据层',
@@ -254,15 +201,19 @@ export class CartographerSettingTab extends PluginSettingTab {
     dataGroup.createEl('div', {
       cls: 'fc-settings-note',
       text:
-        '数据层的值（温度、深度…）存在地图文件的格上；这里只决定怎么把它画出来。' +
-        '每一层的开关在「图层」一组里（侧栏面板顶部也有同一组）。' +
+        '数据层的值（温度、深度 / 海拔、生物群系）存在地图文件的格上；这里只决定怎么把它画出来。' +
+        '每一层的开关在侧栏面板的「底图」一组里（这一页不再重复摆一份）。' +
         '改了色带下一帧就是新颜色，不用重开画布。',
     })
     for (const spec of OVERLAY_FIELDS) {
       this.renderOverlayField(dataGroup, spec)
     }
 
-    // ---- 4. 新对象默认值（路径类型参数 / 区域类型参数 / 字体 / 恢复出厂）：默认收起 ----
+    // ---- 4. 新对象默认值（只有名称字体族；路径 / 区域类型的参数搬进了「地图定义…」）----
+    //
+    // ⚠️ 2026-09-30（存储轮 W4-1b）：路径类型与区域类型的**参数**从这一页搬进了
+    // 「地图定义…」弹窗 —— 因为"定义随图"之后它们是**这张地图**的那一套（改一张图不该动另一张）。
+    // 字体族留在这里：它是"怎么看"（使用者的偏好），按 §5.1 的判据不进地图文件、也不按图分份。
     const defaults = createCollapsibleGroup(containerEl, {
       title: '新对象默认值',
       role: 'defaults',
@@ -273,13 +224,10 @@ export class CartographerSettingTab extends PluginSettingTab {
       cls: 'fc-settings-note',
       // 设置说明是纯文本（不是 Markdown），所以这里不要写 ** 强调
       text:
-        '这些参数只决定新画的路径与区域用什么样式。已经画好的对象把样式存在地图文件里' +
-        '（path.color / path.width / path.dash / path.cap / path.join），改设置不会改动它们。',
+        '路径类型与区域类型的参数（颜色 / 线宽 / 虚线 / 填充 / 边框）现在是每张地图各自一份，' +
+        '在「地图定义…」弹窗里改（内置的也能改）。它们只决定新画的路径与区域长什么样 —— ' +
+        '已经画好的对象把样式存在地图文件里，改参数不会改动它们。',
     })
-
-    this.renderPathTypes(defaults, settings)
-
-    this.renderRegionTypes(defaults, settings)
 
     new Setting(defaults)
       .setName('名称字体族')
@@ -297,31 +245,12 @@ export class CartographerSettingTab extends PluginSettingTab {
           }),
       )
 
-    const dirty =
-      !isDefaultPathTypeStyles(settings.pathTypes) ||
-      !isDefaultRegionTypeStyles(settings.regionTypes) ||
-      settings.labelFontFamily.length > 0
-    new Setting(defaults)
-      .setName('恢复出厂样式')
-      .setDesc(
-        dirty
-          ? '当前样式已被改动。点这里把内置 4 种路径类型与 6 种区域类型的参数、字体恢复为出厂默认' +
-            '（自定义路径类型 / 区域类型的定义不会被删）。'
-          : '当前就是出厂默认样式。',
-      )
-      .addButton((button) =>
-        button.setButtonText('恢复默认').onClick(() => {
-          void this.plugin.resetStylePalette()
-          this.rerenderKeepingScroll()
-        }),
-      )
-
     // 定义管理搬到「地图定义…」之后，这里只留一行指路 —— 用户不该找不到增删改的入口
     const hint = defaults.createEl('div', { cls: 'fc-settings-note', text: '' })
     hint.dataset.fcSettingsRole = 'definitions-hint'
     hint.textContent =
-      '新增 / 删除 / 改 ID 定义请到「地图定义…」：侧栏面板 →「地图定义」→「管理地图定义…」' +
-      '（自定义地形、标记、路径类型、区域类型都在那里增删改）。'
+      '新增 / 删除 / 改 ID、以及路径与区域类型的参数，都在「地图定义…」里：' +
+      '侧栏面板 →「地图定义」→「管理地图定义…」（自定义地形、标记、路径类型、区域类型都在那里）。'
 
     // ---- 5. 地图面板 ----
     new Setting(containerEl)
@@ -343,7 +272,9 @@ export class CartographerSettingTab extends PluginSettingTab {
     bundleHint.dataset.fcSettingsRole = 'bundle-hint'
     bundleHint.textContent =
       '导出：把自定义地形、标记、路径类型与区域类型打包成一份 JSON（写在库根目录，同名不覆盖）。' +
-      '导入：从库里的 .json 文件里挑一份，先看确认对话框再决定 —— 导入是只增不删的，同 ID 保留你现有的定义。'
+      '导入：从库里的 .json 文件里挑一份，先看确认对话框再决定 —— 导入是只增不删的，同 ID 保留你现有的定义。' +
+      '注意：这两个动作现在作用于「新建地图的模板」那一份（定义随图之后，按地图导入 / 导出、' +
+      '以及同名项的选择还在路上）。'
     const bundleRow = containerEl.createEl('div', { cls: 'fc-settings-actions' })
     bundleRow.dataset.fcSettingsRole = 'bundle-actions'
     const exportBundle = bundleRow.createEl('button', { cls: 'fc-settings-action', text: '导出定义文件…' })
@@ -419,7 +350,9 @@ export class CartographerSettingTab extends PluginSettingTab {
    */
   private overlaySectionHost(): OverlaySectionHost {
     return {
-      getOverlayStyles: () => this.plugin.getSettings().overlays,
+      // W4-2：色带 / 不透明度按**当前地图**解析（设置页与侧栏面板共用同一份控件渲染，
+      // 所以这一句必须跟 `MapPanelDeps.getOverlayStyles` 逐字同源）
+      getOverlayStyles: () => this.plugin.overlaysFor(this.plugin.activeViewMapPath()),
       setOverlayStyle: (field, patch) => this.plugin.setOverlayStyle(field, patch),
       resetOverlayRamp: (field) => this.plugin.resetOverlayRamp(field),
       setOverlayCategoryColor: (field, categoryId, color) =>
@@ -430,205 +363,5 @@ export class CartographerSettingTab extends PluginSettingTab {
       requestRerender: () => this.rerenderKeepingScroll(),
       heading: true,
     }
-  }
-
-
-  /**
-   * 路径类型的**参数**（内置 4 种 + 自定义项）。
-   *
-   * 为什么每种类型用**两个** Setting 而不是七个：一屏要放下最多 36 种类型，
-   * 每个字段一行会让用户永远滚不到底。按"视觉（颜色/端点/连接）"与"尺寸（线宽/虚线）"
-   * 分成两行，仍然每行都有名字与说明。
-   *
-   * ⚠️ 这里**没有**「新增 / 删除 / 改 ID」—— 那些是**定义**层面的改动，搬到了「地图定义…」弹窗
-   * （这一节只管"新画出来的路径默认长什么样"）。底部的指引行会告诉用户去哪找。
-   */
-  private renderPathTypes(containerEl: HTMLElement, settings: CartographerSettings): void {
-    const pathTypes = listPathTypeEntries(settings.pathTypes)
-
-    containerEl.createEl('h3', { text: '路径类型' })
-    containerEl.createEl('div', {
-      cls: 'fc-settings-note',
-      text:
-        '每种路径类型的颜色、线宽、虚线、端点与连接都在这里改。内置 4 种的名字固定，' +
-        '自定义类型的名字在「地图定义…」里改。' +
-        '虚线填成 实-空 成对的数字（例如 14,10），留空 = 实线。',
-    })
-
-    for (const entry of pathTypes) {
-      const resolved = resolvePathType(entry.id, settings.pathTypes)
-      const isCustom = !resolved.builtin
-      const dashText = entry.params.dash.join(',')
-
-      new Setting(containerEl)
-        .setName(`${entry.label}${isCustom ? '（自定义）' : ''}`)
-        .setDesc(`ID ${entry.id} · ${describePathTypeParams(entry.params)}`)
-        .addColorPicker((picker) =>
-          picker.setValue(entry.params.color).onChange((value) => {
-            void this.plugin.updatePathType(entry.id, { color: value }).then((result) => {
-              if (!result.ok) this.setPathTypeNoteText(this.noteProblem(result.problem))
-            })
-          }),
-        )
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOptions(PATH_CAP_LABELS)
-            .setValue(entry.params.cap)
-            .onChange((value) => {
-              void this.plugin.updatePathType(entry.id, { cap: value })
-            }),
-        )
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOptions(PATH_JOIN_LABELS)
-            .setValue(entry.params.join)
-            .onChange((value) => {
-              void this.plugin.updatePathType(entry.id, { join: value })
-            }),
-        )
-
-      new Setting(containerEl)
-        .setName(`线宽与虚线 · ${entry.label}`)
-        .setDesc('线宽是世界单位（1–40）；虚线留空 = 实线')
-        .addText((text) =>
-          text
-            .setPlaceholder('线宽，例如 5')
-            .setValue(String(entry.params.width))
-            .onChange((value) => {
-              void this.plugin.updatePathType(entry.id, { width: value })
-            }),
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder('虚线，例如 14,10；留空 = 实线')
-            .setValue(dashText)
-            .onChange((value) => {
-              const parsed = parsePathDashInput(value)
-              if (!parsed.ok) {
-                this.setPathTypeNoteText(`「${entry.label}」的虚线：${parsed.problem}`)
-                return
-              }
-              void this.plugin.updatePathType(entry.id, { dash: parsed.dash }).then((result) => {
-                this.setPathTypeNoteText(result.ok ? '' : `「${entry.label}」的虚线：${result.problem}`)
-              })
-            }),
-        )
-    }
-
-    const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
-    note.dataset.fcNote = 'pathType'
-    this.pathTypeNoteEl = note
-  }
-
-  /**
-   * 把"为什么不行"变成"接下来怎么办"。
-   *
-   * 用户实测反馈：「输错也不知道怎么改」。原来提示只写原因（例如"虚线必须是成对数字"），
-   * 用户得自己推出两件事：**这一项没被写进去**、**改哪里**。
-   * 这里统一补上后半句 —— 文案只有一份，改一次全对。
-   */
-  private noteProblem(problem: string): string {
-    return `${problem}（这一项还没写进设置；改成合法值即可，其它内容不会丢）`
-  }
-
-  /** 路径类型区底部那一行提示 */
-  private setPathTypeNoteText(text: string): void {
-    if (this.pathTypeNoteEl) this.pathTypeNoteEl.textContent = text
-  }
-
-  /**
-   * 区域类型的**参数**（内置 6 种 + 自定义项）。
-   *
-   * 与 `renderPathTypes` 完全同构（同样的两行布局与就地提示）：
-   * 一屏要放下最多 38 种类型，每个字段一行会让用户永远滚不到底。
-   * 区别只在参数不同 —— 区域是"填充色 / 不透明度 / 边框色"与"边框宽 / 边框虚线"。
-   * 同样**没有**增删改：那些在「地图定义…」里。
-   */
-  private renderRegionTypes(containerEl: HTMLElement, settings: CartographerSettings): void {
-    const regionTypes = settings.regionTypes
-
-    containerEl.createEl('h3', { text: '区域类型' })
-    containerEl.createEl('div', {
-      cls: 'fc-settings-note',
-      text:
-        '每种区域类型的填充色、不透明度、边框色、边框宽与边框虚线都在这里改。' +
-        '内置 6 种的名字固定（王国/帝国/公国/教区/荒原/海域），自定义类型的名字在「地图定义…」里改。' +
-        '边框色留空 = 跟随填充色；边框宽填 0 = 不画边框；边框虚线留空 = 实线。',
-    })
-
-    for (const entry of regionTypes) {
-      const resolved = resolveRegionType(entry.id, regionTypes)
-      const isCustom = !resolved.builtin
-      const dashText = entry.params.borderDash.join(',')
-
-      new Setting(containerEl)
-        .setName(`${entry.label}${isCustom ? '（自定义）' : ''}`)
-        .setDesc(`ID ${entry.id} · ${describeRegionTypeParams(entry.params)}`)
-        .addColorPicker((picker) =>
-          picker.setValue(entry.params.color).onChange((value) => {
-            void this.plugin.updateRegionType(entry.id, { color: value }).then((result) => {
-              if (!result.ok) this.setRegionTypeNoteText(this.noteProblem(result.problem))
-            })
-          }),
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder('不透明度 0–1，例如 0.22')
-            .setValue(String(entry.params.opacity))
-            .onChange((value) => {
-              void this.plugin.updateRegionType(entry.id, { opacity: value }).then((result) => {
-                this.setRegionTypeNoteText(result.ok ? '' : `「${entry.label}」的不透明度：${result.problem}`)
-              })
-            }),
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder('边框色（留空 = 跟随填充色）')
-            .setValue(entry.params.borderColor ?? '')
-            .onChange((value) => {
-              void this.plugin.updateRegionType(entry.id, { borderColor: value })
-            }),
-        )
-
-      new Setting(containerEl)
-        .setName(`边框 · ${entry.label}`)
-        .setDesc('边框宽是世界单位（0–40，0 = 不画边框）；虚线留空 = 实线')
-        .addText((text) =>
-          text
-            .setPlaceholder('边框宽，例如 3')
-            .setValue(String(entry.params.borderWidth))
-            .onChange((value) => {
-              void this.plugin.updateRegionType(entry.id, { borderWidth: value })
-            }),
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder('虚线，例如 12,8；留空 = 实线')
-            .setValue(dashText)
-            .onChange((value) => {
-              const parsed = parsePathDashInput(value)
-              if (!parsed.ok) {
-                this.setRegionTypeNoteText(`「${entry.label}」的边框虚线：${parsed.problem}`)
-                return
-              }
-              void this.plugin
-                .updateRegionType(entry.id, { borderDash: parsed.dash })
-                .then((result) => {
-                  this.setRegionTypeNoteText(
-                    result.ok ? '' : `「${entry.label}」的边框虚线：${result.problem}`,
-                  )
-                })
-            }),
-        )
-    }
-
-    const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
-    note.dataset.fcNote = 'regionType'
-    this.regionTypeNoteEl = note
-  }
-
-  /** 区域类型区底部那一行提示 */
-  private setRegionTypeNoteText(text: string): void {
-    if (this.regionTypeNoteEl) this.regionTypeNoteEl.textContent = text
   }
 }

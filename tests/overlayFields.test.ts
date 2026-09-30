@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 数据层的字段描述表与样式规范化（温度是第一份模板）。
  *
  * 这一组断言盯的是三件事：
@@ -143,16 +143,23 @@ test('数据层的字段不许声明取值区间（色带两端不是数据的�
   }
 })
 
-test('深度的出厂样式：高处浅米 → 海平面浅蓝 → 深海深蓝，越界是纯白 / 近黑蓝（不是温度那对蓝红）', () => {
+test('深度的出厂样式：低 → 高 = 黑 → 白，越界就是两端极色（不是温度那对蓝红）', () => {
   const style = overlayField('depth').defaultStyle()
   assert.deepEqual(
     style.ramp.stops.map((stop) => stop.value),
     [-4000, 0, 4000],
     '0 = 海平面，正 = 向下（负值是高海拔那一端）',
   )
-  assert.equal(style.ramp.stops[1]!.color, '#7dd3fc', '海平面用浅蓝标出来')
-  assert.equal(style.ramp.under.color, '#ffffff', '高于最高峰：纯白底（温度那套纯蓝 / 纯红是体感语言，不通用）')
-  assert.equal(style.ramp.over.color, '#0b1f4b', '深于最深：近黑蓝')
+  assert.deepEqual(
+    style.ramp.stops.map((stop) => stop.color),
+    ['#000000', '#808080', '#ffffff'],
+    '从低到高：黑 → 中灰 → 白',
+  )
+  assert.equal(style.ramp.under.color, '#000000', '比最高峰更高：纯黑（温度那套蓝 / 红是体感语言，不通用）')
+  assert.equal(style.ramp.over.color, '#ffffff', '深于最深：纯白')
+  assert.equal(style.ramp.under.farColor, style.ramp.under.color, '两端本身就是极色 ⇒ 越界不再另做渐变')
+  assert.equal(style.ramp.over.farColor, style.ramp.over.color)
+  assert.equal(style.ramp.over.textColor, '#111827', '纯白底上必须是深字')
   assert.equal(style.ramp.interpolate, 'oklab')
   assert.equal(style.opacity, 0.5)
   assert.equal(style.unit, 'm', '出厂展示单位是米')

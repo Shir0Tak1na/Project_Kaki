@@ -1614,6 +1614,14 @@ function makeVault(initialFiles = new Map()) {  const files = new Map()
   const listeners = { modify: [], create: [], delete: [], rename: [] }
   /** 二进制写入的原始字节（PNG 导出用）：`files` 里放占位串，字节单独留在这里供断言 */
   const binaryWrites = new Map()
+  /**
+   * 被要求创建的目录（真实 `vault.createFolder` 会真的建出目录）。
+   *
+   * 桩里以前是空实现：于是"导出到还不存在的目录时先把它建出来"这条承诺
+   * 在冒烟里**无法断言**（看起来像"建目录"这一步根本不存在）。
+   * 记下来即可 —— 断言只需要知道"我们有没有要求建"。
+   */
+  const createdFolders = []
   let clock = 1
 
   const fileFor = (path) => {
@@ -1679,7 +1687,12 @@ function makeVault(initialFiles = new Map()) {  const files = new Map()
     },
     /** 供断言：某个路径被写入的二进制字节 */
     binaryFiles: binaryWrites,
-    async createFolder() {},
+    /** 真实语义：建出这个目录（嵌套路径会一并建出父级）。桩只记账，供断言 */
+    async createFolder(path) {
+      createdFolders.push(String(path))
+    },
+    /** 供断言：被要求创建过的目录 */
+    createdFolders,
     getAbstractFileByPath(path) {
       return files.has(path) ? fileFor(path) : null
     },
@@ -2390,6 +2403,35 @@ console.log('\n场景 6：地图文档的创建、绑定与索引')
   check('加载回来没有任何问题', loaded.document !== null && loaded.issues.length === 0, JSON.stringify(loaded.issues))
   check('空地图统计为零', summarizeMapDocument(loaded.document).cells === 0)
   check('库内地图清点正确', store.listMapFiles().length === 1)
+
+  // ---- 定义随图（v2，方案 B）：新建的地图把"当时的定义集"写进自己的文件 ----
+  // 用户 m01845 的裁定是"分享一张图 ⇒ 对方拿到完整定义，不再出现未定义类型"。
+  // 这一节只钉**新建**这一条路；"老图一个字节都不动"由单测钉（`tests/mapDefinitions.test.ts`）。
+  const block = plugin.libraryDefinitionsBlock()
+  check(
+    '插件层把库级那一份定义装成 definitions 块（路径 / 区域类型的内置项跟着走 —— 它们的参数可改）',
+    (block.pathTypes ?? []).length === 4 && (block.regionTypes ?? []).length === 6,
+    JSON.stringify({ pathTypes: (block.pathTypes ?? []).length, regionTypes: (block.regionTypes ?? []).length }),
+  )
+  const withDefs = await store.createMap({ name: '带定义', folder: 'Maps', definitions: block })
+  const withDefsText = app.vault.files.get(withDefs.path) ?? ''
+  check(
+    '给了定义的新图：文件里真的写着 definitions 段，且版本升到 2',
+    withDefsText.includes('"definitions"') && withDefsText.includes('"version": 2'),
+    withDefsText.slice(0, 300),
+  )
+  check(
+    '定义段里带着那 4 条内置路径类型（"这张图用的是哪套线宽"在文件里是完整的）',
+    withDefsText.includes('"pathTypes"') && withDefsText.includes('"river"'),
+    withDefsText.slice(0, 500),
+  )
+  const plain = await store.createMap({ name: '无定义', folder: 'Maps' })
+  const plainText = app.vault.files.get(plain.path) ?? ''
+  check(
+    '没给定义的新图：**不写** definitions 段（空表不留键，别让每张图都背一串空数组）',
+    !plainText.includes('"definitions"'),
+    plainText.slice(0, 240),
+  )
 }
 
 console.log('\n场景 7：保存往返、防抖与安全闸')
@@ -3820,23 +3862,16 @@ console.log('\n场景 18：名称字号的实测标定与用户可调（"字太�
   check('设置界面已渲染 Project Kaki 标题', heading?.textContent === 'Project Kaki', String(heading?.textContent))
   const sliderSetting = FakeSetting.created.find((setting) => setting.slider)
   check('设置界面有字号滑块', sliderSetting !== undefined)
-  // A3：设置页原来那一行「显示六边形网格」已撤掉 —— 它和图层开关是**同一个值**（`setLayerVisible`
-  // 是唯一入口），留两个入口只会让人以为是两件事。现在网格开关只出现在「图层」折叠组里
-  // （工具条上还有同一个开关，那是画图时手边需要的那个）。
+  // A3 撤掉了那行重复的「显示六边形网格」；W1c 又把**整组**图层开关搬出了设置页
+  // （用户 m01803 第 6 条：「图层开关属于高频使用的功能，建议只留在侧栏里。」）⇒
+  // 现在设置页里**一个网格开关都没有**，网格只由侧栏「底图」那一组的「网格」控制
+  // （画布工具条上**没有**网格按钮 —— 那是旧注释的说法，已核实为假）。
   const legacyGrid = FakeSetting.created.find((setting) => setting.info.name === '显示六边形网格')
-  check('设置页里不再有重复的「显示六边形网格」那一行（它并入了图层开关）', legacyGrid === undefined)
   const gridSetting = FakeSetting.created.find((setting) => setting.info.name === '显示网格')
-  check('设置页的网格开关带出当前值（默认显示）', gridSetting?.toggle?.value === true, String(gridSetting?.toggle?.value))
   check(
-    '图层开关住在默认收起的「图层」折叠组里（首屏留给出引导与最常用的两项）',
-    gridSetting?.containerEl?.tagName === 'DETAILS' &&
-      gridSetting?.containerEl?.open === false &&
-      gridSetting?.containerEl?.dataset?.fcGroup === 'layers',
-    JSON.stringify({
-      tag: gridSetting?.containerEl?.tagName,
-      open: gridSetting?.containerEl?.open,
-      role: gridSetting?.containerEl?.dataset?.fcGroup,
-    }),
+    '设置页里一个网格开关都没有（重复的那行早撤了，图层那组也整组搬去侧栏了）',
+    legacyGrid === undefined && gridSetting === undefined,
+    `legacy=${String(legacyGrid?.info?.name)} grid=${String(gridSetting?.info?.name)}`,
   )
   check(
     '滑块带当前倍率与合法区间',
@@ -4459,6 +4494,19 @@ console.log('\n场景 22：地图面板（侧边栏视图）与开发者模式�
   check('每个按钮都有悬停提示（描述不再占一行，避免侧栏拥挤）', buttons().every((button) => (button.title ?? '').length > 0), buttons()[0]?.title ?? '')
   check('顶部显示了当前地图状态', (collectByClass(panel.contentEl, 'fc-panel-summary-body')[0]?.textContent ?? '').length > 0)
 
+  // ---- 「打开地图面板」不进面板（UI 整理 W1b · 施工文件 §2.5-1）----
+  // 面板里点它时面板本来就开着，`activatePanel()` 的两条路都不产生可见变化 ⇒ 那个按钮天然无意义。
+  check(
+    '面板里**没有**「打开地图面板」（在面板里点它必然没反应）',
+    buttonLabels().every((label) => !label.includes('打开地图面板')),
+    buttonLabels().join(' | '),
+  )
+  check(
+    '但它仍在命令面板里注册着（命令与 ribbon 是那两处唯一有意义的入口）',
+    commandById('open-map-panel') !== undefined,
+    String(commandById('open-map-panel')?.name),
+  )
+
   // 未启用地图层的动作应被禁用（而不是点了报错）
   check('依赖地图层的动作在未启用时被禁用', buttonByLabel('导出当前地图为 SVG')?.disabled === true, String(buttonByLabel('导出当前地图为 SVG')?.disabled))
 
@@ -4624,6 +4672,17 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     plugin.settingTabs[0].display()
     return FakeSetting.created
   }
+  /**
+   * 「地图定义」弹窗里按名字找控件。
+   *
+   * W4-1b（定义随图）之后，**路径 / 区域类型的参数**从设置页搬到了这个弹窗里：
+   * 它们现在是"这张地图的那一套"，所以与定义住在一起。
+   */
+  const openDefs = () => {
+    FakeSetting.created.length = 0
+    openDefinitionManager(plugin)
+    return FakeSetting.created
+  }
   const pickerNamed = (fragment) =>
     FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))?.colorPicker
   const textNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))?.text
@@ -4633,34 +4692,41 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
   const beforePath = drawPath(-500, -200)
   const defaultRiver = '#4a9fd8'
 
-  // ---- 设置界面 ----
-  // ⑤-1 起"路径颜色"那种一行一个色块的做法换成**每种类型一条参数行**：
-  // 名字就是类型名（内置 4 种没有后缀），第二行是"线宽与虚线 · <名字>"。
-  openSettings()
-  const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
+  // ---- 定义弹窗：每种类型的参数一条"外观"行 + 一条"尺寸"行 ----
+  // ⑤-1 起"路径颜色"那种一行一个色块的做法换成**每种类型两条参数行**；
+  // W4-1b 起它们住在「地图定义」弹窗里（内置 4 种 / 6 种也可以改）。
+  openDefs()
+  const defSettingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
   const riverPicker = pickerNamed('河流')
-  // ⑤-2 起区域也是"每种类型一条参数行"：名字就是区域类型名（内置 6 种没有后缀），
-  // 第二行是"边框 · <名字>"。所以取色器不再叫"区域颜色 · 公国"，而是"公国"。
+  // ⑤-2 起区域也是"每种类型两条参数行"：第一行"填充与边框 · <名字>"，第二行"边框宽与虚线 · <名字>"
   const regionPicker = pickerNamed('公国')
-  const fontText = textNamed('名称字体族')
   check(
-    '设置页有每种路径类型的参数行（含颜色选择器）',
+    '「地图定义」弹窗有每种路径类型的参数行（含颜色选择器）',
     pickerNamed('河流') !== undefined && pickerNamed('边界') !== undefined && pickerNamed('贸易路线') !== undefined ? true : false,
   )
-  check('设置页有每种区域类型的颜色选择器', pickerNamed('王国') !== undefined && pickerNamed('海域') !== undefined)
+  check('「地图定义」弹窗有每种区域类型的参数行（含颜色选择器）', pickerNamed('王国') !== undefined && pickerNamed('海域') !== undefined)
   check(
-    '区域类型的第二行是「边框 · <名字>」（与路径类型的「线宽与虚线」同构）',
-    settingNamed('边框 · 公国') !== undefined &&
-      (settingNamed('边框 · 公国')?.texts ?? []).length === 2,
-    JSON.stringify((settingNamed('边框 · 公国')?.texts ?? []).map((text) => text.placeholder)),
+    '区域类型的第二行是「边框宽与虚线 · <名字>」（与路径类型的「线宽与虚线」同构）',
+    defSettingNamed('边框宽与虚线 · 公国') !== undefined &&
+      (defSettingNamed('边框宽与虚线 · 公国')?.texts ?? []).length === 2,
+    JSON.stringify((defSettingNamed('边框宽与虚线 · 公国')?.texts ?? []).map((text) => text.placeholder)),
   )
-  check('设置页有名称字体族输入框', fontText !== undefined && fontText.placeholder === '留空 = 跟随主题', String(fontText?.placeholder))
   check('选择器带出当前值（出厂默认）', riverPicker?.value === defaultRiver, String(riverPicker?.value))
-  check('字体族默认为空（= 跟随主题）', fontText?.value === '', JSON.stringify(fontText?.value))
   check(
     '每种路径类型都有端点与连接两个下拉（都要带出当前值）',
-    (settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
-    JSON.stringify((settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
+    (defSettingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
+    JSON.stringify((defSettingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
+  )
+
+  // ---- 设置页只剩名称字体族（路径 / 区域类型的参数已经搬走）----
+  openSettings()
+  const fontText = textNamed('名称字体族')
+  check('设置页有名称字体族输入框', fontText !== undefined && fontText.placeholder === '留空 = 跟随主题', String(fontText?.placeholder))
+  check('字体族默认为空（= 跟随主题）', fontText?.value === '', JSON.stringify(fontText?.value))
+  check(
+    '设置页不再有路径 / 区域类型的参数行（一个控件只有一个家）',
+    pickerNamed('河流') === undefined && pickerNamed('公国') === undefined,
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name).filter((name) => /河流|公国|边框/.test(String(name)))),
   )
 
   // ---- 改路径颜色：只影响**之后**新画的对象 ----
@@ -4771,19 +4837,25 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     String(plugin.getSettings().pathColors.river),
   )
 
-  // ---- 恢复默认 ----
-  await buttonNamed('恢复出厂样式').click()
+  // ---- 恢复默认参数（现在住在「地图定义」弹窗里，与参数控件同一个家）----
+  // 先把字体设成一个合法值：下面要验证"恢复参数"**不动**字体族（字体是"怎么看"，留在设置页）
+  await fontText.type('Noto Serif SC, serif')
+  openDefs()
+  await buttonNamed('路径与区域类型参数恢复出厂').click()
   const restored = plugin.getSettings()
   check(
-    '「恢复默认」把路径类型参数、区域类型参数与字体都还原',
+    '「恢复默认参数」把路径类型与区域类型的参数都还原',
     restored.pathTypes.find((entry) => entry.id === 'river')?.params.color === defaultRiver &&
-      restored.labelFontFamily === '' &&
       restored.regionTypes.find((entry) => entry.id === 'duchy')?.params.color === '#a882ff',
     JSON.stringify({
       river: restored.pathTypes.find((entry) => entry.id === 'river')?.params.color,
-      font: restored.labelFontFamily,
       duchy: restored.regionTypes.find((entry) => entry.id === 'duchy')?.params.color,
     }),
+  )
+  check(
+    '「恢复默认参数」不动名称字体族（字体不随图，仍留在设置页）',
+    restored.labelFontFamily === 'Noto Serif SC, serif',
+    JSON.stringify(restored.labelFontFamily),
   )
   check(
     '旧字段 regionColors 也跟着目录还原了',
@@ -4889,7 +4961,11 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     (addSetting?.texts?.length ?? 0) === 2 && addSetting?.colorPicker !== undefined,
     `texts=${addSetting?.texts?.length} picker=${String(addSetting?.colorPicker !== undefined)}`,
   )
-  check('新增区的说明里写清了 ID 规则与自动前缀', (addSetting?.info.desc ?? '').includes('custom:'), addSetting?.info.desc)
+  check(
+    '手填 ID 的规则搬进了输入框的悬停提示（不再占「新增」那一大段说明）',
+    (addSetting?.texts?.[0]?.inputEl?.title ?? '').includes('custom:'),
+    String(addSetting?.texts?.[0]?.inputEl?.title),
+  )
 
   // 非法 ID：必须当场给出可读原因，且**不能**写进设置
   await addSetting.texts[0].type('Bad Id!')
@@ -5481,16 +5557,21 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   }
   const settingNamed = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
   openSettings()
-  check('设置页有六个图层开关', ['显示地形', '显示网格', '显示区域', '显示路径', '显示标记', '显示名称'].every((name) => settingNamed(name)?.toggle !== undefined), String(FakeSetting.created.length))
-  check('设置页有图例开关', settingNamed('显示图例')?.toggle !== undefined)
+  // ---- 设置页**不再有**图层开关（UI 整理 W1c · 用户 m01803 第 6 条「只留在侧栏里」）----
   check(
-    '设置页的开关反映当前值（名称刚被工具条关掉）',
-    settingNamed('显示名称')?.toggle.value === false && settingNamed('显示路径')?.toggle.value === true,
-    JSON.stringify({ name: settingNamed('显示名称')?.toggle.value, path: settingNamed('显示路径')?.toggle.value }),
+    '设置页里没有任何图层 / 图例开关（它们的家只在侧栏「底图」「地物」两组里）',
+    ['显示地形', '显示网格', '显示区域', '显示路径', '显示标记', '显示名称', '显示图例'].every(
+      (name) => settingNamed(name) === undefined,
+    ),
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name).filter((name) => (name ?? '').includes('显示'))),
   )
-  settingNamed('显示网格').toggle.handler(false)
+
+  // 关网格改从**侧栏**驱动（同一条写入路径：照旧落进 `layers.grid`）
+  flushFrames()
+  const gridToggle = () => inPanel(panel, 'fc-layer-toggle').find((el) => el.dataset.layer === 'grid')
+  fireEvent(gridToggle(), 'click')
   await new Promise((resolve) => setTimeout(resolve, 20))
-  check('设置页关掉网格 → 图层设置里网格是关的', plugin.getSettings().layers.grid === false, JSON.stringify(plugin.getSettings().layers))
+  check('侧栏关掉网格 → 图层设置里网格是关的', plugin.getSettings().layers.grid === false, JSON.stringify(plugin.getSettings().layers))
   calls = frame()
   check('关掉网格后那一帧不描网格线', stats().lastGridCells === 0, String(stats().lastGridCells))
   // 次序是显式的（`LAYER_TABLE.order` → `LAYERS_BY_DRAW_ORDER`）：这一串就是"谁在谁上面"的实测证据，
@@ -6599,6 +6680,16 @@ console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）�
   plugin.onunload()
 
   // ---- 旧数据迁移：只有 imagePath、没有 mode（老版本写出来的 data.json）----
+  // ⚠️ 定义随图（W4-1b）之后，"老 data.json 里的定义"只在**图还没有 definitions 段**时生效：
+  // 有那一段的图以**文件**为准（方案 B）。所以这里先把上面那张图退回 v1（删掉 definitions 那一行），
+  // 才是在测"老用户"的真实处境（图是旧的、定义只活在 data.json 里）。
+  const mapText = app.vault.files.get('Maps/World.map.md') ?? ''
+  app.vault.files.set('Maps/World.map.md', mapText.replace(/^\s*"definitions": .*$\n?/m, ''))
+  check(
+    '前提：退回 v1 之后图里没有 definitions 段',
+    !(app.vault.files.get('Maps/World.map.md') ?? '').includes('"definitions"'),
+    (app.vault.files.get('Maps/World.map.md') ?? '').slice(0, 120),
+  )
   const legacyData = JSON.stringify({
     ...JSON.parse(saved ?? '{}'),
     customTerrains: [{ id: 'custom:reef', label: '礁石', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png' }],
@@ -6949,7 +7040,9 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
     JSON.stringify(options?.regions) === JSON.stringify([{ id: 'r1', label: '北境领' }]),
     JSON.stringify(options?.regions),
   )
-  const defaultPreview = options?.describe({ kind: 'all' }, 'svg')
+  /** 落点（保存位置 + 文件名）—— 这一段默认都用"地图所在目录 + 地图名" */
+  const target = { folder: 'Maps', fileName: 'World' }
+  const defaultPreview = options?.describe({ kind: 'all' }, 'svg', target)
   check(
     '默认摘要说的是「全部内容」并预告输出文件名（点之前就知道会多出哪个文件）',
     defaultPreview?.ok === true && defaultPreview.text.includes('全部内容') && defaultPreview.text.includes('Maps/World.svg'),
@@ -6962,9 +7055,32 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
       .flatMap((setting) => setting.dropdowns ?? [])
       .filter((dropdown) => dropdown.selectEl?.dataset?.fcExportRole === role)
       .at(-1)
-  const summaryEl = (modal) => collectByClass(modal.contentEl, 'fc-export-summary')[0]
+  const summaryEl = (modal) =>
+    collectByClass(modal.contentEl, 'fc-export-summary').find(
+      (el) => el.dataset?.fcExportRole === 'summary',
+    ) ?? collectByClass(modal.contentEl, 'fc-export-summary')[0]
+  /** 按稳定标记取两个输入框 / 浏览按钮（改文案不会让断言失效） */
+  const textByRole = (role) =>
+    FakeSetting.created
+      .flatMap((setting) => setting.texts ?? [])
+      .filter((text) => text.inputEl?.dataset?.fcExportRole === role)
+      .at(-1)
+  const browseButton = () =>
+    FakeSetting.created
+      .flatMap((setting) => setting.buttons ?? [])
+      .filter((button) => button.buttonEl?.dataset?.fcExportRole === 'browse')
+      .at(-1)
+  /**
+   * 导出按钮：取**最后一次渲染**里的那一个。
+   *
+   * 不能用 `find`：整块重建之后旧的按钮对象还在 `FakeSetting.created` 里，
+   * 而"变灰"是画在**新**按钮上的 —— 取到旧的会让这条断言永远是 false（假失败）。
+   */
   const exportButton = () =>
-    FakeSetting.created.flatMap((setting) => setting.buttons ?? []).find((button) => (button.text ?? '').includes('导出'))
+    FakeSetting.created
+      .flatMap((setting) => setting.buttons ?? [])
+      .filter((button) => (button.text ?? '').includes('导出'))
+      .at(-1)
   const openRealModal = (modalOptions) => {
     FakeSetting.created.length = 0
     const modal = capture.defaultFactory(app, modalOptions)
@@ -6993,6 +7109,59 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
   )
   check('合法范围下导出按钮可点', exportButton()?.disabled === false, String(exportButton()?.disabled))
   check('导出按钮是主按钮（setCta）', exportButton()?.cta === true)
+
+  // ---- 落点：保存位置 + 文件名（用户要的"文件资源管理器一样的浏览功能"） ----
+  check('对话框里有「保存位置」输入框', textByRole('folder') !== undefined)
+  check('对话框里有「文件名」输入框', textByRole('fileName') !== undefined)
+  check(
+    '保存位置默认落在地图文件所在目录（没记录过时与加这个功能之前一致）',
+    textByRole('folder')?.value === 'Maps',
+    String(textByRole('folder')?.value),
+  )
+  check('文件名默认不带扩展名（扩展名跟着格式走）', textByRole('fileName')?.value === 'World', String(textByRole('fileName')?.value))
+  check('对话框里有「浏览…」按钮', browseButton() !== undefined)
+
+  // ---- 浏览：从库内文件夹里挑一个（候选是文件夹，不是文件） ----
+  const pickerOptionsSeen = []
+  const pickerFactoryBefore = plugin.imagePickerFactory
+  plugin.setImagePickerFactory((_pickerApp, pickerOptions) => {
+    pickerOptionsSeen.push(pickerOptions)
+    return { open() {} }
+  })
+  await browseButton()?.click()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check(
+    '浏览按钮打开的是"选文件夹"的选择器',
+    pickerOptionsSeen.at(-1)?.kind === 'folder',
+    String(pickerOptionsSeen.at(-1)?.kind),
+  )
+  check(
+    '候选里能看到库内文件夹（含库根）',
+    Array.isArray(pickerOptionsSeen.at(-1)?.files) && pickerOptionsSeen.at(-1).files.includes('Maps'),
+    JSON.stringify(pickerOptionsSeen.at(-1)?.files),
+  )
+  pickerOptionsSeen.at(-1)?.onChoose('导出')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check('挑完之后保存位置就是那个文件夹', textByRole('folder')?.value === '导出', String(textByRole('folder')?.value))
+  check(
+    '摘要跟着换成新落点（改完立刻看得见）',
+    (summaryEl(modal)?.textContent ?? '').includes('导出/World.svg'),
+    String(summaryEl(modal)?.textContent).replace(/\n/g, ' | '),
+  )
+  plugin.setImagePickerFactory(pickerFactoryBefore)
+
+  // ---- 非法文件名：摘要说明原因 + 导出按钮变灰（点不动比点了报错好） ----
+  await textByRole('fileName')?.type('a/b')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check('文件名里带斜杠时摘要直接说原因', /斜杠/.test(summaryEl(modal)?.textContent ?? ''), String(summaryEl(modal)?.textContent))
+  check('文件名非法时导出按钮变灰', exportButton()?.disabled === true, String(exportButton()?.disabled))
+  // 改回合法值 → 按钮重新可点（证明上一条不是"按钮永远不会亮"）
+  await textByRole('fileName')?.type('World')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  check('文件名改回合法值后按钮重新可点', exportButton()?.disabled === false, String(exportButton()?.disabled))
+  // 落点改回地图所在目录：下面几段断言仍然按 Maps/… 走（落点已单独验过）
+  await textByRole('folder')?.type('Maps')
+  await new Promise((resolve) => setTimeout(resolve, 10))
 
   // ---- 切到「某个区域」：区域下拉出现并默认选中第一个 ----
   const rangeDropdown = dropdownByRole('range')
@@ -7093,8 +7262,8 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
   const viewportOptions = capture.last()
   check(
     '视口范围的摘要给出的是一块真实尺寸的范围',
-    viewportOptions?.describe({ kind: 'viewport' }, 'svg')?.ok === true,
-    JSON.stringify(viewportOptions?.describe({ kind: 'viewport' }, 'svg')),
+    viewportOptions?.describe({ kind: 'viewport' }, 'svg', target)?.ok === true,
+    JSON.stringify(viewportOptions?.describe({ kind: 'viewport' }, 'svg', target)),
   )
   const viewportModal = openRealModal(viewportOptions)
   const viewportRangeDropdown = dropdownByRole('range')
@@ -7218,7 +7387,7 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
   const guardOptions = capture.last()
   const beforeGuard = svgFiles().length
   clearNotices()
-  await guardOptions.onExport({ kind: 'region', regionId: 'gone' }, 'svg')
+  await guardOptions.onExport({ kind: 'region', regionId: 'gone' }, 'svg', target)
   await new Promise((resolve) => setTimeout(resolve, 40))
   check(
     '区域已被删掉时给出可读原因（找不到，而不是堆栈）',
@@ -7226,11 +7395,21 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
     noticeLog.join(' | '),
   )
   check('这种失败不产生文件', svgFiles().length === beforeGuard, svgFiles().join(','))
-  const badPreview = guardOptions.describe({ kind: 'region', regionId: 'gone' }, 'svg')
+  const badPreview = guardOptions.describe({ kind: 'region', regionId: 'gone' }, 'svg', target)
   check(
     '对话框侧同样判为不可导出（按钮会变灰）',
     badPreview?.ok === false && /找不到/.test(badPreview.reason),
     JSON.stringify(badPreview),
+  )
+  // ---- 守门也在落点那一侧：合法范围 + 非法文件名 ⇒ 不产出文件 ----
+  const beforeBadTarget = svgFiles().length
+  clearNotices()
+  await guardOptions.onExport({ kind: 'all' }, 'svg', { folder: 'Maps', fileName: '   ' })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  check(
+    '空文件名时导出这一侧自己再判一次：给出可读原因且不产出文件',
+    noticeLog.some((line) => line.includes('无法导出') && line.includes('保存位置或文件名')) && svgFiles().length === beforeBadTarget,
+    noticeLog.join(' | '),
   )
 
   // ---- 一张还没画过区域的地图：区域下拉为空、摘要给出原因、导出按钮变灰 ----
@@ -7255,7 +7434,7 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
   // 绕过对话框直接导（按钮虽然灰了，但导出这一侧必须自己再判一次）
   const beforeEmptyGuard = svgFiles().length
   clearNotices()
-  await emptyOptions.onExport({ kind: 'region' }, 'svg')
+  await emptyOptions.onExport({ kind: 'region' }, 'svg', target)
   await new Promise((resolve) => setTimeout(resolve, 40))
   check(
     '没有区域时按区域导出：给出可读原因，且不产出文件',
@@ -7263,6 +7442,54 @@ console.log('\n场景 32：导出时自己选范围（用户：一个离主体�
     noticeLog.join(' | '),
   )
   doc().regions.push(...regionsBackup)
+
+  // ---- 记住上次用的目录：导出成功之后，下一次打开对话框拿到的就是它 ----
+  const folderPickerCalls = []
+  plugin.setImagePickerFactory((_pickerApp, pickerOptions) => {
+    folderPickerCalls.push(pickerOptions)
+    return {
+      open() {
+        pickerOptions.onChoose('导出')
+      },
+    }
+  })
+  clearNotices()
+  await runCommand(plugin, 'export-map')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const rememberOptions = capture.last()
+  check(
+    '导出过之后记住了上次的目录（写进插件设置，不进地图文件）',
+    plugin.getSettings().exportFolder === 'Maps',
+    String(plugin.getSettings().exportFolder),
+  )
+  check(
+    '下次打开对话框时默认落点就是上次那个目录',
+    rememberOptions?.initialFolder === 'Maps',
+    String(rememberOptions?.initialFolder),
+  )
+  // 换一个目录、真导一次：文件应当真的写到新落点（而不只是界面上换了字）
+  const rememberModal = openRealModal(rememberOptions)
+  await browseButton()?.click()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  await exportButton()?.click()
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  check(
+    '浏览选中的目录真的成为落点：文件写到该目录下',
+    typeof app.vault.files.get('导出/World.svg') === 'string',
+    svgFiles().join(','),
+  )
+  check(
+    '填的是一个还不存在的目录时，导出先把它建出来（对话框上就是这么承诺的）',
+    app.vault.createdFolders.includes('导出'),
+    JSON.stringify(app.vault.createdFolders),
+  )
+  check(
+    '导出成功后记住的是新目录',
+    plugin.getSettings().exportFolder === '导出',
+    String(plugin.getSettings().exportFolder),
+  )
+  check('对话框关掉了（成功才关）', rememberModal.contentEl.children.length === 0, String(rememberModal.contentEl.children.length))
+  plugin.setImagePickerFactory(pickerFactoryBefore)
 
   capture.restore()
   plugin.onunload()
@@ -7356,9 +7583,9 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
     `texts=${addMarkerSetting?.texts?.length}`,
   )
   check(
-    '新增区的说明里写清了 ID 规则与自动前缀',
-    (addMarkerSetting?.info.desc ?? '').includes('custom:'),
-    addMarkerSetting?.info.desc,
+    '手填 ID 的规则搬进了输入框的悬停提示（不再占「新增」那一大段说明）',
+    (addMarkerSetting?.texts?.[0]?.inputEl?.title ?? '').includes('custom:'),
+    String(addMarkerSetting?.texts?.[0]?.inputEl?.title),
   )
 
   // 非法 ID：当场给原因，且**不能**写进设置
@@ -7797,24 +8024,26 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   /** 某一帧里所有描边中用到的颜色（用来断言"这条路径画成了什么颜色"） */
   const strokeColors = () => frame().groups.map((group) => group.strokeStyle)
 
-  // ---------------------------------------------------------- 设置页：内置 4 种都有参数行
-  openSettings()
+  // ---------------------------------------------------------- 定义弹窗：内置 4 种都有参数行
+  // W4-1b（定义随图）之后，路径类型的**参数**从设置页搬进了「地图定义」弹窗
+  // （它们现在是"这张地图的那一套"），所以这一节对着弹窗取控件。
+  openDefModal()
   check(
     '内置 4 种路径各有参数行（颜色 + 端点 + 连接）',
     ['河流', '道路', '贸易路线', '边界'].every((label) => {
-      const setting = FakeSetting.created.find((item) => item.info.name === label)
+      const setting = FakeSetting.created.find((item) => item.info.name === `外观 · ${label}`)
       return (setting?.colorPickers?.length ?? 0) === 1 && (setting?.dropdowns?.length ?? 0) === 2
     }),
   )
   check(
     '端点/连接下拉带出当前值（出厂 round/round）',
-    (settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
-    JSON.stringify((settingNamed('河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
+    (settingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
+    JSON.stringify((settingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
   )
   check(
     '端点下拉里有三个选项（平头/圆头/方头）',
-    (settingNamed('河流')?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'butt,round,square',
-    JSON.stringify(settingNamed('河流')?.dropdowns?.[0]?.options),
+    (settingNamed('外观 · 河流')?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'butt,round,square',
+    JSON.stringify(settingNamed('外观 · 河流')?.dropdowns?.[0]?.options),
   )
   check(
     '线宽/虚线两行带出当前值（河流：8、实线）',
@@ -7826,7 +8055,7 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   // ---------------------------------------------------------- 改参数 → 只影响之后新画的
   await settingNamed('线宽与虚线 · 河流').texts[0].type('20')
   check('线宽写进目录', entryOf('river')?.params.width === 20, JSON.stringify(entryOf('river')?.params))
-  await settingNamed('河流').dropdowns[0].select('butt')
+  await settingNamed('外观 · 河流').dropdowns[0].select('butt')
   check('端点样式写进目录', entryOf('river')?.params.cap === 'butt', JSON.stringify(entryOf('river')?.params))
   check('改端点不影响其它字段（线宽还是 20）', entryOf('river')?.params.width === 20)
   check(
@@ -7863,7 +8092,8 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   editor.setMode('select')
 
   // 非法虚线：就地给原因，且**不写进设置**（静默回退到出厂值会让用户以为填的生效了）
-  openSettings()
+  // 参数控件在「地图定义」弹窗里，所以这里对着弹窗取（它的提示行与新增区共用同一条 `fcNote`）
+  openDefModal()
   const riverDashBefore = entryOf('river')?.params.dash.join(',')
   await settingNamed('线宽与虚线 · 河流').texts[1].type('1')
   check('奇数段虚线被拒绝并给出原因', pathNote().includes('偶数'), pathNote())
@@ -7874,7 +8104,11 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   const addSetting = settingNamed('新增自定义路径类型')
   check('「地图定义」弹窗里有「新增自定义路径类型」一节', addSetting !== undefined)
   check('新增区有 ID / 显示名 / 线宽 / 虚线四个文本框 + 一个颜色选择器', (addSetting?.texts?.length ?? 0) === 4 && (addSetting?.colorPickers?.length ?? 0) === 1, `texts=${addSetting?.texts?.length} pickers=${addSetting?.colorPickers?.length}`)
-  check('新增区的说明写清了 ID 规则与自动前缀', (addSetting?.info.desc ?? '').includes('custom:'), addSetting?.info.desc)
+  check(
+    '手填 ID 的规则搬进了输入框的悬停提示（不再占「新增」那一大段说明）',
+    (addSetting?.texts?.[0]?.inputEl?.title ?? '').includes('custom:'),
+    String(addSetting?.texts?.[0]?.inputEl?.title),
+  )
 
   await addSetting.texts[0].type('Bad Id!')
   check('非法类型 ID 就地给出可读原因', pathNote().includes('ID'), pathNote())
@@ -8272,7 +8506,14 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   await runCommand(plugin, 'export-resource-bundle')
   await wait()
   check('没有可导出的定义时不产出文件', jsonFiles().length === 0, jsonFiles().join(','))
-  check('并且给出一句可读提示', noticeLog.some((line) => line.includes('还没有自定义')), noticeLog.join(' | '))
+  // W4-3 改口：定义集里**总是**带着内置路径 / 区域类型，所以判据从"一条自定义都没有"换成
+  // "整份跟出厂一模一样" —— 提示也要说清是哪一份（没有地图时导的是「新建地图的模板」那一份）
+  check('并且给出一句可读提示', noticeLog.some((line) => line.includes('全是出厂定义')), noticeLog.join(' | '))
+  check(
+    '没有打开地图时，提示里说明白导的是「新建地图的模板」那一份（不让用户以为导的是某张图）',
+    noticeLog.some((line) => line.includes('新建地图的模板')),
+    noticeLog.join(' | '),
+  )
 
   // ---- 造四条真实的自定义定义（走设置接口，与用户手点出来的一样） ----
   await plugin.addCustomTerrain({ id: 'swamp', label: '沼泽地', color: '#336655', glyph: 'forest' })
@@ -8318,34 +8559,46 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
       bundle.markers[0].mode === 'image',
     JSON.stringify(bundle.markers),
   )
+  // W4-3 改口：内置的路径 / 区域类型**也进文件**（参数是每张地图各自一份，用户调得最勤的
+  // 恰恰是内置那几种的线宽 / 填充）。代价是导入时每一条都是同名冲突、默认跳过 ——
+  // 要带走参数就在确认对话框里逐项勾「覆盖」（下面那一段验的就是这条路）
+  const highwayInFile = bundle.pathTypes.find((entry) => entry.id === 'custom:highway')
   check(
-    '内置 4 种路径类型不进文件（带过去只会得到一串"同 ID 已存在"）',
-    bundle.pathTypes.length === 1 && bundle.pathTypes[0].id === 'custom:highway',
+    '内置 4 种路径类型也进文件（要搬"我调好的线宽"就得连内置的一起走）',
+    bundle.pathTypes.length === 5 &&
+      bundle.pathTypes.slice(0, 4).every((entry) => !entry.id.startsWith('custom:')),
     JSON.stringify(bundle.pathTypes.map((entry) => entry.id)),
   )
   check(
-    '路径类型的参数完整（颜色/线宽/虚线/端点/连接）',
-    bundle.pathTypes[0].params.color === '#c9a227' &&
-      bundle.pathTypes[0].params.width === 9 &&
-      JSON.stringify(bundle.pathTypes[0].params.dash) === JSON.stringify([16, 6]) &&
-      typeof bundle.pathTypes[0].params.cap === 'string' &&
-      typeof bundle.pathTypes[0].params.join === 'string',
-    JSON.stringify(bundle.pathTypes[0].params),
+    '自定义路径类型的参数完整（颜色/线宽/虚线/端点/连接）',
+    highwayInFile?.params.color === '#c9a227' &&
+      highwayInFile?.params.width === 9 &&
+      JSON.stringify(highwayInFile?.params.dash) === JSON.stringify([16, 6]) &&
+      typeof highwayInFile?.params.cap === 'string' &&
+      typeof highwayInFile?.params.join === 'string',
+    JSON.stringify(highwayInFile?.params),
   )
   check('提示里给出了落盘路径（用户不必去猜文件在哪）', noticeLog.some((line) => line.includes(exported[0])), noticeLog.join(' | '))
   check(
-    '内置 6 种区域类型不进文件（带过去只会得到一串"同 ID 已存在"）',
-    bundle.regionTypes.length === 1 && bundle.regionTypes[0].id === 'custom:march',
+    '导出提示里写明了这几条数**含内置**（否则用户按"内置不该在文件里"去数会对不上）',
+    noticeLog.some((line) => line.includes('路径类型 5（含内置）') && line.includes('区域类型 7（含内置）')),
+    noticeLog.join(' | '),
+  )
+  const marchInFile = bundle.regionTypes.find((entry) => entry.id === 'custom:march')
+  check(
+    '内置 6 种区域类型也进文件（同一条改动、同一个理由）',
+    bundle.regionTypes.length === 7 &&
+      bundle.regionTypes.slice(0, 6).every((entry) => !entry.id.startsWith('custom:')),
     JSON.stringify(bundle.regionTypes.map((entry) => entry.id)),
   )
   check(
-    '区域类型的五个参数完整（颜色/不透明度/边框色/边框宽/边框虚线）',
-    bundle.regionTypes[0].params.color === '#3355aa' &&
-      bundle.regionTypes[0].params.opacity === 0.35 &&
-      bundle.regionTypes[0].params.borderColor === null &&
-      bundle.regionTypes[0].params.borderWidth === 5 &&
-      JSON.stringify(bundle.regionTypes[0].params.borderDash) === JSON.stringify([10, 6]),
-    JSON.stringify(bundle.regionTypes[0].params),
+    '自定义区域类型的五个参数完整（颜色/不透明度/边框色/边框宽/边框虚线）',
+    marchInFile?.params.color === '#3355aa' &&
+      marchInFile?.params.opacity === 0.35 &&
+      marchInFile?.params.borderColor === null &&
+      marchInFile?.params.borderWidth === 5 &&
+      JSON.stringify(marchInFile?.params.borderDash) === JSON.stringify([10, 6]),
+    JSON.stringify(marchInFile?.params),
   )
   check('提示时长都在 6000ms 以内', Math.max(...noticeDurations) <= 6000, String(Math.max(...noticeDurations)))
 
@@ -8401,6 +8654,18 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
     String(capture.last()?.source),
   )
 
+  /*
+   * W4-3 的造景：把这份文件里**内置「河流」的线宽**改掉（真实用法正是"导出 → 改一改 → 搬去另一张图"）。
+   * 后面"点亮覆盖 → 确认"那一段要证明的是"勾了才把参数带过去"，所以文件里那一份必须与这张图不同 ——
+   * 两边一样的话，那条断言在"根本没换"的实现上也照样绿。
+   */
+  const TWEAKED_RIVER_WIDTH = 17
+  const tweakedBundle = JSON.parse(fileText(exported[0]))
+  tweakedBundle.pathTypes = tweakedBundle.pathTypes.map((entry) =>
+    entry.id === 'river' ? { ...entry, params: { ...entry.params, width: TWEAKED_RIVER_WIDTH } } : entry,
+  )
+  app.vault.files.set(exported[0], JSON.stringify(tweakedBundle))
+
   const picker = makePickerDouble(exported[0])
   plugin.setImagePickerFactory(picker.factory)
   clearNotices()
@@ -8419,7 +8684,7 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   check('对话框里写明了来源文件', idempotent?.source === exported[0], String(idempotent?.source))
   check(
     '刚导出的文件再导入：一条都不新增（幂等）',
-    /没有可新增的定义/.test(idempotent?.planText ?? ''),
+    /没有可导入的定义/.test(idempotent?.planText ?? ''),
     String(idempotent?.planText),
   )
   check(
@@ -8428,6 +8693,14 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
     String(idempotent?.planText),
   )
   check('没有可新增条目时确认按钮是灰的（点不动比点了报错好）', idempotent?.canImport === false, String(idempotent?.canImport))
+  // W4-3：因为文件里带着整套目录（含内置），"自己导出的文件再导入"必然是**满盘同名冲突** ——
+  // 这条同时钉住"内置项的 ID 解析后没被改写成 custom:xxx"（否则它们会变成 14 条新增）
+  const exportedConflicts = bundle.terrains.length + bundle.markers.length + bundle.pathTypes.length + bundle.regionTypes.length
+  check(
+    `同名冲突全部列出来（${exportedConflicts} 条：四类各一条不落）`,
+    new RegExp(`同名冲突 ${exportedConflicts} 条`).test(idempotent?.planText ?? ''),
+    String(idempotent?.planText).slice(0, 200),
+  )
 
   // ---- 真对话框：假 DOM 里断言正文与按钮标记 ----
   const realFactory = capture.defaultFactory
@@ -8460,6 +8733,67 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   check('确认按钮带稳定标记（断言不怕以后改文案）', buttonByRole('confirm') !== undefined)
   check('取消按钮带稳定标记', buttonByRole('cancel') !== undefined)
   check('灰掉的确认按钮 disabled 为真', buttonByRole('confirm')?.disabled === true, String(buttonByRole('confirm')?.disabled))
+  /* ---- W4-3：同名冲突的逐条「覆盖」 ---- */
+  const planTextOf = (modal) => collectByClass(modal?.contentEl, 'fc-import-plan')[0]?.textContent ?? ''
+  check(
+    '「导入到」写在最显眼处（导入改的是哪张图，先说在前面）',
+    (collectByClass(idleModal?.contentEl, 'fc-import-target')[0]?.textContent ?? '').startsWith('导入到：'),
+    String(collectByClass(idleModal?.contentEl, 'fc-import-target')[0]?.textContent),
+  )
+  const idleConflicts = collectByClass(idleModal?.contentEl, 'fc-import-conflict')
+  check(
+    '每条冲突各占一行（用户能逐条决定，而不是"一锅端"）',
+    idleConflicts.length === exportedConflicts,
+    String(idleConflicts.length),
+  )
+  check(
+    '冲突行两侧各有一句人话（"这张图"现在是什么 / "文件里"会变成什么）',
+    idleConflicts.every(
+      (row) =>
+        collectByClass(row, 'fc-import-conflict-current').length === 1 &&
+        collectByClass(row, 'fc-import-conflict-incoming').length === 1,
+    ),
+  )
+  const idleToggles = FakeSetting.created.filter((setting) => setting.toggle !== undefined)
+  check(
+    '每条冲突配一个「覆盖」开关，而且初始**全是关的**（覆盖必须由用户显式要求）',
+    idleToggles.length === exportedConflicts && idleToggles.every((setting) => setting.toggle.value === false),
+    String(idleToggles.length),
+  )
+  const coverAllButton = FakeSetting.created
+    .flatMap((setting) => setting.buttons ?? [])
+    .find((button) => button.text === '全部设为覆盖')
+  check('有「全部设为覆盖」这一个快捷动作按钮（搬一整套线宽时用）', coverAllButton !== undefined)
+  const riverWidthsBefore = plugin.getSettings().pathTypes.map((entry) => [entry.id, entry.params.width])
+  const idsBefore = riverWidthsBefore.map(([id]) => id)
+  await coverAllButton?.click()
+  check(
+    '点亮「全部设为覆盖」之后正文与按钮状态**一起**换（重算计划，不是本地改一段文本）',
+    new RegExp(`将覆盖 ${exportedConflicts} 条`).test(planTextOf(idleModal)),
+    planTextOf(idleModal).slice(0, 200),
+  )
+  check('确认按钮随之可点（有不覆盖就点不动的整条链路是通的）', buttonByRole('confirm')?.disabled === false, String(buttonByRole('confirm')?.disabled))
+  check('上一步只是重算，**一个字节都还没改**（要等确认）', JSON.stringify(plugin.getSettings().pathTypes.map((entry) => [entry.id, entry.params.width])) === JSON.stringify(riverWidthsBefore))
+  clearNotices()
+  await buttonByRole('confirm')?.click()
+  await wait()
+  const afterCover = plugin.getSettings().pathTypes
+  check(
+    '覆盖真的落盘了：内置「河流」的线宽换成了文件里那一份（"搬我调好的线宽"这条用法成立）',
+    afterCover.find((entry) => entry.id === 'river')?.params.width === TWEAKED_RIVER_WIDTH,
+    JSON.stringify(afterCover.map((entry) => [entry.id, entry.params.width])),
+  )
+  check(
+    '覆盖是"在原位换"：条目顺序（也就是用户的列表次序）一点没动',
+    JSON.stringify(afterCover.map((entry) => entry.id)) === JSON.stringify(idsBefore),
+    JSON.stringify(afterCover.map((entry) => entry.id)),
+  )
+  check('覆盖不等于新增：条数一条没多', afterCover.length === idsBefore.length, `${idsBefore.length} → ${afterCover.length}`)
+  check(
+    '导入结果提示里报出"覆盖 N 条"（用户知道刚才发生了覆盖，而不是只看到"新 0 条"）',
+    noticeLog.some((line) => line.includes(`覆盖 ${exportedConflicts} 条`)),
+    noticeLog.join(' | '),
+  )
 
   // ---- 真的导入：一份"别人给的"文件（一条新增 + 一条同 ID 冲突） ----
   const incoming = JSON.stringify({
@@ -8564,15 +8898,16 @@ console.log('\n场景 36：定义文件的导入与导出（面板按钮 + 命�
   )
   check('提示时长都在 6000ms 以内', Math.max(...noticeDurations) <= 6000, String(Math.max(...noticeDurations)))
   check('导入成功后对话框关闭了', collectByClass(realModal?.contentEl, 'fc-import-plan').length === 0)
+  // 导入结果的三个"家"：地形 / 标记 / 路径类型 / 区域类型的**定义**都在「地图定义」弹窗里，
+  // 所以"导入之后不用重开就能看到"这一条也去那里验（设置页此刻已经不摆这些定义行了 —— W4-1b）
+  FakeSetting.created.length = 0
+  openDefinitionManager(plugin)
   check(
-    '导入之后已打开的设置页自己刷新了（不需要用户关掉再打开设置）',
+    '导入之后定义弹窗里立刻能看到新的路径类型（导入后不必关掉再打开）',
     settingsHas('小径'),
     FakeSetting.created.map((setting) => setting.info.name).join(' | '),
   )
-  check('刷新后的设置页里也有新的区域类型（导入后不必关掉设置再打开）', settingsHas('绿洲'))
-  // 地形定义的新家：弹窗那边也应该看得到导入进来的火山（重开一次即可看到，数据已经写进去了）
-  FakeSetting.created.length = 0
-  openDefinitionManager(plugin)
+  check('同一份弹窗里也有新的区域类型', settingsHas('绿洲'))
   check(
     '导入进来的新地形在「地图定义」弹窗里（定义的新家）',
     settingsHas('火山'),
@@ -8793,7 +9128,8 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     return FakeSetting.created
   }
   /**
-   * 打开「地图定义」弹窗（A3：区域类型的**增删改**搬到了这里；**参数行**仍在设置页）。
+   * 打开「地图定义」弹窗（A3：区域类型的**增删改**搬到了这里；
+   * W4-1b：**参数行**也从设置页搬来了 —— 定义随图之后它们是"这张地图的那一套"）。
    *
    * 两侧各有一条 `dataset.fcNote === 'regionType'` 的就地提示，所以 `regionNote()`
    * 跟着最后一次打开的宿主走（与场景 34 的 `pathNote()` 同一处理）。
@@ -8878,44 +9214,45 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     `${String(regionOption('empire')?.textContent)} / ${String(regionSwatch()?.style.backgroundColor)}`,
   )
 
-  // ---------------------------------------------------------- 设置页：区域类型参数
-  openSettings()
+  // ---------------------------------------------------------- 定义弹窗：区域类型参数
+  // 与路径类型同理（W4-1b）：参数住在「地图定义」弹窗里，内置 6 种也可以改
+  openDefModal()
   check(
     '内置 6 种区域各有参数行（颜色 + 不透明度 + 边框色）',
     ['王国', '帝国', '公国', '教区', '荒原', '海域'].every((label) => {
-      const setting = FakeSetting.created.find((item) => item.info.name === label)
+      const setting = FakeSetting.created.find((item) => item.info.name === `填充与边框 · ${label}`)
       return (setting?.colorPickers?.length ?? 0) === 1 && (setting?.texts?.length ?? 0) === 2
     }),
   )
   check(
-    '第二行是「边框 · <名字>」（边框宽 + 边框虚线）',
-    (settingNamed('边框 · 王国')?.texts ?? []).length === 2,
-    JSON.stringify((settingNamed('边框 · 王国')?.texts ?? []).map((text) => text.value)),
+    '第二行是「边框宽与虚线 · <名字>」（边框宽 + 边框虚线）',
+    (settingNamed('边框宽与虚线 · 王国')?.texts ?? []).length === 2,
+    JSON.stringify((settingNamed('边框宽与虚线 · 王国')?.texts ?? []).map((text) => text.value)),
   )
   check(
     '出厂值带出来了（不透明度 0.22、边框宽 3、边框色留空 = 跟随填充色、虚线留空 = 实线）',
-    settingNamed('王国')?.texts?.[0]?.value === '0.22' &&
-      settingNamed('王国')?.texts?.[1]?.value === '' &&
-      settingNamed('边框 · 王国')?.texts?.[0]?.value === '3' &&
-      settingNamed('边框 · 王国')?.texts?.[1]?.value === '',
+    settingNamed('填充与边框 · 王国')?.texts?.[0]?.value === '0.22' &&
+      settingNamed('填充与边框 · 王国')?.texts?.[1]?.value === '' &&
+      settingNamed('边框宽与虚线 · 王国')?.texts?.[0]?.value === '3' &&
+      settingNamed('边框宽与虚线 · 王国')?.texts?.[1]?.value === '',
     JSON.stringify([
-      settingNamed('王国')?.texts?.[0]?.value,
-      settingNamed('王国')?.texts?.[1]?.value,
-      settingNamed('边框 · 王国')?.texts?.[0]?.value,
-      settingNamed('边框 · 王国')?.texts?.[1]?.value,
+      settingNamed('填充与边框 · 王国')?.texts?.[0]?.value,
+      settingNamed('填充与边框 · 王国')?.texts?.[1]?.value,
+      settingNamed('边框宽与虚线 · 王国')?.texts?.[0]?.value,
+      settingNamed('边框宽与虚线 · 王国')?.texts?.[1]?.value,
     ]),
   )
 
   // ---- 改「帝国」的参数：只影响**之后**新画的区域 ----
   const beforeDraw = editor.getStatus()
   void beforeDraw
-  await settingNamed('帝国').texts[0].type('0.6')
+  await settingNamed('填充与边框 · 帝国').texts[0].type('0.6')
   check('不透明度写进区域类型目录', entryOf('empire')?.params.opacity === 0.6, JSON.stringify(entryOf('empire')?.params))
-  await settingNamed('帝国').texts[1].type('#101010')
+  await settingNamed('填充与边框 · 帝国').texts[1].type('#101010')
   check('边框色写进目录', entryOf('empire')?.params.borderColor === '#101010', JSON.stringify(entryOf('empire')?.params))
-  await settingNamed('边框 · 帝国').texts[0].type('9')
+  await settingNamed('边框宽与虚线 · 帝国').texts[0].type('9')
   check('边框宽写进目录', entryOf('empire')?.params.borderWidth === 9, JSON.stringify(entryOf('empire')?.params))
-  await settingNamed('边框 · 帝国').texts[1].type('6,3')
+  await settingNamed('边框宽与虚线 · 帝国').texts[1].type('6,3')
   check('边框虚线写进目录', JSON.stringify(entryOf('empire')?.params.borderDash) === '[6,3]', JSON.stringify(entryOf('empire')?.params))
 
   editor.setRegionType('empire')
@@ -9173,11 +9510,18 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   })
   const mapFile = plugin.store.listMapFiles().find((file) => file.path.endsWith('.map.md'))
   const renameSeed = await plugin.store.load(mapFile)
-  const seededDoc = renameSeed.document
-  seededDoc.markers.push({ id: 'mk-rename', label: '待改名', p: [120, 120], icon: 'custom:renametest' })
+  /**
+   * 种一条引用 `custom:renametest` 的标记。
+   *
+   * ⚠️ 改的是**画布上那一份活的文档**（`layers.getDocument`）而不是重新解析出来的副本：
+   * 定义随图（W4-1b）之后，改名的扫描会把"内存里那份"与"盘上那份"对齐
+   * （见 `renameCustomDefinition` 的 flush）—— 往副本里塞一条、盘上留着，两边就会打架。
+   */
+  const liveDoc = layers.getDocument(canvasPath)
+  liveDoc.markers.push({ id: 'mk-rename', label: '待改名', p: [120, 120], icon: 'custom:renametest' })
   await plugin.store.writeNow(
     mapFile,
-    seededDoc,
+    liveDoc,
     renameSeed.frontmatter.name ?? 'World',
     renameSeed.frontmatter.canvases,
     renameSeed.frontmatter.rest,
@@ -9199,6 +9543,22 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     preview.ok === true && preview.text.includes('预览'),
     JSON.stringify(preview),
   )
+  // 拍快照之前先把防抖窗口里的改动落盘：改名自己也会先 flush（见 `renameCustomDefinition`），
+  // 不先对齐的话"只改了一处"这条断言会把那次合法的落盘算成"多改了东西"。
+  // 之后再走一次"读 → 写"往返：序列化会把每个对象的字段顺序规范成**解析层那一套**，
+  // 而改名走的正是"读回来 → 改 → 写回去"这条路 —— 不先规范化，
+  // 这条断言会因为"同一个对象的键顺序不同"而误报（内容其实一个字没差）。
+  await plugin.store.flush()
+  {
+    const round = await plugin.store.load(mapFile)
+    await plugin.store.writeNow(
+      mapFile,
+      round.document,
+      round.frontmatter.name ?? 'World',
+      round.frontmatter.canvases,
+      round.frontmatter.rest,
+    )
+  }
   const unchangedBeforeApply = String(app.vault.files.get(mapFile.path))
   const sameName = await plugin.previewDefinitionRename('marker', 'custom:renametest', 'renametest')
   check('新 ID 与旧 ID 相同时被拒绝（不是"改了 0 处的假成功"）', sameName.ok === false, JSON.stringify(sameName))
@@ -9222,7 +9582,16 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     renameReport !== null && String(renameReport.text).includes('custom:renamed'),
     JSON.stringify(renameReport === null ? null : String(renameReport.text).slice(0, 80)),
   )
-  check('未受影响的地图内容没被动过（只改了该改的那一处）', unchangedBeforeApply.replace('custom:renametest', 'custom:renamed') === afterText)
+  check(
+    '未受影响的地图内容没被动过（只改了该改的那一处）',
+    unchangedBeforeApply.replaceAll('custom:renametest', 'custom:renamed') === afterText,
+    (() => {
+      const expected = unchangedBeforeApply.replaceAll('custom:renametest', 'custom:renamed')
+      let i = 0
+      while (i < expected.length && i < afterText.length && expected[i] === afterText[i]) i += 1
+      return `首处差异 @${i}：期望=${JSON.stringify(expected.slice(Math.max(0, i - 60), i + 80))} 实际=${JSON.stringify(afterText.slice(Math.max(0, i - 60), i + 80))}`
+    })(),
+  )
 
   plugin.setReportModalFactory((app2, options) => new ReportModal(app2, options))
 
@@ -9732,34 +10101,117 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
     JSON.stringify(doc().terrain[cellKey(6, 0)]),
   )
 
-  // ---- 「撤销这些改动」：用户要的"确认改动"按钮（走 A：逐条撤销回到选中那一刻）----
-  commitInput('field-temp', '-8')
-  const editsRow = collectByClass(panel.contentEl, 'fc-selection-edits')[0]
+  // ---- 多对象选择：同类多选（UI 整理 W2-2 · §2.6「多个同类对象」）----
+  // 三条边界一起验：只允许同类、逐项一行 + 可移除、公共字段（类型 / 链接 / 删除）。
+  doc().markers.push({ id: 'mk-2', label: '灯塔', p: [60, 60], icon: 'town', link: 'Places/Lighthouse.md' })
+  editor.setObjectSelection([
+    { kind: 'marker', id: 'mk-1' },
+    { kind: 'marker', id: 'mk-2' },
+  ])
+  flushFrames()
+  const objectsHead = () => collectByClass(panel.contentEl, 'fc-selection-kind')[0]?.textContent ?? ''
+  const objectsItems = () =>
+    collectByClass(panel.contentEl, 'fc-object-item').map((row) => ({
+      id: row.dataset.fcObjectItem,
+      name: collectByClass(row, 'fc-object-item-name')[0]?.textContent ?? '',
+      detail: collectByClass(row, 'fc-object-item-detail')[0]?.textContent ?? '',
+    }))
+  check('多选同类对象时，侧栏换成「已选 2 个标记」', objectsHead() === '已选 2 个标记', objectsHead())
   check(
-    // 4 处 = 本次选中之后依次改了：地形种类（mountain）、深度 99999、深度 3400、温度 -8
-    '改过之后出现「本次选中已改 N 处」',
-    editsRow !== undefined && String(editsRow.textContent).includes('已改 4 处'),
-    String(editsRow?.textContent),
+    '逐项一行：两个标记各一行，名称写人话（不是裸 ID）',
+    objectsItems().map((item) => item.name).join('|') === '港口|灯塔',
+    JSON.stringify(objectsItems()),
   )
-  const undoEditsButton = fieldEl('undo-selection-edits')
+  check('每一行都带一行补充信息（位置 / 图标）', objectsItems().every((item) => item.detail.length > 0), JSON.stringify(objectsItems()))
   check(
-    '撤销按钮在（面板上那个后悔按钮）',
-    undoEditsButton?.textContent === '撤销这些改动',
-    String(undoEditsButton?.textContent),
+    '每一行都能「移除」（选择里逐项可去掉）',
+    collectByClass(panel.contentEl, 'fc-object-remove').length === 2,
+    String(collectByClass(panel.contentEl, 'fc-object-remove').length),
   )
-  undoEditsButton.dispatchEvent({ type: 'click' })
+
+  // 公共字段 ① 类型（图标）：共同值预填 → 改一次两个都变 → 一次撤销两个都回
+  const objectsTypeSelect = () => collectByClass(panel.contentEl, 'fc-selection-select')[0]
+  check('公共字段里有「类型」下拉，并预填**共同值** town', objectsTypeSelect()?.value === 'town', String(objectsTypeSelect()?.value))
+  const undoBeforeObjectsType = editor.getStatus().undo
+  objectsTypeSelect().value = 'city'
+  fireEvent(objectsTypeSelect(), 'change')
   flushFrames()
   check(
-    '点它 = 逐条撤销到选中那一刻（温度与深度两个键都没了）',
-    'temp' in (doc().terrain[cellKey(6, 0)] ?? {}) === false &&
-      'depth' in (doc().terrain[cellKey(6, 0)] ?? {}) === false,
-    JSON.stringify(doc().terrain[cellKey(6, 0)]),
+    '改类型 → 两个对象一起改，而且只记**一条**历史',
+    doc().markers.every((marker) => marker.icon === 'city') && editor.getStatus().undo === undoBeforeObjectsType + 1,
+    `${JSON.stringify(doc().markers.map((marker) => marker.icon))} undo=${undoBeforeObjectsType} → ${editor.getStatus().undo}`,
+  )
+  editor.undo()
+  flushFrames()
+  check('撤销一次两个都回去（不是 N 条历史）', doc().markers.every((marker) => marker.icon === 'town'), JSON.stringify(doc().markers.map((marker) => marker.icon)))
+
+  // 公共字段 ② 链接：各不相同 → 留空并写明，且失焦不会把它们统一成空
+  const objectsLinkInput = () =>
+    collectByClass(panel.contentEl, 'fc-selection-input').find((element) => element.dataset?.fcRole === 'objects-link')
+  check(
+    '链接各不相同 → 输入框留空并写明「各不相同」（**不猜共同值**）',
+    (objectsLinkInput()?.value ?? 'x') === '' && (objectsLinkInput()?.placeholder ?? '').includes('各不相同'),
+    String(objectsLinkInput()?.placeholder),
+  )
+  const linksBefore = JSON.stringify(doc().markers.map((marker) => marker.link ?? null))
+  fireEvent(objectsLinkInput(), 'blur')
+  flushFrames()
+  check(
+    '各不相同又没改：失焦不会把它们统一成空（**逐字比较**前后的链接）',
+    JSON.stringify(doc().markers.map((marker) => marker.link ?? null)) === linksBefore,
+    `${linksBefore} → ${JSON.stringify(doc().markers.map((marker) => marker.link ?? null))}`,
+  )
+
+  // ③ 「移除」只移出这次选择，不删对象
+  fireEvent(collectByClass(panel.contentEl, 'fc-object-remove')[1], 'click')
+  flushFrames()
+  check(
+    '「移除」只把它移出这次选择（对象还在文档里）',
+    editor.getObjectSelection().length === 1 && doc().markers.length === 2,
+    `${editor.getObjectSelection().length} / ${doc().markers.length}`,
   )
   check(
-    '撤销完那一行自己消失（回到 0 处，不再占位置）',
-    collectByClass(panel.contentEl, 'fc-selection-edits').length === 0,
-    String(collectByClass(panel.contentEl, 'fc-selection-edits').length),
+    '剩一个时回到单对象检查器（「已选 N 个」那一段消失）',
+    objectsItems().length === 0 && objectsHead() !== '已选 2 个标记',
+    objectsHead(),
   )
+
+  // ④ 公共字段 ③ 删除：一次提交 = 一条历史
+  editor.setObjectSelection([
+    { kind: 'marker', id: 'mk-1' },
+    { kind: 'marker', id: 'mk-2' },
+  ])
+  flushFrames()
+  const objectsDeleteButton = () =>
+    collectByClass(panel.contentEl, 'fc-panel-button').find((button) =>
+      (collectByClass(button, 'fc-panel-button-label')[0]?.textContent ?? '').includes('删除这 2 个'),
+    )
+  check('公共字段里有「删除这 N 个」', objectsDeleteButton() !== undefined)
+  fireEvent(objectsDeleteButton(), 'click')
+  flushFrames()
+  check('「删除这 N 个」把两个都删掉', doc().markers.length === 0, String(doc().markers.length))
+  editor.undo()
+  flushFrames()
+  check('撤销一次两个都回来（一次提交 = 一条历史）', doc().markers.length === 2, String(doc().markers.length))
+
+  // ⑤ 异类混选不做：交进去也会被归一化成"第一项那一类"
+  editor.setObjectSelection([
+    { kind: 'marker', id: 'mk-1' },
+    { kind: 'path', id: 'no-such-path' },
+  ])
+  flushFrames()
+  check(
+    '异类混选被归一化掉（只留第一项那一类，§1 第 10 条"字段必须是共有"）',
+    editor.getObjectSelection().every((item) => item.kind === 'marker'),
+    JSON.stringify(editor.getObjectSelection()),
+  )
+  editor.clearAllSelection()
+  flushFrames()
+
+  // ---- 「撤销这些改动」那一行与它的按钮已删除（UI 整理 §2.7 方案 A）----
+  // 它自己的注释就承认"与逐条 Ctrl+Z 一模一样"⇒ 多出一条撤销路径而已。
+  // 保留的撤销路径：Ctrl/Cmd+Z · 画布浮窗撤销/重做 · 命令面板两条。
+  // ⚠️ 这一段原来有 **4 条**断言（不是规划文件里写的 2 条）⇒ 冒烟 1450 → 1446。
 
   plugin.onunload()
 }
@@ -9836,22 +10288,28 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
 
   // ---------------------------------------------------------- 3. 重区块默认收起
   renderSettings()
-  const layersGroup = settingsGroup('layers')
   const defaultsGroup = settingsGroup('defaults')
   check(
-    '「图层」是个默认收起的折叠组',
-    layersGroup?.tagName === 'DETAILS' && layersGroup.open === false,
-    `tag=${String(layersGroup?.tagName)} open=${String(layersGroup?.open)}`,
+    // W1c：图层开关整组搬出设置页 ⇒ 这一页不再有「图层」这个折叠组
+    '设置页里没有「图层」这个折叠组（开关的家在侧栏「底图」「地物」）',
+    settingsGroup('layers') === undefined,
+    String(settingsGroup('layers')?.tagName),
   )
   check(
-    '「新对象默认值」也是个默认收起的折叠组（一屏不再摊开几十个输入框）',
+    '「新对象默认值」还是个默认收起的折叠组（一屏不再摊开几十个输入框）',
     defaultsGroup?.tagName === 'DETAILS' && defaultsGroup.open === false,
     `tag=${String(defaultsGroup?.tagName)} open=${String(defaultsGroup?.open)}`,
   )
   check(
-    '折叠只是"收起"，不是"拿掉"：网格开关仍然挂在这个组里（改的还是 `layers.grid` 那一份设置）',
-    FakeSetting.created.find((setting) => setting.info.name === '显示网格')?.containerEl === layersGroup,
-    String(FakeSetting.created.find((setting) => setting.info.name === '显示网格')?.containerEl?.tagName),
+    '折叠只是"收起"，不是"拿掉"：这一组里仍然摆着名称字体族那一行',
+    FakeSetting.created.some((setting) => setting.containerEl === defaultsGroup && setting.info.name === '名称字体族'),
+    String(FakeSetting.created.filter((setting) => setting.containerEl === defaultsGroup).map((setting) => setting.info.name)),
+  )
+  check(
+    // W4-1b（定义随图）：路径 / 区域类型的参数整节搬进「地图定义」弹窗，这一页不再有它们
+    '路径 / 区域类型的参数已经不在这一组里（一个控件只有一个家）',
+    !FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('线宽与虚线') || (setting.info.name ?? '').includes('边框宽与虚线')),
+    String(FakeSetting.created.map((setting) => setting.info.name).filter((name) => String(name).includes('虚线'))),
   )
 
   // ---------------------------------------------------------- 4. 定义管理控件搬走了，但留了指路
@@ -9958,17 +10416,89 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     JSON.stringify((reefRow.buttons ?? []).map((button) => button.text)),
   )
 
+  // ---------------------------------------------------------- 6b. W3-2：自带 / 自定义分区 + 每条收成一行
+  // 用户口径（§5 第 3 条）：「自定义的和本身自带的混在一起，阅读量大且无用」。
+  check(
+    '四节各有「自定义（N）」分区标题（四类定义各一条）',
+    collectByClass(defModal.contentEl, 'fc-defsection').filter((el) => el.dataset?.fcSection === 'custom').length === 4,
+    JSON.stringify(collectByClass(defModal.contentEl, 'fc-defsection').map((el) => [el.dataset?.fcSection, el.textContent])),
+  )
+  const builtinLists = collectByClass(defModal.contentEl, 'fc-defbuiltin')
+  check(
+    '地形与标记各有「内置」只读清单，且都默认收起（不占首屏阅读量）',
+    builtinLists.length === 2 && builtinLists.every((el) => el.open === false),
+    JSON.stringify(builtinLists.map((el) => [el.dataset?.fcBuiltin, el.open])),
+  )
+  check(
+    '内置清单只列名字，共 9 + 9 = 18 条（与目录同源，不是手抄一份）',
+    collectByClass(defModal.contentEl, 'fc-defbuiltin-row').length === 18,
+    String(collectByClass(defModal.contentEl, 'fc-defbuiltin-row').length),
+  )
+  check(
+    // W4-1b：路径 / 区域类型的内置项**参数可改**，所以给它们开了入口 —— 做成可点开的条目，不是只读清单
+    '路径 / 区域类型的内置项不是只读清单，而是可改参数的条目（内置 4 + 6 也给了入口）',
+    collectByClass(defModal.contentEl, 'fc-defsection').filter((el) => el.dataset?.fcSection === 'builtin').length === 2 &&
+      FakeSetting.created.some((setting) => setting.info.name === '外观 · 河流') &&
+      FakeSetting.created.some((setting) => setting.info.name === '填充与边框 · 王国'),
+    JSON.stringify(collectByClass(defModal.contentEl, 'fc-defsection').map((el) => [el.dataset?.fcSection, el.textContent])),
+  )
+  const defItems = collectByClass(defModal.contentEl, 'fc-defitem')
+  check(
+    '每条定义（自定义 + 可改参数的内置）各收成一个条目，且默认收起（点开才编辑）',
+    defItems.length === 11 && defItems.every((el) => el.open === false),
+    JSON.stringify(defItems.map((el) => [el.dataset?.fcDef, el.open])),
+  )
+  check(
+    '条目标题行写的是「序号 + 显示名 + ID」，而不是把控件摊在标题上',
+    (collectByClass(defItems[0] ?? defModal.contentEl, 'fc-defitem-name')[0]?.textContent ?? '') === '1. 礁石' &&
+      (collectByClass(defItems[0] ?? defModal.contentEl, 'fc-defitem-id')[0]?.textContent ?? '') === 'custom:reef',
+    JSON.stringify({
+      name: collectByClass(defItems[0] ?? defModal.contentEl, 'fc-defitem-name')[0]?.textContent,
+      id: collectByClass(defItems[0] ?? defModal.contentEl, 'fc-defitem-id')[0]?.textContent,
+    }),
+  )
+  // 展开状态跨重建保留：打开它 → 切一次模式（会整块重建）→ 它应该还开着。
+  // 不读回状态的话，用户"改一个值就要重新点开一次"（与 MapPanel 那个坑同一类）。
+  defItems[0].open = true
+  fireEvent(
+    collectByClass(defItems[0], 'fc-terrain-mode-button').find((button) => button.dataset.mode === 'image'),
+    'click',
+  )
+  await tick(40)
+  check(
+    '改一个值（切模式）之后那条定义仍然开着（不是"改一次就要重新点开一次"）',
+    collectByClass(defModal.contentEl, 'fc-defitem').find((el) => el.dataset?.fcDef === 'custom:reef')?.open === true,
+    JSON.stringify(collectByClass(defModal.contentEl, 'fc-defitem').map((el) => [el.dataset?.fcDef, el.open])),
+  )
+
   // ---------------------------------------------------------- 7. 内置行不建按钮 + 新增流程真的能跑
   // 这两条是真实库里的现象逼出来的：内置类型的行上挂着**两个空按钮**（`addButton` 先建元素
   // 再回调，回调里提前 return 只做到了"不设文字"，按钮本身还在），而"新增"这条操作链
   // 在 A3 搬迁后**一条断言都没有**。
-  const builtinRows = ['河流', '王国'].map((label) =>
-    FakeSetting.created.find((setting) => setting.info.name === label),
+  // W3-2：地形 / 标记的内置定义**不再建成可编辑的行** —— 它们搬进了只读清单（纯文本行）。
+  // 于是"内置行上有没有空按钮"这个老问题从根上没了：那里根本没有控件可留。
+  // W4-1b 的例外：路径 / 区域类型的内置项**参数可改**（参数随图），所以它们是有控件的条目。
+  const builtinListEl = collectByClass(defModal.contentEl, 'fc-defbuiltin').find(
+    (el) => el.dataset?.fcBuiltin === 'terrain',
   )
   check(
-    '内置类型的行上没有任何按钮（不许留下空按钮）',
-    builtinRows.every((row) => row !== undefined && (row.buttons ?? []).length === 0),
-    JSON.stringify(builtinRows.map((row) => (row?.buttons ?? []).map((button) => button.text))),
+    // W3-2：地形 / 标记的内置定义**不建成可编辑的行** —— 它们搬进了只读清单（纯文本行）。
+    // W4-1b 的例外：路径 / 区域类型的内置项**参数可改**，所以它们是有控件的条目（见上一条）。
+    '地形 / 标记的内置定义不建成可编辑行（它们是只读清单里的纯文本）',
+    !FakeSetting.created.some((setting) => setting.info.name === '森林' || setting.info.name === '通用'),
+    JSON.stringify(FakeSetting.created.map((s) => s.info.name).filter((name) => name === '森林' || name === '通用')),
+  )
+  check(
+    '地形内置清单是纯文本行：名字 + ID（没有任何按钮可留）',
+    builtinListEl !== undefined &&
+      collectByClass(builtinListEl, 'fc-defbuiltin-row').length === 9 &&
+      collectByClass(builtinListEl, 'fc-defbuiltin-name').every((el) => (el.textContent ?? '').length > 0),
+    JSON.stringify(collectByClass(builtinListEl ?? defModal.contentEl, 'fc-defbuiltin-name').map((el) => el.textContent)),
+  )
+  check(
+    '路径类型没有只读清单（它的内置项要能改参数）',
+    collectByClass(defModal.contentEl, 'fc-defbuiltin').every((el) => el.dataset?.fcBuiltin !== 'pathType'),
+    JSON.stringify(collectByClass(defModal.contentEl, 'fc-defbuiltin').map((el) => el.dataset?.fcBuiltin)),
   )
 
   const addPathRow = FakeSetting.created.find((setting) => setting.info.name === '新增自定义路径类型')
@@ -9986,11 +10516,13 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     plugin.getSettings().pathTypes.some((entry) => entry.id === 'custom:highway' && entry.label === '商路'),
     JSON.stringify(plugin.getSettings().pathTypes.map((entry) => entry.id)),
   )
-  const newPathRow = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('商路（自定义）'))
+  // 名字就是显示名 —— 自定义与内置已经分在两个区里，不再需要「（自定义）」后缀区分
+  // （W4-1b：这一行现在叫「名称 · 商路」—— 它同一行里还挂着参数入口之外的身份信息）
+  const newPathRow = FakeSetting.created.find((setting) => setting.info.name === '名称 · 商路')
   check(
     '新增出来的那一行带「改 ID…」与「删除」两个按钮',
     (newPathRow?.buttons ?? []).map((button) => button.text).join(',') === '改 ID…,删除',
-    JSON.stringify((newPathRow?.buttons ?? []).map((button) => button.text)),
+    JSON.stringify(FakeSetting.created.map((setting) => setting.info.name).filter((name) => String(name).includes('商路'))),
   )
 
   // 「渲染失败不许只留空白」：让设置页中途抛一次异常，断言页面上出现了原因。
@@ -10158,7 +10690,8 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
   document_.terrain['0_0'] = { t: 'forest', temp: 15 }
   document_.terrain['1_0'] = { temp: -200 }
   document_.terrain['0_1'] = { t: 'plains', temp: 0 }
-  document_.terrain['2_0'] = { t: 'water', temp: 60 }
+  // 200 越出上限一个色带跨度（75 ℃）以上 ⇒ 直接落在"极黑"那一档，颜色可逐字断言
+  document_.terrain['2_0'] = { t: 'water', temp: 200 }
   check('第 2 格只有温度、没有地形（F2 之后这是合法状态）', document_.terrain['1_0'].t === undefined)
 
   // ---- 默认隐藏：数据层不该在用户没要求时改变现有画面 ----
@@ -10190,27 +10723,32 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
   const hasFill = (color) => overlayFills().some((fill) => fill.fillStyle === color)
   check('色带内的 15℃ 用的是 15 那个锚点的颜色', hasFill('#22c55e'), JSON.stringify(overlayFills().map((f) => f.fillStyle)))
   check('色带内的 0℃ 用的是 0 那个锚点的颜色', hasFill('#00c8c8'))
-  check('低于下限的 -200℃ 用纯蓝（under）', hasFill('#0000ff'))
-  check('高于上限的 60℃ 用纯红（over）', hasFill('#ff0000'))
+  // 越界不是"贴一个纯色"：刚出界是端色，越走越远渐变成极色（行程 = 一个色带跨度 = 75 ℃）。
+  // -200℃ / 200℃ 都越出去一个跨度以上 ⇒ 直接落在两端极色上。
+  check('远远低于下限的 -200℃ 渐变成纯白（under → 极白）', hasFill('#ffffff'))
+  check('远远高于上限的 200℃ 渐变成纯黑（over → 极黑）', hasFill('#000000'))
   check(
     '色块按出厂不透明度 0.5 画（地形要能透出来）',
     overlayFills().every((fill) => Math.abs(fill.alpha - 0.5) < 1e-9),
     JSON.stringify(overlayFills().map((f) => f.alpha)),
   )
   check(
-    '只有温度没有地形的那一格也上了色（纯蓝那一笔就是它）',
-    overlayFills().some((fill) => fill.fillStyle === '#0000ff'),
+    '只有温度没有地形的那一格也上了色（纯白那一笔就是它）',
+    overlayFills().some((fill) => fill.fillStyle === '#ffffff'),
   )
   // 越界格**总是**写数值（即使"在每个格上写出数值"关着）：颜色只能表达"比上限还高"，
   // 表达不了"高多少"，而越界恰恰最需要读数。
   check(
-    '两格越界格写出了数值，且是白字（纯蓝/纯红底白字）',
-    overlayFrame.texts.length === 2 && overlayFrame.texts.every((item) => item.fillStyle === '#ffffff'),
+    '两格越界格写出了数值，字色各自按底色挑（纯白底深字 / 纯黑底白字）',
+    overlayFrame.texts.length === 2 &&
+      overlayFrame.texts.every((item) =>
+        item.text === '-200' ? item.fillStyle === '#111827' : item.fillStyle === '#ffffff',
+      ),
     JSON.stringify(overlayFrame.texts.map((item) => `${item.text}@${item.fillStyle}`)),
   )
   check(
     '写出的是它们的实际数值（不是被夹到色带端点）',
-    overlayFrame.texts.map((item) => item.text).sort().join(',') === '-200,60',
+    overlayFrame.texts.map((item) => item.text).sort().join(',') === '-200,200',
     overlayFrame.texts.map((item) => item.text).join(','),
   )
   check(
@@ -10418,9 +10956,9 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
   check('三格都画出了色块', stats().lastOverlayDrawn === 3, String(stats().lastOverlayDrawn))
   const fills = () => overlayFrame.fills.filter((fill) => fill.alpha > 0 && fill.alpha < 1)
   const hasFill = (color) => fills().some((fill) => fill.fillStyle === color)
-  check('海平面（0）用浅蓝锚点色', hasFill('#7dd3fc'), JSON.stringify(fills().map((f) => f.fillStyle)))
-  // 5000 超过出厂上限 4000 → 高于上限的近黑蓝；-1500 在带内（-4000..4000），插值结果在浅米一侧
-  check('深于上限（5000 > 4000）用近黑蓝（over）', hasFill('#0b1f4b'))
+  check('海平面（0）用出厂中灰锚点色', hasFill('#808080'), JSON.stringify(fills().map((f) => f.fillStyle)))
+  // 5000 超过出厂上限 4000 → 高于上限的纯白；-1500 在带内（-4000..4000），在"黑 → 灰"那一段里
+  check('深于上限（5000 > 4000）用纯白（over）', hasFill('#ffffff'))
   check(
     '色块按出厂不透明度 0.5 画',
     fills().every((fill) => Math.abs(fill.alpha - 0.5) < 1e-9),
@@ -10429,8 +10967,8 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
 
   // ---- 越界格总是写数值，数值按米（出厂展示单位）读 ----
   check(
-    '越界格写出了数值（出厂是米读数），用 over 的文字色',
-    overlayFrame.texts.some((item) => item.text === '5000' && item.fillStyle === '#ffffff'),
+    '越界格写出了数值（出厂是米读数），用 over 的文字色（纯白底 ⇒ 深字）',
+    overlayFrame.texts.some((item) => item.text === '5000' && item.fillStyle === '#111827'),
     JSON.stringify(overlayFrame.texts.map((item) => `${item.text}@${item.fillStyle}`)),
   )
   check(
@@ -10546,12 +11084,12 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
   const temperatureUnitSetting = settingNamed('温度的展示单位')
   check('温度没有展示单位下拉（它不需要换算）', temperatureUnitSetting === undefined)
 
-  // ---- 越界色回退用的是**深度自己的出厂值**（白 / 近黑蓝），不是温度的纯蓝 / 纯红 ----
+  // ---- 越界色回退用的是**深度自己的出厂值**（黑 / 白），不是温度的纯蓝 / 纯红 ----
   await plugin.setOverlayStyle('depth', { ramp: { ...plugin.getSettings().overlays.depth.ramp, stops: [] } })
   await tick(20)
   check(
-    '深度色带坏掉时回退到深度自己的出厂（over 仍是近黑蓝）',
-    plugin.getSettings().overlays.depth.ramp.over.color === '#0b1f4b',
+    '深度色带坏掉时回退到深度自己的出厂（over 仍是纯白）',
+    plugin.getSettings().overlays.depth.ramp.over.color === '#ffffff',
     plugin.getSettings().overlays.depth.ramp.over.color,
   )
 
@@ -10786,7 +11324,7 @@ console.log('\n场景 45：导出（SVG / PNG）带上数据层叠加层 —— 
   // ---- 打开温度层（逐格）：段出现，图元数与画布一致 ----
   await plugin.setLayerVisible('temperature', true)
   await tick(20)
-  frame()
+  const cellFrame = frame()
   const cellSvg = await exportedSvg()
   check('打开温度层后导出里出现温度段', cellSvg.includes('data-fc-overlay="temperature"'), cellSvg.slice(0, 120))
   check(
@@ -10795,7 +11333,21 @@ console.log('\n场景 45：导出（SVG / PNG）带上数据层叠加层 —— 
       stats().lastOverlayDrawn,
     `导出 ${countOf(cellSvg, /data-fc-primitive="polygon"/g)} / 画布 ${stats().lastOverlayDrawn}`,
   )
-  check('越界格在导出里是 over 的纯红（与画布一致）', cellSvg.includes('fill="#ff0000"'), cellSvg.slice(0, 200))
+  // 这一格是 80℃（越出上限 35℃，落在"纯红 → 极黑"的途中），所以**不能写死某一个端色** ——
+  // 直接跟画布比"填充色集合"，两边必须逐一对上（同一份配色 + 同一份越界口径）。
+  const canvasCellFills = [...new Set(cellFrame.fills.filter((fill) => fill.alpha > 0 && fill.alpha < 1).map((fill) => fill.fillStyle))].sort()
+  const exportCellFills = [
+    ...new Set(
+      (cellSvg.match(/data-fc-primitive="polygon"[^>]*?fill="#[0-9a-fA-F]{6}"/g) ?? []).map((tag) =>
+        (tag.match(/fill="(#[0-9a-fA-F]{6})"/) ?? [])[1],
+      ),
+    ),
+  ].sort()
+  check(
+    '导出里每格的填充色与画布逐一对上（含越界那格的渐变途中色）',
+    JSON.stringify(exportCellFills) === JSON.stringify(canvasCellFills),
+    `导出 ${JSON.stringify(exportCellFills)} / 画布 ${JSON.stringify(canvasCellFills)}`,
+  )
   check('导出里默认不写数值（导出要能看清地形）', cellSvg.includes('>80<') === false && cellSvg.includes('>15<') === false)
 
   // ---- 连续场：导出与画布的等值线数一致 ----
@@ -11234,14 +11786,15 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
     return undefined
   }
 
-  // ---- ① 矩形框选（替换）----
-  drag(farA, farB)
+  // ---- ① 矩形框选（替换）：**指针按住不放**，先验"进行中"的卡片 ----
+  const dragId = down(farA)
+  move(farB, dragId)
   check('框选整张图：14 格全选中（12 森林 + 2 水；只收地图里已有的格）', selected().length === 14, String(selected().length))
   frame()
   check('格选择真的画出来了（有可读的统计）', stats().lastCellHighlight === 14, String(stats().lastCellHighlight))
 
-  // ---- ①b 右上角信息卡（§C.4）与左上角状态条（§F.3）----
-  check('有选择时信息卡显示出来', cardEl() !== undefined && cardEl().classList.contains('is-empty') === false)
+  // ---- ①b 框选**进行中**：右上角信息卡给统计（§2.6"卡片只做进行中的事"）----
+  check('框选进行中时信息卡显示出来', cardEl() !== undefined && cardEl().classList.contains('is-empty') === false)
   check('卡片标题是总格数', collectByClass(cardEl(), 'fc-selection-card-title')[0]?.textContent === '已选 14 格', collectByClass(cardEl(), 'fc-selection-card-title')[0]?.textContent)
   check(
     '卡片的"地形种类"把 ID 翻成显示名并带个数（森林 12 · 水域 2）',
@@ -11259,6 +11812,13 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
     titleEl()?.textContent === '选择 · 矩形框选 · 14 格',
     String(statusEl()?.textContent),
   )
+  up(farB, dragId)
+  flushFrames()
+  check(
+    '抬手之后卡片收起（选择已确定 ⇒ 那一份统计归侧栏「数据显示」）',
+    cardEl().classList.contains('is-empty') === true,
+    String(cardEl()?.className),
+  )
 
   // ---- ①c 整批编辑（§C.5）：一次提交 = 一条历史、不预填共同值 ----
   plugin.ribbonIcons[0].callback()
@@ -11274,6 +11834,18 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
     collectByClass(panel.contentEl, 'fc-selection-button').find(
       (el) => el.dataset?.fcRole === 'batch-clear' && el.dataset?.fcField === key,
     )
+  const batchDetail = (prefix) => {
+    for (const row of collectByClass(panel.contentEl, 'fc-batch-detail-row')) {
+      const label = collectByClass(row, 'fc-batch-detail-label')[0]?.textContent ?? ''
+      if (label.startsWith(prefix)) return collectByClass(row, 'fc-batch-detail-value')[0]?.textContent ?? ''
+    }
+    return undefined
+  }
+
+  // ---- ①b-2 卡片降级之后，那份统计**必须**在侧栏（用户验收时说"并没有收进侧栏里"）----
+  check('侧栏「整批编辑」里有坐标范围（卡片原来那一行）', /^q 0–4 · r 0–3$/.test(batchDetail('坐标范围') ?? ''), String(batchDetail('坐标范围')))
+  check('侧栏里有温度众数 / 平均数（§C.4 那份统计的核心）', batchDetail('温度 众数') !== undefined && batchDetail('温度 平均') !== undefined, `${String(batchDetail('温度 众数'))} / ${String(batchDetail('温度 平均'))}`)
+  check('侧栏里也说明"有几格没有数据"', /14 格/.test(batchDetail('温度 缺数据') ?? ''), String(batchDetail('温度 缺数据')))
   const tempOf = () => Object.values(document_.terrain).filter((cell) => cell.temp === 25).length
   const anyTemp = () => Object.values(document_.terrain).some((cell) => cell.temp !== undefined)
 
@@ -11508,14 +12080,40 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
     `${selected().length} vs ${missingMatch?.[1]}`,
   )
 
-  // ---- ⑧ 单选的详情形态：坐标 / 地形显示名 / 没有的字段写"未填" ----
-  editor.setCellSelection(['0_0'])
-  check('单选时卡片换成那一格的详情', cardRows().get('坐标') === '(0, 0)', String(cardRows().get('坐标')))
+  // ---- ⑧ 悬停读数：卡片只做**进行中**的事（§2.6）----
+  // 卡片不再显示"已确定的选择"（那一份归侧栏「数据显示」），所以这里用**指针悬停**驱动它。
+  const hoverWorld = canvas._clientFor({ x: 0, y: 0 })
+  const hoverMove = (target = wrapper, client = hoverWorld) =>
+    firePointer(host, 'pointermove', { clientX: client.x, clientY: client.y, target, pointerId: 777 })
+  hoverMove()
+  flushFrames()
+  check('悬停在一格上时，卡片给出那一格的详情', cardRows().get('坐标') === '(0, 0)', String(cardRows().get('坐标')))
   check('详情里的地形是显示名', cardRows().get('地形') === '森林', String(cardRows().get('地形')))
   check(
     '没有的字段写"未填"，不猜 0（0 ℃ / 海平面都是合法读数）',
     rowStartingWith('温度') === '未填' && cardRows().get('生物群系') === '未填',
     `${String(rowStartingWith('温度'))} / ${String(cardRows().get('生物群系'))}`,
+  )
+
+  // 命中对象优先：同一坐标上放一个标记，悬停应报**对象名**而不是它下面那一格的地形
+  document_.markers.push({ id: 'mk-hover', label: '悬停点', p: [0, 0], icon: 'town' })
+  hoverMove()
+  flushFrames()
+  check(
+    '悬停压在标记上时报**对象名**，而不是它下面那一格的地形（§2.6 那条"命中对象优先"）',
+    collectByClass(cardEl(), 'fc-selection-card-title')[0]?.textContent === '标记：悬停点',
+    String(collectByClass(cardEl(), 'fc-selection-card-title')[0]?.textContent),
+  )
+  document_.markers.pop()
+
+  // 指针移出画布 → 读数清空；此时"已确定的选择"也不该占着卡片（那一份归侧栏）
+  hoverMove(makeEl({ tagName: 'div', className: '' }))
+  editor.setCellSelection(['0_0'])
+  flushFrames()
+  check(
+    '已确定的选择不再占着卡片（归侧栏「数据显示」），卡片整张收起',
+    cardEl().classList.contains('is-empty') === true,
+    String(cardEl()?.className),
   )
 
   // ---- ⑨ Esc 先清空选择：卡片整张收起、状态条回到"空闲" ----
@@ -11865,7 +12463,12 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   )
 
   // ---- ⑬ 信息卡里的显示名与图例同源 ----
+  // 卡片现在只显示**悬停读数**（§2.6：已确定的选择归侧栏），而悬停读数只在选择模式下产出
+  editor.setMode('select')
   editor.setCellSelection([cellKey(0, 0)])
+  const hoverCell = canvas._clientFor({ x: 0, y: 0 })
+  firePointer(host, 'pointermove', { clientX: hoverCell.x, clientY: hoverCell.y, target: wrapper, pointerId: 992 })
+  flushFrames()
   const cardRows = new Map()
   for (const row of collectByClass(collectByClass(wrapper, 'fc-selection-card')[0], 'fc-selection-card-row')) {
     cardRows.set(row.children[0]?.textContent, row.children[1]?.textContent)
@@ -11973,10 +12576,11 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   plugin.onunload()
 }
 
-console.log('\n场景 50：侧栏「显示」三组（§F.1）—— 每个开关只出现一次 + 数据层参数与设置页共用一份渲染')
+console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 整理 W1④）—— 每个开关只出现一次 + 每层的「画法」跟着层走')
 {
-  // 这一场的重点不是"有没有画出来"，而是**同一件事只有一个入口**：
-  // 分组来自图层登记表的一列、图例开关只挂在地物组里、数据层参数与设置页是同一份渲染。
+  // 这一场的重点不是"有没有画出来"，而是**同一件事只有一个入口**、且**位置符合用户口径**：
+  // 分组来自图层登记表的一列、图例开关只挂在地物组里、数据层参数与设置页是同一份渲染，
+  // 而「视图」一节把底图 / 地物两小组折进去、每一层的「画法」长在它自己那一行里。
   const canvas = makeCanvas()
   const app = makeApp(canvas)
   const plugin = await loadPlugin(app)
@@ -11993,6 +12597,9 @@ console.log('\n场景 50：侧栏「显示」三组（§F.1）—— 每个开�
   const document_ = layers.getDocument(canvasPath)
   // 一格生物群系：数据层那一组只列"地图上真的出现过"的分类
   document_.terrain[cellKey(0, 0)] = { t: 'forest', biome: 'desert' }
+  // 另两格给"多格摘要"用（其中 1_0 **一个数据字段都没有**，看摘要有没有如实报出来）
+  document_.terrain[cellKey(1, 0)] = { t: 'water' }
+  document_.terrain[cellKey(2, 0)] = { t: 'water', temp: 12 }
 
   // 面板这一节创建的 Setting 要能与设置页逐名对比，所以先把账本清空
   FakeSetting.created.length = 0
@@ -12005,7 +12612,23 @@ console.log('\n场景 50：侧栏「显示」三组（§F.1）—— 每个开�
   const legendToggle = () => collectByClass(panel.contentEl, 'fc-legend-toggle')[0]
   const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
 
-  // ---- ① 三组：底图 / 地物（分组来自 LAYER_TABLE 的 displayGroup 一列）----
+  // ---- ① 「视图」一节：保留底图 / 地物二分类（分组来自 LAYER_TABLE 的 displayGroup 一列）----
+  const viewGroup = () => collectByClass(panel.contentEl, 'fc-panel-view')[0]
+  check(
+    '图层开关折进一个「视图」折叠组（§2.4 第 4 项：视图类按钮按现有二分类折进「视图」）',
+    viewGroup()?.tagName === 'DETAILS',
+    String(viewGroup()?.tagName),
+  )
+  check(
+    '它默认展开（图层开关是高频使用的功能，进来先看见"现在显示着什么"）',
+    viewGroup()?.open === true,
+    String(viewGroup()?.open),
+  )
+  check(
+    '「视图」里还是底图 / 地物两个小组（二分类保留，不是被合并掉）',
+    collectByClass(viewGroup(), 'fc-panel-layers').map((el) => el.dataset?.fcDisplayGroup).join(',') === 'base,feature',
+    collectByClass(viewGroup(), 'fc-panel-layers').map((el) => el.dataset?.fcDisplayGroup).join(','),
+  )
   check(
     '「底图」组里是地形 / 温度 / 深度 / 生物群系 / 网格',
     keysIn(groupOf('base')).join(',') === 'terrain,temperature,depth,biome,grid',
@@ -12049,42 +12672,72 @@ console.log('\n场景 50：侧栏「显示」三组（§F.1）—— 每个开�
   flushFrames()
   check('再点一次就关回去（同一个入口开、也由它关）', plugin.getSettings().showLegend === false)
 
-  // ---- ③ 「数据层参数」第三组：默认收起、逐字段一节、与设置页共用一份渲染 ----
-  const dataGroup = () => collectByClass(panel.contentEl, 'fc-panel-data')[0]
+  // ---- ③ 数据层的「画法」**跟着它那一层走**（用户本轮口径：折进「视图」里跟着层走）----
+  const rowOf = (key) => collectByClass(panel.contentEl, 'fc-layer-row').find((el) => el.dataset?.fcLayerRow === key)
+  const drawToggle = (key) => collectByClass(rowOf(key), 'fc-layer-draw-toggle')[0]
+  const drawBody = (key) => collectByClass(rowOf(key), 'fc-layer-draw-body')[0]
+  const dataFields = ['temperature', 'depth', 'biome']
+  const plainLayers = ['terrain', 'grid', 'regions', 'paths', 'markers', 'labels']
   check(
-    '「数据层参数」是默认收起的折叠组（色带逐行编辑，一屏放不下）',
-    dataGroup()?.tagName === 'DETAILS' && dataGroup().open === false,
-    `tag=${String(dataGroup()?.tagName)} open=${String(dataGroup()?.open)}`,
-  )
-  const fieldSections = () =>
-    collectByClass(panel.contentEl, 'fc-panel-data-field').map((el) => el.dataset.fcOverlayField)
-  check(
-    '组里每个数据层字段各一节（由字段表派生：加一层自动多一节）',
-    fieldSections().join(',') === 'temperature,depth,biome',
-    fieldSections().join(','),
+    '「画法」只长在数据层那三行上（其余六层没有可调的东西，不摆一个点了没反应的）',
+    dataFields.every((key) => drawToggle(key) !== undefined) && plainLayers.every((key) => drawToggle(key) === undefined),
+    `${dataFields.filter((key) => drawToggle(key) !== undefined).join(',')} / ${plainLayers.filter((key) => drawToggle(key) !== undefined).join(',')}`,
   )
   check(
-    '说明里点明"开关不在这里"（在底图一组），免得用户在这一组里找开关',
-    (collectByClass(dataGroup(), 'fc-settings-note')[0]?.textContent ?? '').includes('底图'),
-    String(collectByClass(dataGroup(), 'fc-settings-note')[0]?.textContent).slice(0, 80),
+    '默认收起：一个画法控件都没有（面板首屏不被色带锚点占满）',
+    collectByClass(panel.contentEl, 'fc-layer-draw-body').length === 0,
+    String(collectByClass(panel.contentEl, 'fc-layer-draw-body').length),
   )
 
-  // 面板这一节创建的 Setting 与设置页**同名**（同一份渲染的证据）
-  const panelSettingNames = FakeSetting.created.map((setting) => setting.info.name ?? '')
+  // 展开温度那一行：控件必须长在**它自己那一行**里，而不是面板末尾另起一组
+  // （面板这一层创建的 Setting 要能与设置页逐名对比，所以边展开边把账本攒起来）
+  const panelSettingNames = []
+  FakeSetting.created.length = 0
+  fireEvent(drawToggle('temperature'), 'click')
+  await tick(30)
+  flushFrames()
   check(
-    '数值字段那一节是**色带锚点**（温度的最低锚点那一行在）',
-    panelSettingNames.includes('温度色带锚点 1（最低）'),
-    JSON.stringify(panelSettingNames.filter((name) => name.includes('色带锚点')).slice(0, 4)),
+    '展开「画法」后，控件长在温度自己那一行里（不是"开关在上面、画法在下面另一组"）',
+    drawBody('temperature')?.dataset?.fcOverlayField === 'temperature' &&
+      drawBody('temperature')?.dataset?.fcDrawBody === 'temperature',
+    String(drawBody('temperature')?.dataset?.fcOverlayField),
   )
+  check(
+    '展开的那一行独占整行（半个格子放不下"色带锚点"那一行的输入框 + 取色器）',
+    rowOf('temperature')?.dataset?.fcDrawOpen === '1',
+    String(rowOf('temperature')?.dataset?.fcDrawOpen),
+  )
+  check('别的层没跟着展开（展开是逐层的，不是一整节）', drawBody('depth') === undefined && drawBody('biome') === undefined)
+  panelSettingNames.push(...FakeSetting.created.map((setting) => setting.info.name ?? ''))
+  check(
+    '「画法」就是这一层的参数：色带锚点 / 不透明度 / 显示方式都在',
+    ['温度色带锚点 1（最低）', '温度层的不透明度', '温度的显示方式'].every((name) => panelSettingNames.includes(name)),
+    JSON.stringify(panelSettingNames.slice(0, 6)),
+  )
+  check(
+    '展开状态跨整块重建保留（改一个值之后不用重新点开一次）',
+    (() => {
+      panel.render(true)
+      return drawBody('temperature') !== undefined && rowOf('temperature')?.dataset?.fcDrawOpen === '1'
+    })(),
+  )
+
+  // 分类字段那一支：逐条颜色，没有色带锚点
+  FakeSetting.created.length = 0
+  fireEvent(drawToggle('biome'), 'click')
+  await tick(30)
+  flushFrames()
+  const biomeNames = FakeSetting.created.map((setting) => setting.info.name ?? '')
+  panelSettingNames.push(...biomeNames)
   check(
     '分类字段那一节是**逐条颜色**、没有色带锚点（分类值之间没有高低）',
     FakeSetting.created.some((setting) => setting.text?.inputEl?.dataset?.fcBiomeColor === 'desert') &&
-      panelSettingNames.some((name) => name.includes('生物群系的逐条颜色')) &&
-      panelSettingNames.includes('生物群系色带锚点 1（最低）') === false,
-    JSON.stringify(panelSettingNames.filter((name) => name.includes('生物群系')).slice(0, 4)),
+      biomeNames.some((name) => name.includes('生物群系的逐条颜色')) &&
+      biomeNames.includes('生物群系色带锚点 1（最低）') === false,
+    JSON.stringify(biomeNames.filter((name) => name.includes('生物群系')).slice(0, 4)),
   )
 
-  // ---- ④ 面板这一组是**能改的**（不是只读的摆设）：改一个锚点值 → 设置真的变 ----
+  // ---- ④ 面板这一份是**能改的**（不是只读的摆设）：改一个锚点值 → 设置真的变 ----
   FakeSetting.created.length = 0
   plugin.settingTabs[0].display()
   const settingsNames = FakeSetting.created.map((setting) => setting.info.name ?? '')
@@ -12108,7 +12761,358 @@ console.log('\n场景 50：侧栏「显示」三组（§F.1）—— 每个开�
     `${before} → ${String(plugin.getSettings().overlays.temperature.ramp.stops[0].value)}`,
   )
 
+  // ---- ⑤ 数据显示面板：常驻、置顶、内容区留好整块（§2.4 第 1 项）----
+  const selectionPanel = () => collectByClass(panel.contentEl, 'fc-panel-selection')[0]
+  check(
+    '数据显示面板常驻：现在没有选中任何东西，它仍然在，并写清"怎么办"',
+    selectionPanel() !== undefined &&
+      collectByClass(selectionPanel(), 'fc-panel-group-title')[0]?.textContent === '数据显示' &&
+      collectByClass(selectionPanel(), 'fc-selection-hint').length === 1,
+    String(collectByClass(selectionPanel(), 'fc-panel-group-title')[0]?.textContent),
+  )
+  check(
+    '内容区有独立的容器（`fc-selection-body`，CSS 给它固定最小高度 ⇒ 选中/不选中不上下缩动）',
+    collectByClass(selectionPanel(), 'fc-selection-body').length === 1,
+  )
+
+  // ---- ⑥ 从上到下的定稿顺序（§2.4）：数据显示 → 工具 / 笔刷 / 选择方式 / 编辑 → 视图 → 动作组 ----
+  const topLevelOrder = () => {
+    const out = []
+    for (const child of panel.contentEl.children ?? []) {
+      const cls = child.className ?? ''
+      // ⚠️ 先判 `fc-panel-selection-mode`：`fc-panel-selection` 是它的子串，
+      // 顺序反过来会把"选择方式"那一节误认成"数据显示"（这条断言自己踩过一次）
+      if (cls.includes('fc-panel-selection-mode')) out.push('选择方式')
+      else if (cls.includes('fc-panel-selection')) out.push('数据显示')
+      else if (cls.includes('fc-panel-tools')) out.push('工具')
+      else if (cls.includes('fc-panel-brush')) out.push('笔刷')
+      else if (cls.includes('fc-panel-view')) out.push('视图')
+      else if (cls.includes('fc-panel-group')) {
+        const title = collectByClass(child, 'fc-panel-group-title')[0]?.textContent ?? ''
+        if (title.length > 0) out.push(title)
+      }
+    }
+    return out
+  }
+  check(
+    '面板从上到下就是定稿顺序：数据显示 → 工具 → 笔刷 → 选择方式 → 编辑 → 视图 → 地图层 → 地图定义 → 文件与导出',
+    topLevelOrder().join('>') === '数据显示>工具>笔刷>选择方式>编辑>视图>地图层>地图定义>文件与导出',
+    topLevelOrder().join('>'),
+  )
+
+  // ---- ⑦ 筛选归「编辑」组，不再挂在地图层下面（用户 m01803 第 3 条）----
+  const groupTitled = (title) =>
+    collectByClass(panel.contentEl, 'fc-panel-group').find(
+      (el) => collectByClass(el, 'fc-panel-group-title')[0]?.textContent === title,
+    )
+  const buttonInGroup = (title, fragment) =>
+    collectByClass(groupTitled(title), 'fc-panel-button').find((button) =>
+      (collectByClass(button, 'fc-panel-button-label')[0]?.textContent ?? '').includes(fragment),
+    )
+  check(
+    '「按规则筛选选择…」归「编辑」组（用户："筛选错误的放进了地图层里面，这个应该是编辑工具"）',
+    buttonInGroup('编辑', '按规则筛选选择') !== undefined && buttonInGroup('地图层', '按规则筛选选择') === undefined,
+    `编辑组=${buttonInGroup('编辑', '按规则筛选选择') !== undefined} 地图层组=${buttonInGroup('地图层', '按规则筛选选择') !== undefined}`,
+  )
+  check(
+    '「地图层」组只剩地图级的东西（启用/停用地图层、海拔标定、数据层默认值）',
+    collectByClass(groupTitled('地图层'), 'fc-panel-button-label')
+      .map((el) => el.textContent ?? '')
+      .join('|')
+      .includes('启用/停用当前 Canvas 的地图层'),
+    collectByClass(groupTitled('地图层'), 'fc-panel-button-label').map((el) => el.textContent ?? '').join('|'),
+  )
+
+  // ---- ⑧ 单选一格：先给读数、再给编辑（§2.6 形态 3）----
+  const editor = layers.getInspectorEditor()
+  editor.setCellSelection([cellKey(0, 0)])
+  // 卡片那边同时悬停在同一格上：它现在只显示**悬停读数**（已确定的选择归侧栏），
+  // 下面那条"同源"断言就是拿侧栏的读数与卡片的悬停读数逐字比
+  const cardHost = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
+  const hoverClient = canvas._clientFor({ x: 0, y: 0 })
+  firePointer(cardHost, 'pointermove', { clientX: hoverClient.x, clientY: hoverClient.y, target: wrapper, pointerId: 991 })
+  flushFrames()
+  const readingRows = () =>
+    collectByClass(selectionPanel(), 'fc-selection-reading').map((row) => ({
+      label: collectByClass(row, 'fc-selection-reading-label')[0]?.textContent ?? '',
+      value: collectByClass(row, 'fc-selection-reading-value')[0]?.textContent ?? '',
+    }))
+  check(
+    '选中一格时，「数据显示」给出温度 / 深度 / 生物群系三行读数（不用展开任何折叠组就能看见值）',
+    // 只钉"有哪三行"与首尾两个标签；深度那一行的标签把两个单位名都写进去了，
+    // 写死它会变成"改文案就红"（下面那条同源断言按**实际标签**取，不写死）
+    readingRows().length === 3 &&
+      readingRows()[0]?.label === '温度' &&
+      readingRows()[2]?.label === '生物群系',
+    readingRows().map((row) => row.label).join(','),
+  )
+  check(
+    '没有值的字段写「未填」，**不猜 0**（0 ℃ / 海平面都是合法读数，猜出来的 0 与"没量过"是两回事）',
+    readingRows().filter((row) => row.value === '未填').length === 2,
+    JSON.stringify(readingRows()),
+  )
+  check(
+    '读数里的生物群系是**显示名**而不是裸 ID（与信息卡、图例同一份解析）',
+    readingRows().find((row) => row.label === '生物群系')?.value === '沙漠',
+    String(readingRows().find((row) => row.label === '生物群系')?.value),
+  )
+  const cardValueOf = (label) =>
+    collectByClass(collectByClass(wrapper, 'fc-selection-card')[0], 'fc-selection-card-row')
+      .map((row) => ({
+        label: collectByClass(row, 'fc-selection-card-label')[0]?.textContent ?? '',
+        value: collectByClass(row, 'fc-selection-card-value')[0]?.textContent ?? '',
+      }))
+      .find((row) => row.label === label)?.value
+  const depthLabel = readingRows()[1]?.label ?? ''
+  check(
+    '两处读数**同源**（都调 `describeCellReadings`）：深度那一行面板与画布信息卡一字不差',
+    depthLabel.length > 0 &&
+      readingRows()[1]?.value === cardValueOf(depthLabel),
+    `标签=${depthLabel} 面板=${String(readingRows()[1]?.value)} 卡片=${String(cardValueOf(depthLabel))}`,
+  )
+
+  // ---- ⑨ 「清空选择」在侧栏（§2.6：侧栏是"选择"的唯一家）----
+  const clearButton = () => collectByClass(selectionPanel(), 'fc-selection-clear')[0]
+  check('「数据显示」标题旁边有「清空选择」', clearButton() !== undefined)
+  check('有选择时它是可点的', clearButton()?.disabled === false, String(clearButton()?.disabled))
+  check(
+    '面板里只有**一个**「清空选择」（整批编辑那一块不再重复挂一个 —— 同一件事只出现一次）',
+    collectByClass(panel.contentEl, 'fc-selection-clear').length === 1,
+    String(collectByClass(panel.contentEl, 'fc-selection-clear').length),
+  )
+  fireEvent(clearButton(), 'click')
+  flushFrames()
+  check(
+    '点它 → 对象与格一起清空（与 Esc 的第一步同一件事）',
+    editor.getCellSelection().length === 0 && editor.getSelection() === null,
+    `格=${editor.getCellSelection().length} 对象=${String(editor.getSelection())}`,
+  )
+  check('清空后按钮**灰掉**而不是消失（没选择时它点了也不会有任何变化）', clearButton()?.disabled === true, String(clearButton()?.disabled))
+  check('读数行也跟着消失（已经不是"恰好一格"这一形态了）', collectByClass(selectionPanel(), 'fc-selection-reading').length === 0)
+
+  // ---- ⑩ 多格：整批编辑头部有一行摘要，不是"裸着"（用户 m01930 追加口径 · §2.6）----
+  editor.setCellSelection([cellKey(0, 0), cellKey(1, 0), cellKey(2, 0)])
+  flushFrames()
+  const batchSummary = () => collectByClass(selectionPanel(), 'fc-batch-summary')[0]?.textContent ?? ''
+  check('多格时「整批编辑」头部有一行摘要（不是"进去就是一片输入框"）', batchSummary().length > 0, batchSummary())
+  check(
+    '摘要写地形构成、按格数降序、用**显示名**：水域 2 · 森林 1',
+    batchSummary().startsWith('水域 2 · 森林 1'),
+    batchSummary(),
+  )
+  check(
+    '摘要点出"有几格一个数据字段都没有"（三格里只有 1_0 全空）',
+    batchSummary().includes('1 格没有数据'),
+    batchSummary(),
+  )
+  check('多格时不再显示单格那三行读数（形态之间不混着来）', collectByClass(selectionPanel(), 'fc-selection-reading').length === 0)
+
   console.log('  （场景 50 结束）')
+  plugin.onunload()
+}
+
+console.log('\n场景 51：定义随图（W4-1b）—— 图里那一份说了算，本机设置里没有它也能画出来')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+
+  /**
+   * 造一张"别人给的图"：**文件里自带一套定义**，而库级设置里没有它。
+   *
+   * 这正是方案 B 要解决的那件事（用户 m01845：「分享一张图对方就能拿到完整定义」）——
+   * 所以断言必须落在"本机没有这条定义，但打开这张图仍然画得对"上。
+   */
+  const gift = await store.createMap({ name: 'Gift', folder: 'Maps', canvasPath })
+  const giftLoaded = await store.load(gift)
+  const giftDoc = giftLoaded.document
+  giftDoc.definitions = {
+    terrains: [{ id: 'custom:alien', label: '外星地形', color: '#ff00ff' }],
+    markers: [],
+    biomes: [],
+    pathTypes: [],
+    regionTypes: [],
+  }
+  giftDoc.terrain['0_0'] = { t: 'custom:alien' }
+  await store.writeNow(
+    gift,
+    giftDoc,
+    giftLoaded.frontmatter.name ?? 'Gift',
+    giftLoaded.frontmatter.canvases,
+    giftLoaded.frontmatter.rest,
+  )
+  await settleEvents()
+
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 90))
+
+  check(
+    '前提：库级设置里**没有**这条自定义地形（否则下面证不出"看的是图里那一份"）',
+    !plugin.getSettings().customTerrains.some((terrain) => terrain.id === 'custom:alien'),
+    JSON.stringify(plugin.getSettings().customTerrains.map((terrain) => terrain.id)),
+  )
+  check(
+    '定义解析按**文档**走：同一份文档算出来的定义集里有它（不是本机设置那一份）',
+    plugin.definitionsOf(layers.getDocument(canvasPath)).terrains.some((terrain) => terrain.id === 'custom:alien'),
+    JSON.stringify(plugin.definitionsOf(layers.getDocument(canvasPath)).terrains.map((terrain) => terrain.id)),
+  )
+  const legend = layers.buildLegendFor(canvasPath)
+  check(
+    '图例用的是文件里那一份定义（名字来自地图文件，不是本机设置）',
+    legend.some((entry) => entry.label === '外星地形'),
+    JSON.stringify(legend.slice(0, 6).map((entry) => entry.label)),
+  )
+
+  // ---- 写：改动落在**这张图的文件**里，同时同步"新建地图的模板" ----
+  // 按 **ID** 改（不是下标）：弹窗渲染的那份与"点下去那一刻的活动地图"未必同一份，
+  // 按 ID 最坏只是"这条不在这一份里 → 什么也不做"，不会改错条目
+  await plugin.updateCustomTerrain('custom:alien', { color: '#00ff00' })
+  // 有地图层时走编辑器的 `setDefinitions`（可撤销），落盘是防抖的 —— 断文件之前先把它冲出来
+  await store.flush()
+  const giftText = String(app.vault.files.get(gift.path))
+  check(
+    '改定义写进了**这张图的文件**（v2 的 definitions 段里能看到新颜色）',
+    giftText.includes('"definitions"') && giftText.includes('#00ff00'),
+    giftText.slice(giftText.indexOf('"definitions"'), giftText.indexOf('"definitions"') + 200),
+  )
+  check(
+    '同一份改动也同步进了库级模板（它是"新建地图的模板"，不跟上就会出现"新图还是旧定义"）',
+    plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:alien')?.color === '#00ff00',
+    JSON.stringify(plugin.getSettings().customTerrains),
+  )
+  check(
+    '新颜色立刻在这张图上生效（图例跟着换，不需要重开画布）',
+    layers.buildLegendFor(canvasPath).some((entry) => entry.label === '外星地形' && entry.color === '#00ff00'),
+    JSON.stringify(layers.buildLegendFor(canvasPath).slice(0, 6)),
+  )
+
+  // ---- 另一张图有自己的 definitions ⇒ 库级模板那条**不会**渗过去 ----
+  const other = await store.createMap({ name: 'Other', folder: 'Maps' })
+  const otherLoaded = await store.load(other)
+  otherLoaded.document.definitions = { terrains: [], markers: [], biomes: [], pathTypes: [], regionTypes: [] }
+  await store.writeNow(
+    other,
+    otherLoaded.document,
+    otherLoaded.frontmatter.name ?? 'Other',
+    otherLoaded.frontmatter.canvases,
+    otherLoaded.frontmatter.rest,
+  )
+  check(
+    '库级模板里有 custom:alien，但另一张图写明了"没有自定义地形" ⇒ 读出来就是空的（不渗过去）',
+    plugin.definitionsOf(otherLoaded.document).terrains.length === 0,
+    JSON.stringify(plugin.definitionsOf(otherLoaded.document).terrains),
+  )
+
+  // ---- 按 ID 定位的安全边界（弹窗开着时活动地图可能已经换过）----
+  const beforeAlien = JSON.stringify(plugin.getSettings().customTerrains)
+  await plugin.updateCustomTerrain('custom:does-not-exist', { color: '#000000' })
+  await plugin.removeCustomTerrain('custom:does-not-exist')
+  check(
+    '给不存在的 ID 发补丁 / 删除 ⇒ 一个字节都不改（按 ID 定位最坏只是"没这条"，绝不会改错条目）',
+    JSON.stringify(plugin.getSettings().customTerrains) === beforeAlien,
+    JSON.stringify(plugin.getSettings().customTerrains),
+  )
+
+  plugin.onunload()
+}
+
+console.log('\n场景 52：视图偏好按地图分份（W4-2）—— 每张图一份，缺则回落「新建地图的模板」')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  /**
+   * 预置一份 data.json：模板里网格开着、温度不透明度 0.9；而**另一张图**（`Maps/Other.map.md`）
+   * 单独关过网格、把温度不透明度调成 0.2。
+   *
+   * 这正是 W4-2 要区分的那件事：库级那三份是"新建地图的初值"，某张图单独调过之后是**它自己那一份**。
+   */
+  const PluginClass = loadBundleAsCjs()
+  const plugin = new PluginClass(app, { id: 'project-kaki' })
+  plugin._data = JSON.stringify({
+    layers: { grid: true },
+    overlays: { temperature: { opacity: 0.9 } },
+    mapViews: {
+      'Maps/Other.map.md': { layers: { grid: false }, overlays: { temperature: { opacity: 0.2 } } },
+    },
+  })
+  await plugin.onload()
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const world = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  // 往这张图里放一格地形（下面要验"关掉地形层 ⇒ 图例里就没有它"）
+  const loaded = await store.load(world)
+  loaded.document.terrain['0_0'] = { t: 'forest' }
+  await store.writeNow(
+    world,
+    loaded.document,
+    loaded.frontmatter.name ?? 'World',
+    loaded.frontmatter.canvases,
+    loaded.frontmatter.rest,
+  )
+  await settleEvents()
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 90))
+
+  check(
+    '模板与「另一张图自己那一份」解析出不同结果（这才是按地图分份，不是一个全局值）',
+    plugin.layersFor('Maps/Other.map.md').grid === false &&
+      plugin.layersFor('Maps/World.map.md').grid === true &&
+      plugin.overlaysFor('Maps/Other.map.md').temperature.opacity === 0.2 &&
+      plugin.overlaysFor('Maps/World.map.md').temperature.opacity === 0.9,
+    JSON.stringify({
+      otherGrid: plugin.layersFor('Maps/Other.map.md').grid,
+      worldGrid: plugin.layersFor('Maps/World.map.md').grid,
+      otherOpacity: plugin.overlaysFor('Maps/Other.map.md').temperature.opacity,
+      worldOpacity: plugin.overlaysFor('Maps/World.map.md').temperature.opacity,
+    }),
+  )
+  check(
+    '迁移没往表里多塞条目（只有 data.json 里本来就写着的那一张图）',
+    Object.keys(plugin.getSettings().mapViews).join(',') === 'Maps/Other.map.md',
+    JSON.stringify(Object.keys(plugin.getSettings().mapViews)),
+  )
+
+  // ---- 画布那一侧真的按"这张图"解析：关掉地形层 ⇒ 图例里不再有它 ----
+  const beforeLegend = layers.buildLegendFor(canvasPath).length
+  await plugin.setLayerVisible('terrain', false)
+  const afterLegend = layers.buildLegendFor(canvasPath).length
+  check(
+    '画布 / 图例那一侧按这张图解析（关掉地形层之后，图例里地形那一行没了）',
+    beforeLegend > 0 && afterLegend < beforeLegend,
+    `before=${beforeLegend} after=${afterLegend}`,
+  )
+
+  // ---- 写：进这张图那一份 + 镜像模板 + 不动别的图 ----
+  const settings = plugin.getSettings()
+  check(
+    '写进的是**这张图**那一份（`mapViews[当前地图路径]`）',
+    settings.mapViews['Maps/World.map.md']?.layers?.terrain === false,
+    JSON.stringify(settings.mapViews),
+  )
+  check(
+    '模板同步跟上（它是"新建地图的初值"，不跟上就会"新图打回出厂"）',
+    settings.layers.terrain === false,
+    JSON.stringify(settings.layers),
+  )
+  check(
+    '另一张图那一份没被动过（它自己那条里地形仍是默认开）',
+    settings.mapViews['Maps/Other.map.md']?.layers?.terrain === true &&
+      settings.mapViews['Maps/Other.map.md']?.layers?.grid === false,
+    JSON.stringify(settings.mapViews['Maps/Other.map.md']),
+  )
+
+  // ---- 边界：视图偏好**不进地图文件**（它是"怎么画"，不是"世界里有什么"）----
+  await store.flush()
+  check(
+    '视图偏好没有写进地图文件（分享一张图不该把对方的看法一起改掉）',
+    !String(app.vault.files.get(world.path)).includes('mapViews'),
+    String(app.vault.files.get(world.path)).slice(0, 80),
+  )
+
   plugin.onunload()
 }
 

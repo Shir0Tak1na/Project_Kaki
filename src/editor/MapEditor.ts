@@ -28,6 +28,8 @@ import type {
   TerrainCell,
   TerrainId,
 } from '../data/mapDocument.ts'
+import { MAP_DOCUMENT_VERSION } from '../data/mapDocument.ts'
+import type { MapDefinitions } from '../data/mapDocument.ts'
 import { cellsAlongSegment } from './brushPath.ts'
 import { History, applyOp, opsFromPrevious, opsFromPreviousOf, type MapOp } from './history.ts'
 import type { ElevationCalibration } from '../render/elevationUnits.ts'
@@ -38,11 +40,14 @@ import {
   hitTestSelection,
   isCollectionKind,
   objectRecordOf,
+  probeHover,
   readObjectFieldValue,
   sameObjectFieldValue,
   selectionSupports,
   SELECTION_KINDS,
   type MapSelection,
+  type HoverReadout,
+  type ObjectBatchInfo,
   type SelectionFieldValue,
   type SelectionInfo,
   type SelectionLabelResolvers,
@@ -130,6 +135,34 @@ function sameSelection(a: MapSelection | null, b: MapSelection | null): boolean 
   return a.kind === b.kind && a.id === b.id
 }
 
+/**
+ * 把任意一串选中项收敛成**合法**的对象选择（§2.6 的两条边界）。
+ *
+ * - **去重**（同一个对象不可能被选两次）；
+ * - **只留第一项那一类**：异类混选的字段体系不同源（标记没有线宽、路径没有图标），
+ *   交集的字段常为空 ⇒ 一屏用不了的控件。用户 m01902 授权的也只是"**同类**多对象选择"。
+ *
+ * 归一化放在这一层而不是"靠调用方自觉"：下游（侧栏、批量动作、高亮）全都按
+ * "这些选中项同类"来写，一旦有一条混合的漏进来，那些地方就会各自出怪相。
+ */
+function normalizeObjectSelection(list: readonly MapSelection[]): MapSelection[] {
+  const out: MapSelection[] = []
+  let kind: MapSelection['kind'] | null = null
+  for (const item of list) {
+    if (kind === null) kind = item.kind
+    else if (item.kind !== kind) continue
+    if (out.some((existing) => sameSelection(existing, item))) continue
+    out.push(item)
+  }
+  return out
+}
+
+/** 两个对象选择是否相同（有序比较：顺序决定"第一个 = 检查器正在看的那一个"） */
+function sameObjectSelection(a: readonly MapSelection[], b: readonly MapSelection[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((item, index) => sameSelection(item, b[index] ?? null))
+}
+
 /** 当前链接（`null` = 找不到该对象） */
 function currentLinkOf(document_: MapDocument, selection: MapSelection): string | null {
   switch (selection.kind) {
@@ -144,6 +177,30 @@ function currentLinkOf(document_: MapDocument, selection: MapSelection): string 
     case 'cell':
       return null
   }
+}
+
+/**
+ * 多个对象在某个键上的**共同值**（读原始记录，所以"没有这个键"与"空串"分得开）。
+ *
+ * 各不相同 → `null`：面板据此留空并写明"各不相同"，**不猜一个共同值**
+ * （猜了以后一提交就把一半对象改成错的 —— 与 §C.5 那条同一个理由）。
+ */
+function commonFieldValue(
+  document_: MapDocument,
+  items: readonly MapSelection[],
+  field: string | null,
+): string | null {
+  if (field === null || items.length === 0) return null
+  let value: string | null = null
+  for (const item of items) {
+    const record = objectRecordOf(document_, item.kind, item.id)
+    if (record === null) return null
+    const raw = record[field]
+    const text = typeof raw === 'string' ? raw : ''
+    if (value === null) value = text
+    else if (value !== text) return null
+  }
+  return value
 }
 
 /** 当前名称（地块没有名字 → `null`） */
@@ -316,6 +373,14 @@ export interface EditorStatus {
   /** 当前选中的对象（`null` = 没选中）—— 侧栏检查器与高亮都读它 */
   selection: MapSelection | null
   /**
+   * 当前选中的**全部对象**（同类多选，§2.6）。
+   *
+   * 与 `selection` 的关系：`selection` 是它的第一项（"检查器正在编辑的那一个"），
+   * 保留它是为了下游与既有断言不必都学会"一群对象"这件事。
+   * 高亮与侧栏多选形态都读这一项；长度 ≤ 1 时两者含义完全一样。
+   */
+  objectSelection: MapSelection[]
+  /**
    * 当前**格选择**（有序去重的格键）。
    *
    * 与 `selection` 并存：`selection` 是"侧栏检查器在编辑哪一个对象"（单选），
@@ -385,12 +450,15 @@ export class MapEditor {
   brushValueConfirmed = false
   brushBiome = ''
   /**
-   * 当前选中的对象（用户要的"先选中，再决定操作"）。
+   * 当前选中的**对象选择**（可多个同类）。
    *
    * 刻意**不**进历史栈：选中是"看哪里"，不是对文档的修改 ——
    * 撤销一次却把选中也换掉，用户会觉得 Ctrl+Z"撤歪了"。
+   *
+   * 这是对象选择的**唯一真相**；`getSelection()` 返回的是它的第一项（派生值，
+   * 供"只认识一个对象"的下游与既有断言使用）。
    */
-  private selection: MapSelection | null = null
+  private objectSelection: MapSelection[] = []
   /**
    * 格选择（多格）。**同样不进撤销栈**（施工文件 §C.3：撤销/重做、切画布、重载地图后
    * **按 key 保留**选择）——所以它只活在这里，不产生 op，也不碰 history。
@@ -409,8 +477,6 @@ export class MapEditor {
     brushKeys: string[]
     moved: boolean
   } | null = null
-  /** 选中那一刻撤销栈的深度（算"本次选中改了几处"的基准，见 `editsSinceSelection`） */
-  private selectionUndoBaseline = 0
   /** 进行中的拖动移动（标记 / 文字标注） */
   private moveState: { kind: 'marker' | 'label'; id: string; from: [number, number] } | null = null
   /** 进行中的多点草稿（路径 / 区域） */
@@ -438,7 +504,8 @@ export class MapEditor {
       strokeCells: this.strokeCells.length,
       draftPoints: this.draft?.clickCount ?? 0,
       geometryMode: this.geometryMode,
-      selection: this.selection,
+      selection: this.getSelection(),
+      objectSelection: this.objectSelection,
       cellSelection: this.cellSelection,
       selectionMode: this.selectionMode,
       brushField: this.brushField,
@@ -541,20 +608,39 @@ export class MapEditor {
   // ---------------------------------------------------------------- 选中
 
   getSelection(): MapSelection | null {
-    return this.selection
+    return this.objectSelection[0] ?? null
+  }
+
+  /** 当前选中的**全部**对象（同类多选；见 `setObjectSelection` 的归一化规则） */
+  getObjectSelection(): MapSelection[] {
+    return this.objectSelection
   }
 
   /**
-   * 选中某个对象；传入 `null` = 清空。
+   * 选中某个对象；传入 `null` = 清空。这是**单选语义**（等价于"只选它"）。
    *
    * 返回是否真的变了：调用方（交互层）据此决定要不要重绘 —— 每次点击都重绘会让
    * 平移画布时白白多画一帧。
    */
   setSelection(selection: MapSelection | null): boolean {
-    if (sameSelection(this.selection, selection)) return false
-    this.selection = selection
-    // 记下"选中那一刻撤销栈有多深"：面板用「已改 N 处 / 撤销这些改动」就靠它
-    this.selectionUndoBaseline = this.history.size().undo
+    return this.setObjectSelection(selection === null ? [] : [selection])
+  }
+
+  /**
+   * 设置**对象选择**（可多个同类）。对象选择的唯一写入口。
+   *
+   * 三条硬边界（§2.6「批量编辑三形态」· 用户 m01902 授权"同类多对象选择"之后就定死了）：
+   * - **只允许同类**：异类混选的字段体系不同源 ⇒ 这里按第一项归一化（`normalizeObjectSelection`）；
+   * - **对象与格永不同时非空**：选了对象就清空格选择（选 ≥2 格时反过来清对象，见 `setCellSelection`）；
+   * - **顺序有意义**：第一项就是"检查器正在编辑的那一个"（`getSelection()` 取它）。
+   */
+  setObjectSelection(list: readonly MapSelection[]): boolean {
+    const normalized = normalizeObjectSelection(list)
+    if (sameObjectSelection(this.objectSelection, normalized)) return false
+    this.objectSelection = normalized
+    // 对象与格**不同时非空**（§2.6）。注意"对象"得排除地块本身：选一格时对象选中与格选择
+    // 本来就重合（见 `setCellSelection`），在这里清掉会让单格选择当场消失、信息卡变空。
+    if (normalized.length > 0 && normalized[0]!.kind !== 'cell') this.cellSelection = []
     this.notifySelectionChanged()
     return true
   }
@@ -564,24 +650,6 @@ export class MapEditor {
     if (this.options.onSelectionChanged) this.options.onSelectionChanged()
     else this.options.onChanged()
     this.options.onStateChanged?.()
-  }
-
-  /** 本次选中之后一共改了几处（一次提交 = 一条历史，所以直接数撤销栈） */
-  editsSinceSelection(): number {
-    return Math.max(0, this.history.size().undo - this.selectionUndoBaseline)
-  }
-
-  /**
-   * 撤销"本次选中期间的改动"（检查器上那个按钮）。
-   *
-   * **逐条撤销**，而不是"把文档回滚到选中那一刻"：撤销栈里本来就是可逆的 op，
-   * 逐条 undo 的结果与用户自己按 N 次 Ctrl+Z 一模一样 —— 而且这些改动仍可重做，
-   * 不会出现"点一下按钮就把中间状态全丢了"。
-   */
-  undoEditsSinceSelection(): number {
-    const count = this.editsSinceSelection()
-    for (let index = 0; index < count; index += 1) this.undo()
-    return count
   }
 
   clearSelection(): boolean {
@@ -608,6 +676,63 @@ export class MapEditor {
     return this.setSelection(hit)
   }
 
+  /**
+   * 悬停时"指针下面是什么"（§2.6：**命中对象报对象名**，否则报格读数）。
+   *
+   * 与 `selectAt` 共用同一套命中（`hitTestSelection` + 注入的形状命中），
+   * 所以"悬停看到什么"与"点下去选中什么"永远一致。
+   * 读数**不进任何状态**：它只活在这一帧的返回值里，谁要显示谁拿着（面板 / 信息卡都不该存它）。
+   */
+  probeHoverAt(world: Point, toleranceWorld: number): HoverReadout {
+    const document_ = this.options.getDocument()
+    const grid = this.grid()
+    if (!document_ || !grid) return { kind: 'none' }
+    return probeHover(
+      {
+        document: document_,
+        grid,
+        world,
+        toleranceWorld,
+        hitShape: (point, tolerance) => this.hitTestShape(point, tolerance),
+      },
+      this.labelResolvers(),
+    )
+  }
+
+  /**
+   * Shift / Alt 的**单击形态**（对象版）：把"这一点下面的对象"并入 / 移出**对象选择**。
+   *
+   * 返回 `false` 表示**这一击不该由对象接管**（命中是地块或空处）—— 调用方据此回退到
+   * 既有的"格"语义（Shift 加选一格 / Alt 取消一格，§C.1 早就定好的手感，不能因为这一轮丢掉）。
+   *
+   * 三条口径：
+   * - **只并同类**：`base` 只在"已有同类选中"时才作为底（不同类 = 从头开始选这一类，
+   *   与 `normalizeObjectSelection` 同一条边界）；
+   * - **已经在里面就不再"加"**：Shift 点第二次不会把顺序打乱（顺序有意义：第一项是检查器在读的那个）；
+   * - **Alt 移出**：从选择里删掉它（选择不进撤销栈，所以这不是"删除对象"）。
+   */
+  toggleObjectAt(world: Point, toleranceWorld: number, operation: SelectionOperation): boolean {
+    const document_ = this.options.getDocument()
+    const grid = this.grid()
+    if (!document_ || !grid) return false
+    const hit = hitTestSelection({
+      document: document_,
+      grid,
+      world,
+      toleranceWorld,
+      hitShape: (point, tolerance) => this.hitTestShape(point, tolerance),
+    })
+    if (hit === null || hit.kind === 'cell') return false
+    if (operation === 'replace') return this.setSelection(hit)
+    if (operation === 'remove') {
+      return this.setObjectSelection(this.objectSelection.filter((item) => !sameSelection(item, hit)))
+    }
+    const sameKind = this.objectSelection.some((item) => item.kind === hit.kind)
+    const base = sameKind ? this.objectSelection : []
+    if (base.some((item) => sameSelection(item, hit))) return false
+    return this.setObjectSelection([...base, hit])
+  }
+
   // ------------------------------------------------- 格选择（多格；施工文件 §C）
 
   getCellSelection(): CellSelection {
@@ -616,7 +741,7 @@ export class MapEditor {
 
   /** 有没有任何选择（对象或格）—— Esc 的第一步与"清空"按钮据此判断 */
   hasSelection(): boolean {
-    return this.selection !== null || this.cellSelection.length > 0
+    return this.objectSelection.length > 0 || this.cellSelection.length > 0
   }
 
   /**
@@ -685,7 +810,7 @@ export class MapEditor {
    */
   selectAtPoint(world: Point, toleranceWorld: number): boolean {
     const changedObject = this.selectAt(world, toleranceWorld)
-    const hit = this.selection
+    const hit = this.getSelection()
     const changedCells = this.assignCellSelection(hit !== null && hit.kind === 'cell' ? [hit.id] : [])
     return changedObject || changedCells
   }
@@ -756,6 +881,13 @@ export class MapEditor {
   endCellDrag(): boolean {
     const drag = this.cellDrag
     this.cellDrag = null
+    /**
+     * ⚠️ 必须通知一次状态变化：**卡片的"只做进行中的事"判据就是 `isCellDragging()`**
+     * （抬手之后那份统计归侧栏）。而拖动中最后一次 `updateCellDrag` 很可能**没有改变选择**
+     * （格数没变 ⇒ `assignCellSelection` 返回 false ⇒ 不通知），这时如果这里也不通知，
+     * 侧栏就不会重绘 —— 表现是"框选完抬手，统计既不在卡片上、也不在侧栏里"（用户实测报的）。
+     */
+    this.options.onStateChanged?.()
     return drag?.moved === true
   }
 
@@ -843,10 +975,50 @@ export class MapEditor {
   selectionInfo(): SelectionInfo | null {
     const document_ = this.options.getDocument()
     if (!document_) return null
-    const info = describeSelection(document_, this.selection, this.labelResolvers())
-    if (info === null) return null
-    // "已改几处"由编辑器补上：历史栈只有它有（面板不认识文档，也不该认识）
-    return { ...info, editsSinceSelection: this.editsSinceSelection() }
+    return describeSelection(document_, this.getSelection(), this.labelResolvers())
+  }
+
+  /**
+   * 「数据显示」的**多对象形态**那一段（§2.6「多个同类对象」）：`null` = 当前不是多选对象。
+   *
+   * 为什么在编辑器这一层算：它握着文档、目录解析（`labelResolvers`）与那张表，
+   * 而面板不认识这三样（它只画）。判据与 `batchEditInfo` 一致：**只按"够不够多"**。
+   */
+  objectsEditInfo(): ObjectBatchInfo | null {
+    const items = this.objectSelection
+    if (items.length < 2) return null
+    const document_ = this.options.getDocument()
+    if (!document_) return null
+    const spec = SELECTION_KINDS[items[0]!.kind]
+    const labels = this.labelResolvers()
+    const rows: Array<{ id: string; label: string; detail: string }> = []
+    for (const item of items) {
+      const data = spec.data(document_, item.id, labels)
+      // 对象已经不在了（撤销 / 换了文档）：不列它，也不把它算进 count
+      if (data === null) continue
+      rows.push({ id: item.id, label: data.name.length > 0 ? data.name : spec.label, detail: data.detail })
+    }
+    if (rows.length < 2) return null
+    return {
+      count: rows.length,
+      kindLabel: spec.label,
+      items: rows,
+      typeField: spec.typeField ?? null,
+      typeSource: spec.typeSource ?? null,
+      typeValue: commonFieldValue(document_, items, spec.typeField ?? null),
+      link: commonFieldValue(document_, items, 'link'),
+      canLink: spec.actions.includes('link'),
+      canDelete: spec.actions.includes('delete'),
+    }
+  }
+
+  /** 改**当前选中的全部同类对象**的类型（图标 / 路径类型 / 区域类型）：一次提交 = 一条历史 */
+  setObjectsType(id: string): number {
+    const kind = this.objectSelection[0]?.kind
+    if (kind === undefined) return 0
+    const field = SELECTION_KINDS[kind].typeField
+    if (field === undefined) return 0
+    return this.setObjectsField(field, id)
   }
 
   private labelResolvers(): SelectionLabelResolvers {
@@ -867,7 +1039,7 @@ export class MapEditor {
    * 地块没有链接（`canLink: false`），这里直接拒绝而不是悄悄改到别处。
    */
   setSelectionLink(link: string): boolean {
-    const selection = this.selection
+    const selection = this.getSelection()
     // 能力判断**读表**：地块的动作表里没有 link，于是这里自然拒绝 —— 不写 `kind === 'cell'`
     if (selection === null || !selectionSupports(selection.kind, 'link')) return false
     // 存储形状也读表（地块在 `terrain` 映射里，不适用"按 id 找对象"的 op）
@@ -882,7 +1054,7 @@ export class MapEditor {
 
   /** 给当前选中项改名（文字标注改的是它的文字）；地块没有名字，返回 false */
   setSelectionName(name: string): boolean {
-    const selection = this.selection
+    const selection = this.getSelection()
     if (selection === null || !selectionSupports(selection.kind, 'rename')) return false
     if (!isCollectionKind(selection.kind)) return false
     const document_ = this.options.getDocument()
@@ -898,7 +1070,7 @@ export class MapEditor {
    * 不另写一套 —— 否则撤销、通知、选择清理会出现两套行为。
    */
   removeSelection(): boolean {
-    const selection = this.selection
+    const selection = this.getSelection()
     if (selection === null) return false
     const removed = ((): boolean => {
       switch (selection.kind) {
@@ -941,7 +1113,7 @@ export class MapEditor {
    * （与"改设置里的默认值只影响新对象"是同一条语义）。
    */
   setSelectionType(id: string): boolean {
-    const selection = this.selection
+    const selection = this.getSelection()
     if (selection === null) return false
     const field = SELECTION_KINDS[selection.kind].typeField
     if (field === undefined) return false
@@ -963,35 +1135,129 @@ export class MapEditor {
    * 文件里少一个键与多一个 `null` 是两种东西。
    */
   setSelectionField(field: string, value: SelectionFieldValue): boolean {
-    const selection = this.selection
+    const selection = this.getSelection()
     if (selection === null) return false
+    const op = this.fieldOpFor(selection, field, value)
+    if (op === null) return false
+    const fieldSpec = SELECTION_KINDS[selection.kind].fields.find((item) => item.field === field)
+    this.commit([op], `修改${fieldSpec?.label ?? '属性'}`)
+    return true
+  }
+
+  /**
+   * 给**当前选中的全部同类对象**写同一个字段（多选时的「图标」这类公共字段）。
+   * 返回真的改了几个对象。
+   *
+   * 三条口径与 `setSelectionCellsField` 完全一致（那是格的版本，这是对象的版本）：
+   * **一次提交 = 一条历史**、**只改表里声明过的字段**、**值相同就不产生 op**。
+   *
+   * 校验与 op 构造**复用 `fieldOpFor`** —— 单对象与多对象两条路走同一套闸，
+   * 否则"多选能写进去一个单选拒绝的值"这种分叉迟早出现（§5.12）。
+   */
+  setObjectsField(field: string, value: SelectionFieldValue): number {
+    const items = this.objectSelection
+    if (items.length === 0) return 0
+    const ops: MapOp[] = []
+    for (const item of items) {
+      const op = this.fieldOpFor(item, field, value)
+      if (op !== null) ops.push(op)
+    }
+    if (ops.length === 0) return 0
+    const fieldSpec = SELECTION_KINDS[items[0]!.kind].fields.find((entry) => entry.field === field)
+    this.commit(ops, `整批设置 ${ops.length} 个对象的${fieldSpec?.label ?? '属性'}`)
+    return ops.length
+  }
+
+  /** 给**当前选中的全部同类对象**设同一个链接（空串 = 清除）。一次提交 = 一条历史 */
+  setObjectsLink(link: string): number {
     const document_ = this.options.getDocument()
-    if (!document_) return false
+    if (!document_ || this.objectSelection.length === 0) return 0
+    const ops: MapOp[] = []
+    for (const item of this.objectSelection) {
+      if (!selectionSupports(item.kind, 'link') || !isCollectionKind(item.kind)) continue
+      // ⚠️ 这里直接读记录上的 `link`，**不用** `currentLinkOf`：那一个用 `?? null` 把
+      // "没有链接"与"找不到这个对象"混成了一种值，于是"给一个还没有链接的对象设链接"
+      // 会被当成"对象不存在"而拒掉。多选场景（一半有链接一半没有是最常见的情形）必须分得开。
+      const raw = objectRecordOf(document_, item.kind, item.id)?.link
+      const from = typeof raw === 'string' ? raw : ''
+      if (from === link) continue
+      ops.push({ kind: 'setLink', target: item.kind, id: item.id, from, to: link })
+    }
+    if (ops.length === 0) return 0
+    this.commit(ops, link.length === 0 ? `清除 ${ops.length} 个对象的链接` : `设置 ${ops.length} 个对象的链接`)
+    return ops.length
+  }
+
+  /**
+   * 删除**当前选中的全部同类对象**：一次提交 = **一条历史**（§1 第 7 条）。
+   *
+   * 复用既有的删除 op 形状，只是把 N 个压进同一次 `commit`：逐个调 `removeMarker` 这类
+   * 会变成 N 条历史，"撤销"要点 N 次 —— 那不是用户要的（同 `setSelectionCellsField`）。
+   * 这里必须按 kind 分派：**四种对象存在四个不同的数组里，op 也各有一个名字**，
+   * 这是存储差异，不是能力差异（同 `moveSelectionTo` 里那段注释）。
+   */
+  removeObjects(): number {
+    const items = this.objectSelection
+    if (items.length === 0) return 0
+    if (items.length === 1) return this.removeSelection() ? 1 : 0
+    const document_ = this.options.getDocument()
+    if (!document_) return 0
+    const ops: MapOp[] = []
+    for (const item of items) {
+      if (item.kind === 'marker') {
+        const found = document_.markers.find((entry) => entry.id === item.id)
+        if (found) ops.push({ kind: 'removeMarker', marker: { ...found } })
+      } else if (item.kind === 'label') {
+        const found = document_.labels.find((entry) => entry.id === item.id)
+        if (found) ops.push({ kind: 'removeLabel', label: { ...found } })
+      } else if (item.kind === 'path') {
+        const found = document_.paths.find((entry) => entry.id === item.id)
+        if (found) ops.push({ kind: 'removePath', path: { ...found } })
+      } else if (item.kind === 'region') {
+        const found = document_.regions.find((entry) => entry.id === item.id)
+        if (found) ops.push({ kind: 'removeRegion', region: { ...found } })
+      }
+    }
+    if (ops.length === 0) return 0
+    this.commit(ops, `删除 ${ops.length} 个对象`)
+    // 删完选中项都指向不存在的对象：像 `removeSelection` 那样把状态也清掉
+    this.setObjectSelection([])
+    return ops.length
+  }
+
+  /**
+   * 一个对象某个字段的写入 op（**校验 + 构造**都在这里，单对象 / 多对象共用）。
+   *
+   * 返回 `null` = 这次不该写（字段没声明 / 值非法 / 值没变）。
+   * 单对象那条路据此**整体拒绝**；多对象那条路据此**跳过这一个对象** ——
+   * 值相同的那几个本来就不该进历史（见 `setObjectsField` 的第 3 条口径）。
+   */
+  private fieldOpFor(selection: MapSelection, field: string, value: SelectionFieldValue): MapOp | null {
+    const document_ = this.options.getDocument()
+    if (!document_) return null
     const spec = SELECTION_KINDS[selection.kind]
     const positionField = spec.position === 'point' ? 'p' : null
     const fieldSpec = spec.fields.find((item) => item.field === field)
     const declared = field === spec.typeField || field === positionField || fieldSpec !== undefined
-    if (!declared) return false
+    if (!declared) return null
     if (fieldSpec !== undefined && fieldSpec.control === 'number' && typeof value === 'number') {
       // 唯一的硬约束是"**必须是有限数**"：NaN / Infinity 不是数据（它们没法被画出来，
       // 写进去只会变成别的库认不出的怪值）。
       // ⚠️ 这里**刻意不**用 `TEMP_RANGE` 那类"物理合理范围"去拦（2026-09-28 用户实机纠正）：
       // 温度 / 深度没有取值上限，"超出范围"只发生在颜色这一层（色带的 under/over 纯色 + 数值文字）。
       // 范围判定只对**声明了 min/max 的字段**生效（例如区域不透明度 0–1）——那种是真正的定义域。
-      if (!Number.isFinite(value)) return false
-      if (fieldSpec.min !== undefined && value < fieldSpec.min) return false
-      if (fieldSpec.max !== undefined && value > fieldSpec.max) return false
+      if (!Number.isFinite(value)) return null
+      if (fieldSpec.min !== undefined && value < fieldSpec.min) return null
+      if (fieldSpec.max !== undefined && value > fieldSpec.max) return null
     }
     const record = objectRecordOf(document_, selection.kind, selection.id)
-    if (record === null) return false
+    if (record === null) return null
     const current = readObjectFieldValue(record, field)
-    if (sameObjectFieldValue(current, value)) return false
+    if (sameObjectFieldValue(current, value)) return null
     // 存储形状决定用哪个 op（数组里的对象 vs `terrain` 映射里的一格）——依据同样来自表
-    const op: MapOp = isCollectionKind(selection.kind)
+    return isCollectionKind(selection.kind)
       ? { kind: 'setObjectField', target: selection.kind, id: selection.id, field, from: current, to: value }
       : { kind: 'setCellField', key: selection.id, field, from: current, to: value }
-    this.commit([op], `修改${fieldSpec?.label ?? '属性'}`)
-    return true
   }
 
   /**
@@ -1033,13 +1299,46 @@ export class MapEditor {
   }
 
   /**
+   * 写回这张地图的**定义集**（`document.definitions` 那一段，v2 方案 B）。
+   *
+   * 与 `setElevationCalibration` / `setDataDefaults` 同一个形状、同一个理由：
+   * 它不是"某个带 id 对象的字段"，而是与 `grid` 同级的顶层段。
+   * 一次提交 = **一条**历史 ⇒ Ctrl+Z 一次就回到改之前那套定义。
+   *
+   * 两处与那两个不同：
+   * - `block` 是**已归一化**的定义集序列化结果（由 `data/mapDefinitions.ts` 产出），
+   *   编辑器**不解释**它的内容 —— 解释是 `main.ts` 那一层的事；
+   * - 老图（v1）第一次改定义要**升到 v2**，所以 op 里连版本号一起记（见 `SetDefinitionsOp`）。
+   */
+  setDefinitions(block: MapDefinitions | null): boolean {
+    const document_ = this.options.getDocument()
+    if (!document_) return false
+    const from = document_.definitions ?? null
+    if (from === block) return false
+    if (from !== null && block !== null && JSON.stringify(from) === JSON.stringify(block)) return false
+    this.commit(
+      [
+        {
+          kind: 'setDefinitions',
+          from,
+          fromVersion: document_.version,
+          to: block,
+          toVersion: block === null ? document_.version : MAP_DOCUMENT_VERSION,
+        },
+      ],
+      '修改地图定义',
+    )
+    return true
+  }
+
+  /**
    * 给点对象（标记 / 名称）设坐标。
    *
    * 面板只在**回车或失焦**时调它 —— 于是"输入框里敲一串数字"是**一条**历史，
    * 而不是每敲一个字符写一次盘（一次提交 = 一条历史，见 history.ts 顶部设计）。
    */
   setSelectionPosition(x: number, y: number): boolean {
-    const selection = this.selection
+    const selection = this.getSelection()
     if (selection === null) return false
     if (SELECTION_KINDS[selection.kind].position !== 'point') return false
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false
@@ -1057,7 +1356,7 @@ export class MapEditor {
    * `center` 由调用方给（`main.ts` 从当前视口算），编辑器不认识视口 —— 保持这一层可单测。
    */
   moveSelectionTo(center: Point): boolean {
-    const selection = this.selection
+    const selection = this.getSelection()
     if (selection === null) return false
     const spec = SELECTION_KINDS[selection.kind]
     if (spec.position === 'point') return this.setSelectionPosition(center.x, center.y)
@@ -1195,7 +1494,7 @@ export class MapEditor {
       // **格选择一起清**：多格描边环同理，绘画时留着它只会遮住刚落笔的颜色。
       this.cancelCellDrag()
       this.cellSelection = []
-      this.selection = null
+      this.objectSelection = []
       if (this.options.onSelectionChanged) this.options.onSelectionChanged()
     }
     this.mode = mode

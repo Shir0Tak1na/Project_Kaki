@@ -14,6 +14,7 @@ import type { App } from 'obsidian'
 import {
   createEmptyMapDocument,
   parseMapDocument,
+  type MapDefinitions,
   type MapDocument,
   type MapDocumentIssue,
 } from './mapDocument.ts'
@@ -54,6 +55,13 @@ export interface CreateMapOptions {
   grid?: Partial<GridSpec>
   /** 创建后立即绑定到的 canvas 路径 */
   canvasPath?: string | null
+  /**
+   * 新建时写进文件的**定义集**（v2，方案 B）。
+   *
+   * 由调用方（`main.ts`，只有它认识插件设置）从库级设置快照出来 ——
+   * `MapDocumentStore` 刻意不认识设置：它只认文件（见类注释）。
+   */
+  definitions?: MapDefinitions
 }
 
 interface PendingWrite {
@@ -349,6 +357,8 @@ export class MapDocumentStore {
       orientation: preset.orientation,
       size: preset.size,
       origin: preset.origin,
+      // 定义随图（v2）：新建的文件本来就要从头写一遍，把定义一起装进去才是方案 B（"分享即完整"）
+      ...(options.definitions ? { definitions: options.definitions } : {}),
     })
     const canvases = options.canvasPath ? [options.canvasPath] : []
     const path = this.uniquePath(folder, options.name)

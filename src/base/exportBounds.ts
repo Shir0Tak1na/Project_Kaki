@@ -25,6 +25,12 @@
  *
  * 本模块**纯函数、不 import obsidian**：范围解析的每一种情况（空地图、没有区域、
  * 区域被删掉、视口还没画出来……）都能在没有 Obsidian 的环境里被测到。
+ *
+ * ## 落点（文件夹 + 文件名）
+ *
+ * 同属"导出命名与路径"的还有文件名的推导（`exportFileNameFor`）、
+ * 目标路径的拼接与校验（`joinExportTarget` / `exportTargetProblem`）——
+ * 它们与范围解析一样是纯函数，放在一处，于是"用户填的能不能用"只有一处判断。
  */
 
 import type { MapDocument } from '../data/mapDocument.ts'
@@ -234,4 +240,64 @@ export function exportFileNameFor(
     return segment.length > 0 ? `${basePath}-${segment}` : `${basePath}-区域`
   }
   return basePath
+}
+
+/** Obsidian 不允许出现在库内路径里的字符（`/` 在文件名里也非法 —— 它是目录分隔符） */
+const ILLEGAL_PATH_CHARS = ['\\', ':', '*', '?', '"', '<', '>', '|']
+
+function hasIllegalPathChar(text: string): boolean {
+  return ILLEGAL_PATH_CHARS.some((char) => text.includes(char))
+}
+
+/** 目录段（丢掉空段；`A//B` 与 `A/B` 等价） */
+function folderSegments(folder: string): string[] {
+  return folder
+    .trim()
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0)
+}
+
+/**
+ * 把「文件夹 + 文件名」拼成库内路径（文件夹为空 = 库根）。
+ *
+ * 只负责拼接与清洗，**不判断合法性** —— 合法性走 `exportTargetProblem`，
+ * 这样"用户填的能不能用"只有一处判断（对话框预览与导出两处都调它）。
+ */
+export function joinExportTarget(folder: string, fileName: string): string {
+  const segments = folderSegments(folder)
+  const name = fileName.trim()
+  return segments.length > 0 ? `${segments.join('/')}/${name}` : name
+}
+
+/**
+ * 去掉文件名末尾的导出扩展名（`.svg` / `.png`，大小写不敏感）。
+ *
+ * 扩展名由**格式**决定，不该由用户输入决定：用户手打成 `World.svg` 再选 PNG，
+ * 不去掉就会写出 `World.svg.png`。只认这两种而不是"任意扩展名"——
+ * 用户可能真的想把点号当作名字的一部分（`版本2.0` 不该被削成 `版本2`）。
+ */
+export function stripExportExtension(fileName: string): string {
+  return fileName.trim().replace(/\.(svg|png)$/i, '')
+}
+
+/**
+ * 导出目标是否可用：可用返回 `null`，否则给一句人话。
+ *
+ * 判断放在对话框里（`describe`）是为了**点导出之前**就能把按钮灰掉并说明原因 ——
+ * "点不动比点了报错好"，与范围那套同一口径。真正的守门仍在导出那一侧
+ * （对话框可以被绕过，`exportMapWithRange` 里 `vault.create` 的报错是最后一道）。
+ */
+export function exportTargetProblem(folder: string, fileName: string): string | null {
+  const name = fileName.trim()
+  if (name.length === 0) return '请填写文件名。'
+  if (name.includes('/')) return '文件名里不能有斜杠 —— 文件夹请填在「保存位置」那一栏。'
+  if (name === '.' || name === '..') return '文件名不能是「.」或「..」。'
+  if (hasIllegalPathChar(name)) return `文件名里不能有这些字符：${ILLEGAL_PATH_CHARS.join(' ')}`
+  for (const segment of folderSegments(folder)) {
+    if (segment === '.' || segment === '..') return '保存位置不能包含「.」或「..」这样的段。'
+    if (hasIllegalPathChar(segment)) return `保存位置里不能有这些字符：${ILLEGAL_PATH_CHARS.join(' ')}`
+  }
+  return null
 }

@@ -14,9 +14,11 @@ import {
   assetFolderOf,
   assetNameOf,
   describeAssetChoice,
+  describeFolderChoice,
   emptyImageListHint,
   imageExtensionOf,
   isImagePath,
+  listFolderPaths,
   listImagePaths,
 } from '../src/base/assetFiles.ts'
 import { IMAGE_EXTENSIONS, checkTerrainImagePath } from '../src/render/terrainCatalog.ts'
@@ -88,6 +90,24 @@ test('短标签：带文件名与所在文件夹（同名文件要能分辨）',
   assert.equal(describeAssetChoice('forest.png'), 'forest.png')
   // 同名不同处：标签必须不同，否则用户在两行一样的条目里做选择
   assert.notEqual(describeAssetChoice('Assets/a/icon.png'), describeAssetChoice('Assets/b/icon.png'))
+})
+
+test('文件夹清单：从文件路径推出来、库根永远在列、排序确定', () => {
+  const input = ['Maps/World.map.md', 'Assets/地形/a.png', 'Maps/Sub/b.md', 'Notes/x.md', 'readme.md']
+  assert.deepEqual(listFolderPaths(input), ['', 'Assets/地形', 'Maps', 'Maps/Sub', 'Notes'])
+  assert.deepEqual(listFolderPaths([...input].reverse()), listFolderPaths(input), '输入顺序不同，输出顺序必须相同')
+  // 空输入与坏输入也要有库根可选 —— 否则选择器直接报"没得选"，用户连库根都选不了
+  assert.deepEqual(listFolderPaths([]), [''])
+  assert.deepEqual(listFolderPaths(null), [''])
+  assert.deepEqual(listFolderPaths([null, 42, 'a.png']), [''])
+  assert.deepEqual(listFolderPaths(['Maps\\Win\\a.md']), ['', 'Maps/Win'], '反斜杠也算目录分隔符')
+})
+
+test('文件夹短标签：根目录说成人话，而不是一个空行', () => {
+  assert.equal(describeFolderChoice(''), '（库根目录）')
+  assert.equal(describeFolderChoice('   '), '（库根目录）')
+  assert.equal(describeFolderChoice('Maps/Sub'), 'Maps/Sub')
+  assert.equal(describeFolderChoice('  Maps  '), 'Maps')
 })
 
 test('空清单提示：说清"为什么没有"与"该做什么"，并列出支持的格式', () => {

@@ -139,7 +139,7 @@ export function renderOverlayFieldSection(
 
   new Setting(containerEl)
     .setName(`${spec.label}层的不透明度`)
-    .setDesc('色块压在地形之上：调低一点可以同时看清地形与颜色。这一层的开关在「图层」一组里。')
+    .setDesc('色块压在地形之上：调低一点可以同时看清地形与颜色。这一层的开关在侧栏「视图 · 底图」一组里。')
     .addSlider((slider) =>
       slider
         .setLimits(OVERLAY_OPACITY_MIN, OVERLAY_OPACITY_MAX, OVERLAY_OPACITY_STEP)
@@ -299,7 +299,7 @@ export function renderCategoryFieldSection(
   const style = host.getOverlayStyles()[spec.id]
   new Setting(containerEl)
     .setName(`${spec.label}层的不透明度`)
-    .setDesc('色块压在地形之上：调低一点可以同时看清地形与分类配色。这一层的开关在「图层」一组里。')
+    .setDesc('色块压在地形之上：调低一点可以同时看清地形与分类配色。这一层的开关在侧栏「视图 · 底图」一组里。')
     .addSlider((slider) =>
       slider
         .setLimits(OVERLAY_OPACITY_MIN, OVERLAY_OPACITY_MAX, OVERLAY_OPACITY_STEP)
@@ -313,7 +313,7 @@ export function renderCategoryFieldSection(
   new Setting(containerEl)
     .setName(`${spec.label}的逐条颜色`)
     .setDesc(
-      '每条自带颜色（改这里只改**画法**，不进地图文件）。' +
+      '每条自带颜色（改这里只改画法，不进地图文件）。' +
         '地图上出现的才会列出来 —— 你还没用到的分类不在这里占位置；清空输入框就回到分类表里的颜色。',
     )
 

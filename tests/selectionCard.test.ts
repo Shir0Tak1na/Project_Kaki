@@ -19,10 +19,11 @@ import { normalizeSelection, summarizeSelection } from '../src/render/selectionS
 const TERRAIN_LABELS: Record<string, string> = { forest: '森林', water: '水' }
 const BIOME_LABELS: Record<string, string> = { forest: '温带森林', tundra: '苔原' }
 
-function input(document: MapDocument, keys: string[]): SelectionCardInput {
+function input(document: MapDocument, keys: string[], hover: SelectionCardInput['hover'] = { kind: 'none' }): SelectionCardInput {
   const selection = normalizeSelection(keys)
   return {
     cellSelection: selection,
+    hover,
     summary: summarizeSelection(document, selection),
     document,
     styles: DEFAULT_OVERLAY_STYLES,
@@ -90,4 +91,43 @@ test('多选：选择里混进"地图里已经没有的格"时单独报出来（
   const rows = new Map(rowsOf(model))
   assert.equal(model.title, '已选 2 格')
   assert.equal(rows.get('已不存在'), '1 格')
+})
+
+// ---- 悬停读数（§2.6：卡片"只做进行中的事"）----
+
+test('悬停压在对象上：标题写"种类：名称"，正文给那一行补充信息（命中对象优先）', () => {
+  const document = createEmptyMapDocument({})
+  document.terrain[cellKey(0, 0)] = { t: 'forest' }
+  const model = buildSelectionCard(
+    input(document, [], { kind: 'object', kindLabel: '标记', label: '港口', detail: '位于 (10, 20)' }),
+  )
+  assert.equal(model.kind, 'object')
+  if (model.kind !== 'object') return
+  assert.equal(model.title, '标记：港口')
+  assert.deepEqual(rowsOf(model), [['信息', '位于 (10, 20)']])
+})
+
+test('悬停压在某格上：与"选中一格"同一个造型与同一份读数（都是单格详情）', () => {
+  const document = createEmptyMapDocument({})
+  document.terrain[cellKey(0, 0)] = { t: 'forest' }
+  const model = buildSelectionCard(input(document, [], { kind: 'cell', key: cellKey(0, 0) }))
+  assert.equal(model.kind, 'cell')
+  if (model.kind !== 'cell') return
+  assert.equal(model.title, '格 (0, 0)')
+  assert.equal(new Map(rowsOf(model)).get('地形'), '森林')
+})
+
+test('既没选择又没悬停 → empty（"选择一旦确定就收起"）', () => {
+  const document = createEmptyMapDocument({})
+  assert.equal(buildSelectionCard(input(document, [], { kind: 'none' })).kind, 'empty')
+})
+
+test('框选进行中的统计**优先于**悬停读数（拖动时数字不该被悬停挤掉）', () => {
+  const document = createEmptyMapDocument({})
+  document.terrain[cellKey(0, 0)] = { t: 'forest' }
+  document.terrain[cellKey(1, 0)] = { t: 'water' }
+  const model = buildSelectionCard(
+    input(document, [cellKey(0, 0), cellKey(1, 0)], { kind: 'cell', key: cellKey(0, 0) }),
+  )
+  assert.equal(model.kind, 'multi')
 })

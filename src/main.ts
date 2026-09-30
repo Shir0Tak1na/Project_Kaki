@@ -20,7 +20,14 @@ import {
   isMapDocumentLike,
 } from './base/viewContract.ts'
 import { MapDocumentStore } from './data/MapDocumentStore.ts'
-import { summarizeMapDocument, type MapDocument } from './data/mapDocument.ts'
+import { summarizeMapDocument, MAP_DOCUMENT_VERSION, type MapDefinitions, type MapDocument } from './data/mapDocument.ts'
+import {
+  definitionSetFromBlock,
+  definitionSetFromLibrary,
+  definitionsBlockOf,
+  isFactoryDefinitionSet,
+  type MapDefinitionSet,
+} from './data/mapDefinitions.ts'
 import { buildDiagnosticReport } from './dev/diagnostics.ts'
 import { disposeViewportWatch, getWatchStatus, startViewportWatch, stopViewportWatch } from './dev/viewport-watch.ts'
 import { MapEditor } from './editor/MapEditor.ts'
@@ -30,12 +37,20 @@ import { lucideIconFragment } from './render/lucideFragment.ts'
 import {
   EXPORT_RANGE_OPTIONS,
   exportFileNameFor,
+  exportTargetProblem,
+  joinExportTarget,
   listExportRegions,
   resolveExportBounds,
+  stripExportExtension,
   type ExportRange,
 } from './base/exportBounds.ts'
 import { exportBasePathFor, rasterizeSvgToPng, uniqueExportPath, type PngRasterDeps } from './base/pngExport.ts'
-import { ExportModal, type ExportFormat, type ExportModalFactory } from './ui/ExportModal.ts'
+import {
+  ExportModal,
+  type ExportFormat,
+  type ExportModalFactory,
+  type ExportTarget,
+} from './ui/ExportModal.ts'
 import type { BBox } from './core/viewport.ts'
 import type { Point } from './core/hex.ts'
 import { PlaceMarkerModal, type PlaceModalFactory } from './ui/PlaceMarkerModal.ts'
@@ -48,10 +63,12 @@ import type { SelectionFieldValue } from './editor/selection.ts'
 import { SELECTION_KINDS } from './editor/selection.ts'
 import {
   CartographerSettingTab,
+  normalizeExportFolder,
   normalizeLabelScale,
   normalizeSettings,
   paletteOf,
   type CartographerSettings,
+  type MapViewSettings,
 } from './ui/SettingsTab.ts'
 import { normalizeFontFamily, normalizeColor, type StylePalette } from './render/stylePalette.ts'
 import {
@@ -82,6 +99,7 @@ import {
   hiddenLayerLabels,
   withLayerVisibility,
   type LayerKey,
+  type LayerVisibility,
 } from './render/layerVisibility.ts'
 import { legendLines } from './render/legend.ts'
 import {
@@ -92,13 +110,17 @@ import {
   type CategoryOverlayFieldSpec,
   type FieldId,
   type OverlayStyle,
+  type OverlayStyles,
 } from './render/overlayFields.ts'
 import { describeDataDefaults, unknownDefaultKeys } from './render/dataDefaults.ts'
 import {
+  assetFolderOf,
+  assetNameOf,
   emptyBundleListHint,
   emptyImageListHint,
   emptyNoteListHint,
   listBundlePaths,
+  listFolderPaths,
   listImagePaths,
   listNotePaths,
 } from './base/assetFiles.ts'
@@ -118,6 +140,7 @@ import {
   definitionKindFieldHint,
   describeDeletionPlan,
   describeRenamePlan,
+  renameDefinitionEntry,
   renameReferences,
   type DefinitionKind,
   type DeletionFilePlan,
@@ -175,7 +198,8 @@ import {
   type CustomBiome,
 } from './render/biomeCatalog.ts'
 import { clauseIsUsable, type SelectionRuleContext } from './render/selectionRules.ts'
-import { applyRuleToSelection, ruleHits, summarizeSelection } from './render/selectionSet.ts'
+import { applyRuleToSelection, describeCellReadings, ruleHits, summarizeSelection, type SelectionSummary } from './render/selectionSet.ts'
+import { selectionStatRows } from './render/selectionCard.ts'
 
 /** 命名对话框工厂（可替换，用于自动化测试） */
 export type PromptModalFactory = (
@@ -209,6 +233,19 @@ const NOTICE_MAX_MS = 6000
  */
 const EXPORT_WIDTH = 1600
 const EXPORT_HEIGHT = 1000
+
+/**
+ * 定义编辑 / 搬运的**目标**（"当前地图"）：画布路径 + 它绑定的地图文件 + 那张画布的地图层编辑器。
+ *
+ * 抽成具名的类型是因为它有了**第二个用途**（W4-3）：导入对话框先告诉用户"导入到哪张图"，
+ * 提交时必须写同一张 —— 于是这个形状要能从 `definitionTarget()` 一路传到 `mutateDefinitions`。
+ */
+interface DefinitionTarget {
+  canvasPath: string
+  mapPath: string
+  /** `null` = 这张画布没启用地图层（那就直接读改写盘） */
+  editor: MapEditor | null
+}
 
 export default class ProjectKakiPlugin extends Plugin {
   private store: MapDocumentStore | null = null
@@ -294,6 +331,22 @@ export default class ProjectKakiPlugin extends Plugin {
   private settingTab: CartographerSettingTab | null = null
   /** 不能用 `settings` 这个名字：Obsidian 的 Plugin 基类已经有同名成员 */
   private pluginSettings: CartographerSettings = normalizeSettings(null)
+  /** `libraryDefinitionSet()` 的备忘（键 = `pluginSettings` 的对象身份，见该方法） */
+  private librarySetCache: { source: CartographerSettings; set: MapDefinitionSet } | null = null
+  /**
+   * `definitionsOf()` 的备忘（键 = 那份文档里 `definitions` 块的对象身份）。
+   *
+   * 用 `WeakMap`：块是短命对象（每次写入都换一个新的），弱引用让它自然回收，
+   * 不需要任何失效逻辑 —— 这正是"缓存键必须是被缓存内容的身份"这条纪律的落法。
+   */
+  private readonly documentSetCache = new WeakMap<object, MapDefinitionSet>()
+  /**
+   * 为「地图定义」弹窗读盘得到的文档（键 = 地图路径）。
+   *
+   * 用途只有一个：让弹窗的**首帧**在"画布绑了地图、但没开地图层"时也能一次画对
+   * （同步读不到盘，见 `syncCurrentDefinitionSet`）。不是文档缓存 —— 权威始终是文件。
+   */
+  private readonly definitionDocCache = new Map<string, MapDocument>()
   /** Base 自定义视图是否可用（需要 Obsidian 1.10.0+） */
   private basesAvailable = false
   /** 动作注册表：命令面板与地图面板共用（见 buildActions） */
@@ -312,16 +365,17 @@ export default class ProjectKakiPlugin extends Plugin {
       promptModalFactory: (app, options, onSubmit) => this.promptModalFactory(app, options, onSubmit),
       // 名称字号倍率：设置界面改完立即生效
       getLabelScale: () => this.pluginSettings.labelScale,
-      // 样式（区域颜色、名称字体族）：地图层每帧现读，改完设置立刻生效
+      // 样式（名称字体族）：地图层每帧现读，改完设置立刻生效。
+      // ⚠️ 区域颜色**不在这里**了：它住在区域类型目录里（`getRegionTypes`）
       getStylePalette: () => this.getStylePalette(),
-      // 路径类型目录（内置 4 种 + 自定义，含全部画法参数）：路径样式的唯一来源
-      getPathTypes: () => this.getPathTypes(),
-      // 区域类型目录（内置 6 种 + 自定义，含填充/不透明度/边框参数）：区域样式的唯一来源
-      getRegionTypes: () => this.getRegionTypes(),
-      getCustomTerrains: () => this.getCustomTerrains(),
-      getCustomMarkers: () => this.getCustomMarkers(),
+      // 五类定义目录：**按地图解析**（v2 的 `definitions` 段）—— 多画布同开时
+      // A 图的定义不许污染 B 图，所以参数是"要哪张地图的定义"（见 `definitionsOf`）
+      getPathTypes: (document) => this.definitionsOf(document).pathTypes,
+      getRegionTypes: (document) => this.definitionsOf(document).regionTypes,
+      getCustomTerrains: (document) => this.definitionsOf(document).terrains,
+      getCustomMarkers: (document) => this.definitionsOf(document).markers,
       // 自定义生物群系：只影响**颜色解析**（分类字段上色与图例）—— 值本身在地图文件里
-      getCustomBiomes: () => this.getCustomBiomes(),
+      getCustomBiomes: (document) => this.definitionsOf(document).biomes,
       // 画布工具条上的「筛选…」按钮 → 插件层的对话框（地图层不认识插件，只能从这里往上要）
       onOpenSelectionFilter: () => this.openSelectionFilterModal(),
       // 选中项变了：侧栏检查器要立刻跟着变（面板在另一棵树里，只能由插件层转发）
@@ -329,17 +383,13 @@ export default class ProjectKakiPlugin extends Plugin {
       // 编辑器状态变了（模式 / 工具 / 笔刷层 / 半径 / 框选方式）：侧栏那三节控件画的就是它
       onEditorStateChanged: () => this.refreshPanel(),
       // 图层与图例：同样每帧现读。**网格也在 layers 里**（不再有第二个 showGrid 通道）。
-      // 工具条上的按钮通过下面两个 setter 写回设置。
-      getLayers: () => this.pluginSettings.layers,
+      // W4-2：三者都**按画布自己那张地图**解析（多画布同开时不许看"谁是活动画布"）。
+      // 图层 / 图例的**写入口**不在这里：画布上的按钮已经删掉，改开关走侧栏面板与命令
+      // （`MapPanelDeps.onToggleLayer` / `onToggleLegend`）—— 于是"一个开关只有一个家"。
+      getLayers: (canvasPath) => this.layersFor(this.mapPathForCanvas(canvasPath)),
       // 数据层样式（色带 / 不透明度）：同样每帧现读 —— 改色带下一帧就是新颜色
-      getOverlayStyles: () => this.pluginSettings.overlays,
-      getShowLegend: () => this.pluginSettings.showLegend,
-      setLayerVisible: (key, value) => {
-        void this.setLayerVisible(key, value)
-      },
-      setShowLegend: (value) => {
-        void this.setShowLegend(value)
-      },
+      getOverlayStyles: (canvasPath) => this.overlaysFor(this.mapPathForCanvas(canvasPath)),
+      getShowLegend: (canvasPath) => this.showLegendFor(this.mapPathForCanvas(canvasPath)),
     })
 
     this.settingTab = new CartographerSettingTab(this.app, this)
@@ -376,6 +426,10 @@ export default class ProjectKakiPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
         if (!(file instanceof TFile)) return
+        // 「地图定义」弹窗那份"为读盘留的一份"在这里失效：它在别的编辑器改过这张图之后就是旧的。
+        // 影响面很小（弹窗首帧，随后会被异步读到的那一份纠正），但缓存该失效就得失效 ——
+        // 缓存键既然绑在路径上，路径上发生的事就应该让它作废。
+        this.definitionDocCache.delete(file.path)
         this.layers?.handleFileModified(file)
       }),
     )
@@ -404,6 +458,14 @@ export default class ProjectKakiPlugin extends Plugin {
         name: '打开地图面板',
         icon: 'sidebar-right',
         group: 'panel',
+        /**
+         * **不进侧栏面板**（`panelHidden`，与导入 / 导出定义文件同一套做法）：
+         * 这个动作是"把面板打开"，而面板里点它时面板本来就开着 ——
+         * `activatePanel()` 的两条路（`revealLeaf` 已可见的 leaf + `refreshPanel()`）
+         * 都不会产生任何可见变化 ⇒ 面板里长出一个**天然无意义**的按钮。
+         * 命令面板与左侧 ribbon 图标照旧保留（那两处点了才有意义）。
+         */
+        panelHidden: true,
         run: () => this.activatePanel(),
       },
       {
@@ -449,11 +511,13 @@ export default class ProjectKakiPlugin extends Plugin {
       },
       {
         // 选择系统的**筛选器**（施工文件 §C.2）：UI 子句构建器 + 替换/并入/移出/在当前选择内筛/连通扩展。
-        // 归 `map` 组：它只改"选择"，不改地图数据（选择不进撤销栈）。
+        // 归 `edit` 组（UI 整理 W1④ · 用户 m01803 第 3 条原话："筛选错误的放进了地图层里面，
+        // 这个应该是**编辑工具**"）：它改的是"我选中了哪些"，是编辑这一类；
+        // 它只改"选择"，不改地图数据（选择不进撤销栈）。
         id: 'filter-selection',
         name: '按规则筛选选择…',
         icon: 'filter',
-        group: 'map',
+        group: 'edit',
         available: hasLayer,
         describe: () => {
           const editor = activeEditor()
@@ -707,14 +771,6 @@ export default class ProjectKakiPlugin extends Plugin {
         if (!editor) return
         if (editor.setSelectionPosition(x, y)) this.refreshPanel()
       },
-      // 「撤销这些改动」：逐条撤销到"选中那一刻"（撤销多少次由编辑器按撤销栈算）
-      onUndoSelectionEdits: () => {
-        const editor = this.layers?.getInspectorEditor()
-        if (!editor) return
-        const count = editor.undoEditsSinceSelection()
-        if (count > 0) new Notice(`已撤销本次选中的 ${count} 处改动（可以 Ctrl+Y 重做）`, NOTICE_MAX_MS)
-        this.refreshPanel()
-      },
       onMoveSelectionToViewportCenter: () => {
         const editor = this.layers?.getInspectorEditor()
         const center = this.selectionViewportCenter()
@@ -725,7 +781,8 @@ export default class ProjectKakiPlugin extends Plugin {
         if (editor.moveSelectionTo(center)) this.refreshPanel()
       },
       // 图层开关：状态与写入口都从插件这边注入（面板不认识插件实例）
-      getLayerVisibility: () => this.pluginSettings.layers,
+      // W4-2：面板跟着**活动画布**走 ⇒ 三者都按活动画布那张地图解析
+      getLayerVisibility: () => this.layersFor(this.activeViewMapPath()),
       onToggleLayer: (key, value) => {
         void this.setLayerVisible(key, value)
       },
@@ -739,6 +796,40 @@ export default class ProjectKakiPlugin extends Plugin {
       },
       // ---- 整批编辑（§C.5）----
       getBatchEdit: () => this.batchEditInfo(),
+      // ---- 数据显示面板里的只读读数（§2.6 形态 3：单选一格 ⇒ 地块信息 + 温度/深度/群系读数）----
+      getSelectionReadings: () => this.selectionReadings(),
+      // ---- 多个同类对象（§2.6 形态：多个同类对象 ⇒ 逐项一行 + 公共字段）----
+      getObjectBatch: () => this.layers?.getInspectorEditor()?.objectsEditInfo() ?? null,
+      onRemoveObjectItem: (id) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        // **只是移出这次选择**，不删对象（选择不进撤销栈，§C.3）
+        editor.setObjectSelection(editor.getObjectSelection().filter((item) => item.id !== id))
+        this.refreshPanel()
+      },
+      onSetObjectsType: (value) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        const count = editor.setObjectsType(value)
+        if (count > 0) new Notice(`已给 ${count} 个对象设置类型（Ctrl/Cmd+Z 可撤销）`, 4000)
+        this.refreshPanel()
+      },
+      onSetObjectsLink: (link) => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        const count = editor.setObjectsLink(link)
+        if (count > 0) {
+          new Notice(link.length === 0 ? `已清除 ${count} 个对象的链接` : `已给 ${count} 个对象设置链接`, 4000)
+        }
+        this.refreshPanel()
+      },
+      onRemoveObjects: () => {
+        const editor = this.layers?.getInspectorEditor()
+        if (!editor) return
+        const count = editor.removeObjects()
+        if (count > 0) new Notice(`已删除 ${count} 个对象（Ctrl/Cmd+Z 可撤销）`, 4000)
+        this.refreshPanel()
+      },
       onSetCellsField: (field, rawValue) => {
         const editor = this.layers?.getInspectorEditor()
         if (!editor) return
@@ -755,11 +846,11 @@ export default class ProjectKakiPlugin extends Plugin {
         this.refreshPanel()
       },
       // ---- 「显示」三组（§F.1）：图例开关 + 数据层参数（与设置页共用同一份控件渲染）----
-      getShowLegend: () => this.pluginSettings.showLegend,
+      getShowLegend: () => this.showLegendFor(this.activeViewMapPath()),
       onToggleLegend: () => {
-        void this.setShowLegend(!this.pluginSettings.showLegend)
+        void this.setShowLegend(!this.showLegendFor(this.activeViewMapPath()))
       },
-      getOverlayStyles: () => this.pluginSettings.overlays,
+      getOverlayStyles: () => this.overlaysFor(this.activeViewMapPath()),
       onSetOverlayStyle: (field, patch) => {
         void this.setOverlayStyle(field, patch)
       },
@@ -823,11 +914,11 @@ export default class ProjectKakiPlugin extends Plugin {
         apply((editor) => {
           editor.expandSelectionByTerrain()
         }),
-      getCustomTerrains: () => this.getCustomTerrains(),
-      getCustomMarkers: () => this.getCustomMarkers(),
-      getPathTypes: () => this.getPathTypes(),
-      getRegionTypes: () => this.getRegionTypes(),
-      getCustomBiomes: () => this.getCustomBiomes(),
+      getCustomTerrains: () => this.activeDefinitions().terrains,
+      getCustomMarkers: () => this.activeDefinitions().markers,
+      getPathTypes: () => this.activeDefinitions().pathTypes,
+      getRegionTypes: () => this.activeDefinitions().regionTypes,
+      getCustomBiomes: () => this.activeDefinitions().biomes,
       // 与标记层、设置页预览**同一个函数**：三处各写一遍迟早分叉（见 vaultResource.ts 的注释）
       resolveImageSrc: (path) => resolveVaultResourceUrl(this.app, path),
       onOpenSelectionFilter: () => this.openSelectionFilterModal(),
@@ -854,6 +945,19 @@ export default class ProjectKakiPlugin extends Plugin {
     return {
       count: keys.length,
       missing: summary?.missing ?? 0,
+      summary: this.batchSummaryLine(document_, keys, summary),
+      // §C.4 那份统计（原来在画布卡片上）与卡片**共用** `selectionStatRows`：
+      // 卡片降级成"只做进行中的事"之后，它就是侧栏这一节的正文
+      details:
+        summary === null
+          ? []
+          : selectionStatRows(
+              summary,
+              // W4-2：色带按**活动画布那张地图**解析（与画布、图例同一份）
+              this.overlaysFor(this.activeViewMapPath()),
+              document_.elevation ?? null,
+              (id) => resolveBiomeStyle(id, this.definitionsOf(document_).biomes).label,
+            ),
       // 字段清单**从选择统计派生**（`summarizeSelection` 已经按字段表逐个算过缺数据格数）——
       // 以后加一个数值字段，这里一行都不用改
       fields: (summary?.fields ?? []).map((stat) => ({
@@ -864,6 +968,64 @@ export default class ProjectKakiPlugin extends Plugin {
         missing: stat.missing,
       })),
     }
+  }
+
+  /**
+   * 整批编辑头部那**一行摘要**（§2.6：多格 ⇒ 整批编辑 + **摘要 1 行进侧栏头部**）。
+   *
+   * 用户追加口径（m01930）：「多选模式，侧栏里稍微加一行显示，**不要裸着**」——
+   * 形态照施工文件给的例子 `苔原 30 · 雪原 12 · 3 格无数据`：
+   * - **地形构成**：按格数降序，最多列 3 种（更多就写"等 N 种地形"）；名字走目录的显示名；
+   * - **无数据格数**：这一格**温度 / 深度 / 生物群系一个都没有**的格数（逐字段各自缺多少，
+   *   下面每个字段自己还有一行，所以这里只说"整格空着"的那种，不与下面重复）；
+   * - 一段都没有（例如全是同名地形且都填了值）时退回 `N 格`，**不留空行**。
+   */
+  private batchSummaryLine(
+    document_: MapDocument,
+    keys: readonly string[],
+    summary: SelectionSummary | null,
+  ): string {
+    const parts: string[] = []
+    const terrains = [...(summary?.terrains ?? [])].sort((left, right) => right.count - left.count)
+    const custom = this.definitionsOf(document_).terrains
+    for (const item of terrains.slice(0, 3)) {
+      parts.push(`${resolveTerrainStyle(item.id, custom).label} ${item.count}`)
+    }
+    if (terrains.length > 3) parts.push(`等 ${terrains.length} 种地形`)
+    const empty = keys.filter((key) => {
+      const cell = document_.terrain[key]
+      if (cell === undefined) return false
+      return OVERLAY_FIELDS.every((spec) =>
+        spec.numeric ? spec.read(cell) === undefined : spec.readCategory(cell) === undefined,
+      )
+    }).length
+    if (empty > 0) parts.push(`${empty} 格没有数据`)
+    if (parts.length === 0) parts.push(`${keys.length} 格`)
+    return parts.join(' · ')
+  }
+
+  /**
+   * 「数据显示」面板里那几行**只读读数**（§2.6 形态 3）：
+   * 单选一格时，除了可编辑的字段，还要**一眼看得见**这一格的温度 / 深度 / 生物群系。
+   *
+   * 三条口径：
+   * - **只在恰好选中一格时给**（多格走整批编辑、对象没有这些读数）；
+   * - 读数与**画布信息卡同源**（都调 `describeCellReadings`）—— 两处各算一遍必然分叉（§5.65）；
+   * - 生物群系在这里翻成**显示名**（与卡片、图例一致；认不出的 ID 由目录解析回退成中性说法）。
+   */
+  private selectionReadings(): ReadonlyArray<{ label: string; value: string }> | null {
+    const editor = this.layers?.getInspectorEditor()
+    const document_ = this.layers?.getActiveDocument() ?? null
+    if (!editor || !document_) return null
+    const selection = editor.getSelection()
+    if (selection === null || selection.kind !== 'cell') return null
+    if (editor.getCellSelection().length > 1) return null
+    const custom = this.definitionsOf(document_).biomes
+    return describeCellReadings(document_, selection.id, this.overlaysFor(this.activeViewMapPath())).map((row) =>
+      row.label === '生物群系' && row.value !== '未填'
+        ? { ...row, value: resolveBiomeStyle(row.value, custom).label }
+        : row,
+    )
   }
 
   /**
@@ -1042,14 +1204,15 @@ export default class ProjectKakiPlugin extends Plugin {
         new MapBasesView(controller, containerEl, {
           app: this.app,
           store: this.store!,
-          getCustomTerrains: () => this.getCustomTerrains(),
+          getCustomTerrains: (document) => this.definitionsOf(document).terrains,
           // Base 行的路径类型显示名也要跟着目录走（否则自定义类型在表里显示成 custom:xxx）
-          getPathTypes: () => this.getPathTypes(),
+          getPathTypes: (document) => this.definitionsOf(document).pathTypes,
           // 区域同理：表里、画布上、图例里对同一个区域类型必须说同一个名字
-          getRegionTypes: () => this.getRegionTypes(),
-          // 数据层与图层开关：缩略图里也要与画布一致（关掉的层不出现、色带改了就跟着变）
-          getOverlayStyles: () => this.pluginSettings.overlays,
-          getLayers: () => this.pluginSettings.layers,
+          getRegionTypes: (document) => this.definitionsOf(document).regionTypes,
+          // 数据层与图层开关：缩略图里也要与画布一致（关掉的层不出现、色带改了就跟着变）。
+          // W4-2：按**这份视图自己那张地图**解析（Base 视图没有画布，标识就是它加载的地图路径）
+          getOverlayStyles: (mapPath) => this.overlaysFor(mapPath),
+          getLayers: (mapPath) => this.layersFor(mapPath),
         }),
       options: () => [
         // 几何数据留在 .map.md 里，靠文件选项指过去 —— 不进 YAML
@@ -1150,16 +1313,18 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
-   * 按指定范围与格式导出当前地图 —— 三条入口共用这一份实现。
+   * 按指定范围、格式与落点导出当前地图 —— 三条入口共用这一份实现。
    *
    * 范围解析失败（没有区域、没有可见视口……）时**只给一句人话、不产出文件**：
    * 半个空图比没有文件更糟（用户会以为导出成功了）。
+   * 落点不合法（空文件名 / 含非法字符）时同样不产出文件 —— 这条守门必须在
+   * 这里做一次，因为命令面板与两条快捷命令都绕过对话框直接走到这里。
    *
    * 返回值是"**文件真的写出来了吗**"：对话框靠它决定要不要留在原地
    * （失败时留着，用户就能换个格式再试；成功或"已经报过原因"时才关窗）。
    * 提示只在这里发一次，所以对话框拿到 `false` 时不需要再说一遍。
    */
-  private async exportMapWithRange(range: ExportRange, format: ExportFormat): Promise<boolean> {
+  private async exportMapWithRange(range: ExportRange, format: ExportFormat, target: ExportTarget): Promise<boolean> {
     const context = this.resolveExportContext()
     if (!context) return false
     const { canvasPath, mapPath, document } = context
@@ -1173,21 +1338,39 @@ export default class ProjectKakiPlugin extends Plugin {
       return false
     }
 
-    const basePath = exportFileNameFor(exportBasePathFor(mapPath), range, document)
+    if (exportTargetProblem(target.folder, target.fileName) !== null) {
+      // 真正的守门：对话框可以被绕过（命令面板与两条快捷命令都直接到这里）
+      new Notice('无法导出：保存位置或文件名不可用（空文件名或含非法字符）。', NOTICE_MAX_MS)
+      return false
+    }
     const extension = format === 'png' ? '.png' : '.svg'
+    // 落点由调用方给（对话框里用户填的那个，或两条快捷命令推导出来的默认值）；
+    // 文件名末尾若带了 `.svg` / `.png` 就去掉 —— 扩展名跟着格式走，不然会写出 `World.svg.png`
+    const basePath = joinExportTarget(target.folder, stripExportExtension(target.fileName))
+    try {
+      // 用户可能填了一个还不存在的目录名（对话框上承诺了会自动建）
+      await this.ensureExportFolder(target.folder)
+    } catch (error) {
+      console.error('[project-kaki] 创建导出目录失败', error)
+      new Notice(`无法导出：创建目录「${target.folder}」失败。`, NOTICE_MAX_MS)
+      return false
+    }
     const exportPath = uniqueExportPath(basePath, extension, (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
-    // 现读一次设置：导出必须是"当前地图 + 当前自定义地形/标记"的合成结果。
+    // 现读一次设置：导出必须是"当前地图 + **当前地图那份定义**"的合成结果。
     // 图标形状只能由 Obsidian 的 `getIcon` 拿到，所以**注入**给纯模块（见 `lucideFragment.ts`）。
     // 数据层颜色面走了哪条路（内联栅格 / 超上限退回矢量）由 `onOverlayExport` 带回来，
     // 附在导出提示里 —— 否则"报错的是矢量兜底"这件事用户永远看不见（DATA-LAYER-PLAN §0 D1 a3）。
     let overlayNotes: readonly OverlayExportNote[] = []
-    const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, this.getCustomTerrains(), resolved.bounds, {
-      customMarkers: this.getCustomMarkers(),
+    // 定义**按被导出的那份文档**解析（v2 方案 B）：导出别人的图时，颜色/线宽跟的是文件里那一套
+    const definitions = this.definitionsOf(document)
+    const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, definitions.terrains, resolved.bounds, {
+      customMarkers: definitions.markers,
       iconSvgFor: lucideIconFragment,
-      // 数据层（温度 / 深度）与图层开关**都现读设置**：与画布同一条口径
-      // （关掉温度层，导出里就不该有它；色带 / 显示方式也要跟画布一致）
-      overlayStyles: this.pluginSettings.overlays,
-      layers: this.pluginSettings.layers,
+      // 数据层（温度 / 深度）与图层开关**按被导出的那张地图解析**：与画布同一条口径
+      // （关掉温度层，导出里就不该有它；色带 / 显示方式也要跟画布一致）。
+      // W4-2：导出"别人给的图"时不该把**本机对当前那张图**的色带套上去
+      overlayStyles: this.overlaysFor(mapPath),
+      layers: this.layersFor(mapPath),
       onOverlayExport: (notes) => {
         overlayNotes = notes
       },
@@ -1225,7 +1408,20 @@ export default class ProjectKakiPlugin extends Plugin {
     }
   }
 
-  /** 打开「导出地图…」对话框：范围（全部内容 / 当前视口 / 某个区域）+ 格式（SVG / PNG） */
+  /**
+   * 当前地图的**默认导出落点**：文件夹取"上次用过的（`settings.exportFolder`），
+   * 没记录过就取地图文件所在目录"；文件名由范围推出来（`World` / `World-视口` / `World-北境领`）。
+   *
+   * 三条入口共用它 —— 于是"快捷命令等于对话框里选全部内容"这句描述始终成立
+   * （两条快捷命令与对话框的默认值来自同一处，改了不会只改一边）。
+   */
+  private defaultExportTarget(mapPath: string, range: ExportRange, document: MapDocument | null): ExportTarget {
+    const remembered = this.pluginSettings.exportFolder
+    const folder = remembered.length > 0 ? remembered : assetFolderOf(exportBasePathFor(mapPath))
+    return { folder, fileName: exportFileNameFor(assetNameOf(exportBasePathFor(mapPath)), range, document) }
+  }
+
+  /** 打开「导出地图…」对话框：范围 + 格式 + 落点（保存位置 / 文件名） */
   private openExportModal(): void {
     const context = this.resolveExportContext()
     if (!context) return
@@ -1237,18 +1433,29 @@ export default class ProjectKakiPlugin extends Plugin {
       regions: listExportRegions(document),
       initialRange: { kind: 'all' },
       initialFormat: 'svg',
-      describe: (range, format) => {
+      initialFolder: this.defaultExportTarget(context.mapPath, { kind: 'all' }, document).folder,
+      defaultFileName: (range) => exportFileNameFor(assetNameOf(exportBasePathFor(context.mapPath)), range, document),
+      pickFolder: (onChoose) => {
+        this.pickFolder({ title: '选择导出位置', onChoose })
+      },
+      describe: (range, format, target) => {
         const resolved = resolveExportBounds(range, {
           document,
           viewportWorld: this.currentViewportWorld(canvasPathForViewport),
         })
         if (!resolved.ok) return { ok: false, reason: resolved.reason }
-        // 摘要里带上将要写入的文件名：用户点"导出"之前就能知道会多出哪个文件
-        const name = `${exportFileNameFor(exportBasePathFor(context.mapPath), range, document)}${format === 'png' ? '.png' : '.svg'}`
-        return { ok: true, text: `${resolved.description}\n输出文件：${name}（重名时自动加 -2、-3）` }
+        const problem = exportTargetProblem(target.folder, target.fileName)
+        if (problem !== null) return { ok: false, reason: problem }
+        // 摘要里带上将要写入的完整路径：用户点"导出"之前就能知道会多出哪个文件
+        const extension = format === 'png' ? '.png' : '.svg'
+        const path = `${joinExportTarget(target.folder, stripExportExtension(target.fileName))}${extension}`
+        return { ok: true, text: `${resolved.description}\n输出文件：${path}（重名时自动加 -2、-3）` }
       },
-      onExport: async (range, format) => {
-        const done = await this.exportMapWithRange(range, format)
+      onExport: async (range, format, target) => {
+        const done = await this.exportMapWithRange(range, format, target)
+        // 只有真的写出文件才记住这个目录：失败时用户可能只是打错了一个字，
+        // 把打错的目录记下来会让"上次目录"变成一个坑。
+        if (done) void this.rememberExportFolder(target.folder)
         // 失败时不留 `reason`：具体原因（"这个环境不支持 toBlob"之类）已经由导出那边
         // 发过一条提示了，这里再说一遍只会让用户看到两句意思相同的话。
         return done ? { ok: true as const } : { ok: false as const }
@@ -1256,8 +1463,46 @@ export default class ProjectKakiPlugin extends Plugin {
     }).open()
   }
 
+  /**
+   * 记住导出落点（写进插件设置，下一次打开对话框与两条快捷命令都用它）。
+   *
+   * 落在**插件设置**而不是地图文件：它不是"这个世界的事实"，
+   * 写进地图文件会让"把图分享给别人"连带改掉对方的导出位置（判据见 `UI-REORG-PLAN.md` §5）。
+   * 落盘是后台的事：导出已经成功，写设置慢一点不该再弹一条提示打扰用户。
+   */
+  private async rememberExportFolder(folder: string): Promise<void> {
+    const next = normalizeExportFolder(folder)
+    if (next === this.pluginSettings.exportFolder) return
+    this.pluginSettings = { ...this.pluginSettings, exportFolder: next }
+    try {
+      await this.saveData(this.pluginSettings)
+    } catch (error) {
+      console.warn('[project-kaki] 保存导出位置失败（不影响已导出的文件）', error)
+    }
+  }
+
+  /**
+   * 确保导出目录存在 —— 对话框上写着「可以手动填一个新的目录名（导出时会自动建）」，
+   * 承诺了就得自己做：不能指望 `vault.create` 顺带把父目录建出来（各版本行为不保证）。
+   *
+   * 与 `MapDocumentStore.ensureFolder` 同一口径：已经存在就直接返回；
+   * 并发创建撞车（别人刚建好）时再确认一次，不当成失败。
+   */
+  private async ensureExportFolder(folder: string): Promise<void> {
+    const normalized = normalizeExportFolder(folder)
+    if (normalized.length === 0) return
+    if (this.app.vault.getAbstractFileByPath(normalized) !== null) return
+    try {
+      await this.app.vault.createFolder(normalized)
+    } catch (error) {
+      if (this.app.vault.getAbstractFileByPath(normalized) === null) throw error
+    }
+  }
+
   private async exportActiveMapSvg(): Promise<void> {
-    await this.exportMapWithRange({ kind: 'all' }, 'svg')
+    const context = this.resolveExportContext()
+    if (!context) return
+    await this.exportMapWithRange({ kind: 'all' }, 'svg', this.defaultExportTarget(context.mapPath, { kind: 'all' }, context.document))
   }
 
   /**
@@ -1268,7 +1513,9 @@ export default class ProjectKakiPlugin extends Plugin {
    * 如果这里另写一套坐标换算，迟早会出现"PNG 与 SVG 长得不一样"。
    */
   private async exportActiveMapPng(): Promise<void> {
-    await this.exportMapWithRange({ kind: 'all' }, 'png')
+    const context = this.resolveExportContext()
+    if (!context) return
+    await this.exportMapWithRange({ kind: 'all' }, 'png', this.defaultExportTarget(context.mapPath, { kind: 'all' }, context.document))
   }
 
   override onunload(): void {
@@ -1305,9 +1552,318 @@ export default class ProjectKakiPlugin extends Plugin {
     return paletteOf(this.pluginSettings)
   }
 
-  /** 当前自定义地形（地图层、工具条、Base 缩略图、导出都现读它） */
-  getCustomTerrains(): readonly CustomTerrain[] {
-    return this.pluginSettings.customTerrains
+  /**
+   * **库级设置那一份**定义集（"新建地图的模板" + "v1 老图的迁移快照"）。
+   *
+   * 定义随图（方案 B）之后，权威在**地图文件**里；库里的这一份只剩两个用途：
+   * ① 新建地图时作为出厂快照写进新文件；② v1 老图（没有 `definitions`）读进来时的初值。
+   * 它同时也跟着每次定义编辑一起更新（见 `mutateDefinitions`），于是"新建的下一张图"
+   * 会沿用你上一次调好的那一套 —— 一条写入口，两处同步，不会分叉。
+   *
+   * 按 `pluginSettings` 的对象身份做一层备忘：五类目录在渲染层是**每帧现读**的，
+   * 每次重新规范化五份目录纯属白烧 CPU（设置对象每次改动都会换新引用，所以这层备忘不会过期）。
+   */
+  libraryDefinitionSet(): MapDefinitionSet {
+    const cached = this.librarySetCache
+    if (cached !== null && cached.source === this.pluginSettings) return cached.set
+    const set = definitionSetFromLibrary(this.pluginSettings)
+    this.librarySetCache = { source: this.pluginSettings, set }
+    return set
+  }
+
+  /**
+   * **某一份地图文档**当前生效的定义集（定义随图：v2 的 `definitions` 段）。
+   *
+   * - 文档里有 `definitions` ⇒ 以文件为准（缺哪一类就沿用库级快照 —— 那是给手写块留的安全网）；
+   * - 文档里没有（v1 老图）或压根没有文档 ⇒ 库级那一份。
+   *
+   * ⚠️ **必须按文档解析**，不许有插件级单例：多画布同开是硬约束，
+   * 单例会让 A 图的定义污染 B 图（见 `UI-REORG-PLAN.md` §5.1）。
+   *
+   * 按 `definitions` 的**对象身份**做备忘：访问器每帧现读，而那份块每次写入都会换成新对象
+   * （`definitionsBlockOf` 是纯函数），所以备忘既便宜又不会过期。
+   */
+  definitionsOf(document: MapDocument | null): MapDefinitionSet {
+    const block = document?.definitions
+    if (block === undefined) return this.libraryDefinitionSet()
+    const cached = this.documentSetCache.get(block)
+    if (cached !== undefined) return cached
+    const set = definitionSetFromBlock(block, this.libraryDefinitionSet())
+    this.documentSetCache.set(block, set)
+    return set
+  }
+
+  /**
+   * **活动地图**当前生效的定义集（侧栏、筛选器、命令这些"跟着当前画布走"的地方用它）。
+   *
+   * 与 `definitionsOf` 的差别只有"哪一份文档"：这里取活动画布持有的那一份。
+   * 没有活动地图时它就是库级那一份（渲染层与侧栏都不会因此报错）。
+   */
+  activeDefinitions(): MapDefinitionSet {
+    return this.definitionsOf(this.layers?.getActiveDocument() ?? null)
+  }
+
+  /**
+   * 库级设置那一份定义集，序列化成地图文件里的 `definitions` 块（v2）。
+   *
+   * 用途是**新建地图**：新文件本来就要从头写一遍，把定义一起装进去才是方案 B
+   * （"分享即完整"）。**老图不走这里** —— 它们读到的是内存快照，只有用户真的改了定义才回写升版。
+   */
+  libraryDefinitionsBlock(): MapDefinitions {
+    return definitionsBlockOf(this.libraryDefinitionSet())
+  }
+
+  // ------------------------------------------------ 视图偏好（W4-2：按地图分键）
+
+  /**
+   * **当前活动画布**绑定的地图路径（`null` = 没有地图 ⇒ 视图偏好落在库级那一份"模板"上）。
+   *
+   * 与 `definitionTarget` 里那一句同一条口径（活动画布 → 它绑定的地图文件），
+   * 只是这里**不要求启用地图层**：图层开关、色带、图例是"我现在想看到什么"，
+   * 只要有一张地图在眼前就该记住它。标识用**库内相对路径**（同一张图可被多个 canvas 引用，
+   * 按 canvas 分份会给同一张图两份设置）。
+   */
+  activeViewMapPath(): string | null {
+    const canvasPath = this.activeCanvasPath()
+    if (canvasPath === null) return null
+    return this.store?.mapFilePathForCanvas(canvasPath) ?? null
+  }
+
+  /**
+   * **任意画布**绑定的地图路径（`null` = 这张画布没绑地图）。
+   *
+   * 与 `activeViewMapPath` 只差"哪一张画布"：多画布同开时，画布上的东西（工具条开关、
+   * 图例、叠加层）必须按**它自己那张图**解析，不能看"谁是活动画布" —— 否则在 B 画布上
+   * 点 B 的图层开关，改的却是 A 那张图（B 的按钮还不会翻）。
+   */
+  mapPathForCanvas(canvasPath: string): string | null {
+    return this.store?.mapFilePathForCanvas(canvasPath) ?? null
+  }
+
+  /** 某张地图自己的视图偏好（没有记录 / 没有地图 ⇒ 空对象，调用方各自回落） */
+  private mapViewsOf(mapPath: string | null): MapViewSettings {
+    if (mapPath === null) return {}
+    return this.pluginSettings.mapViews[mapPath] ?? {}
+  }
+
+  /**
+   * 色带 / 不透明度那一份**按地图解析**（缺 = 用库级模板）。
+   *
+   * 必须便宜：绘制层是**每帧现读**它（`MapOverlay` / `MapLayerManager` 的 deps），
+   * 所以这里只查一次表、不做规范化 —— 规范化在 `normalizeSettings` 与写入侧各做一次。
+   */
+  overlaysFor(mapPath: string | null): OverlayStyles {
+    return this.mapViewsOf(mapPath).overlays ?? this.pluginSettings.overlays
+  }
+
+  /** 图层开关**按地图解析**（缺 = 用库级模板）—— 与 `overlaysFor` 逐字同理 */
+  layersFor(mapPath: string | null): LayerVisibility {
+    return this.mapViewsOf(mapPath).layers ?? this.pluginSettings.layers
+  }
+
+  /** 图例显隐**按地图解析**（缺 = 用库级模板）—— 与 `overlaysFor` 逐字同理 */
+  showLegendFor(mapPath: string | null): boolean {
+    return this.mapViewsOf(mapPath).showLegend ?? this.pluginSettings.showLegend
+  }
+
+  /**
+   * 视图偏好的**唯一写入口**：写进某张地图那一份，同时**镜像**回库级那一份。
+   *
+   * 为什么镜像（与"定义随图"里那条一字不差）：库级那一份是**"新建地图的模板"**，
+   * 不跟上就会出现"刚调好的色带，新建一张图又打回出厂"。
+   * 没有地图（`null`）时改的就是模板本身 —— 那种情况下模板是唯一存在的家。
+   *
+   * 只改内存、不落盘、不广播：调用方各自决定广播什么（图层要广播，色带靠"每帧现读"）。
+   * 这样也保住了既有口径 —— **改内存是同步的**，于是侧栏里同步点一下开关，
+   * 下一帧就看到结果（不必等落盘）。
+   */
+  private commitViewSettings(mapPath: string | null, patch: MapViewSettings): void {
+    const settings = this.pluginSettings
+    const mirrored = {
+      ...(patch.overlays !== undefined ? { overlays: patch.overlays } : {}),
+      ...(patch.layers !== undefined ? { layers: patch.layers } : {}),
+      ...(patch.showLegend !== undefined ? { showLegend: patch.showLegend } : {}),
+    }
+    if (mapPath === null) {
+      this.pluginSettings = { ...settings, ...mirrored }
+      return
+    }
+    const existing = settings.mapViews[mapPath] ?? {}
+    this.pluginSettings = {
+      ...settings,
+      mapViews: { ...settings.mapViews, [mapPath]: { ...existing, ...patch } },
+      ...mirrored,
+    }
+  }
+
+  // ------------------------------------------------ 定义写入口（W4-1b：定义随图）
+
+  /**
+   * 定义编辑的**目标**：当前要改哪张地图。
+   *
+   * 解析顺序（决定"定义随图"到底落在哪个文件上）：
+   * 1. 活动画布绑定了一张地图 ⇒ 就是它（有地图层时顺便拿到编辑器，改动走撤销栈）；
+   * 2. 没有活动画布 / 活动画布没绑地图 ⇒ `null`（调用方给一句人话，见 `mutateDefinitions`）。
+   *
+   * 为什么按**活动画布**而不是"最近编辑过的地图"：定义弹窗、侧栏、命令三者都跟着当前画布走，
+   * 而多画布同开时"当前"唯一由活动叶子定义（与 `activeCanvasPath` 同一条口径）。
+   */
+  private definitionTarget(): DefinitionTarget | null {
+    const canvasPath = this.activeCanvasPath()
+    if (canvasPath === null) return null
+    const mapPath = this.store?.mapFilePathForCanvas(canvasPath) ?? null
+    if (mapPath === null) return null
+    return { canvasPath, mapPath, editor: this.layers?.getEditor(canvasPath) ?? null }
+  }
+
+  /**
+   * 「地图定义」弹窗要渲染的那份文档（`null` = 现在没有可编辑的地图）。
+   *
+   * 与 `definitionTarget` 同一套解析，只是把"拿文档"这件事做完：
+   * 有地图层时直接用内存里那份（不重读盘，避免和未落盘的编辑打架）；
+   * 只有绑定、没开地图层时读一次盘（并把结果记进 `definitionDocCache`，下次开弹窗首帧就是对的）。
+   */
+  async currentDefinitionDocument(): Promise<{ document: MapDocument; mapPath: string } | null> {
+    const target = this.definitionTarget()
+    if (target === null) return null
+    if (target.editor !== null) {
+      const document_ = this.layers?.getDocument(target.canvasPath) ?? null
+      return document_ === null ? null : { document: document_, mapPath: target.mapPath }
+    }
+    const loaded = await this.loadMapAt(target.mapPath)
+    if (loaded === null) return null
+    this.definitionDocCache.set(target.mapPath, loaded.document)
+    return { document: loaded.document, mapPath: target.mapPath }
+  }
+
+  /** 定义编辑的**目标地图路径**（弹窗顶部那句话要它）—— 没有可编辑的地图时为 `null` */
+  definitionTargetPath(): string | null {
+    return this.definitionTarget()?.mapPath ?? null
+  }
+
+  /**
+   * 弹窗**首帧**用的定义集（同步拿得到的）。
+   *
+   * 三种情况：有地图层 ⇒ 它内存里那份（权威、且与画布所见一致）；
+   * 只绑定没开层 ⇒ 最近一次为弹窗读盘读到的那份（`definitionDocCache`）；
+   * 都没有 ⇒ 库级模板。弹窗随后会用 `currentDefinitionDocument()` 把真正那一份补上。
+   */
+  syncCurrentDefinitionSet(): MapDefinitionSet {
+    const target = this.definitionTarget()
+    if (target === null) return this.libraryDefinitionSet()
+    if (target.editor !== null) return this.definitionsOf(this.layers?.getDocument(target.canvasPath) ?? null)
+    const cached = this.definitionDocCache.get(target.mapPath)
+    return cached === undefined ? this.libraryDefinitionSet() : this.definitionsOf(cached)
+  }
+
+  /** 读一份地图文件（`null` = 读不到 / 结构性问题 / 只读打开） */
+  private async loadMapAt(
+    mapPath: string,
+  ): Promise<{ file: TFile; document: MapDocument; name: string; canvases: string[]; rest: Record<string, string | string[]> } | null> {
+    const abstract = this.app.vault.getAbstractFileByPath(mapPath)
+    if (abstract === null || this.store === null) return null
+    const loaded = await this.store.load(abstract as TFile)
+    if (loaded.document === null || loaded.readOnly) return null
+    return {
+      file: abstract as TFile,
+      document: loaded.document,
+      name: loaded.frontmatter.name ?? defaultMapNameFromPath(mapPath),
+      canvases: loaded.frontmatter.canvases,
+      rest: loaded.frontmatter.rest,
+    }
+  }
+
+  /**
+   * **定义写入口的唯一收口**：把"当前地图的定义集"换成 `mutate` 之后的结果并落盘。
+   *
+   * 三条必须守住的边界：
+   * 1. **权威在地图文件**：改动写进那张地图的 `definitions` 段（有地图层时走编辑器的
+   *    `setDefinitions` —— 于是 Ctrl+Z 一次就回到改之前那套定义；没有地图层时直接读改写盘）；
+   * 2. **库级那一份同步跟上**：它是"新建地图的模板"，不跟上就会出现"新建的图还是旧定义"；
+   * 3. **没有可编辑的地图**（没有 Canvas / Canvas 没绑地图）⇒ 改动**只写模板**，
+   *    并由弹窗顶部那句话说明白 —— 那种情况下模板就是唯一存在的家，不是"静默丢弃"。
+   *
+   * `mutate` 只在"已经决定要写"时被调用：校验、重名、上限这些判断都在调用方做完。
+   */
+  private async mutateDefinitions(
+    mutate: (set: MapDefinitionSet) => MapDefinitionSet,
+    label: string,
+    /**
+     * 指定写哪张地图（缺省 = 提交这一刻现解析）。
+     *
+     * 为什么允许覆盖：**对话框已经告诉用户"导入到哪张图"了**（W4-3 的那一行小字）——
+     * 如果提交时重新解析出一个不同的目标，那句话就成了假话。导入这类"先说后做"的动作
+     * 必须让说的与做的指同一张图。
+     */
+    target: DefinitionTarget | null | undefined = undefined,
+  ): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const resolved = target === undefined ? this.definitionTarget() : target
+    if (resolved === null) {
+      // 没有地图：家只有"新建地图的模板"（弹窗会明说这件事，见 `DefinitionManagerModal`）
+      const next = mutate(this.libraryDefinitionSet())
+      this.mirrorLibraryDefinitions(next)
+      await this.persistSettings()
+      this.layers?.setStylePalette()
+      this.refreshPanel()
+      console.info(`[project-kaki] ${label}：当前没有地图，已写进「新建地图的模板」`)
+      return { ok: true }
+    }
+    const loaded = resolved.editor === null ? await this.loadMapAt(resolved.mapPath) : null
+    if (resolved.editor === null && loaded === null) {
+      return { ok: false, problem: `读不到地图文档：${resolved.mapPath}` }
+    }
+    const document_ =
+      resolved.editor === null ? loaded!.document : this.layers?.getDocument(resolved.canvasPath) ?? null
+    if (document_ === null) return { ok: false, problem: `读不到地图文档：${resolved.mapPath}` }
+
+    const current = this.definitionsOf(document_)
+    const next = mutate(current)
+    // 五类都写 + 把本插件不认识的分类（`extra`）原样带走（见 `definitionsBlockOf`）
+    const block = definitionsBlockOf(next, document_.definitions)
+
+    if (resolved.editor !== null) {
+      // 走编辑器：一次提交 = 一条历史，落盘由地图层的防抖保存负责
+      resolved.editor.setDefinitions(block)
+    } else {
+      document_.definitions = block
+      // 老图（v1）从这一刻起就是 v2 了
+      document_.version = Math.max(document_.version, MAP_DOCUMENT_VERSION)
+      await this.store!.writeNow(loaded!.file, document_, loaded!.name, loaded!.canvases, loaded!.rest)
+      // 顺手更新弹窗那份"读盘留底"（vault modify 事件会把它删掉，所以它只是首帧的一个提示，
+      // 不是权威 —— 权威永远是文件本身，见 `definitionDocCache`）
+      this.definitionDocCache.set(resolved.mapPath, document_)
+      // 同一张图可能被别的画布也开着：从盘上重读，免得它内存里还是旧定义
+      await this.layers?.reloadMap(resolved.mapPath)
+    }
+
+    this.mirrorLibraryDefinitions(next)
+    await this.persistSettings()
+    // 工具条下拉、图例、画布配色、侧栏那几节控件都跟着换一份目录
+    this.layers?.setStylePalette()
+    this.refreshPanel()
+    console.info(`[project-kaki] ${label}：已写入 ${resolved.mapPath} 的定义段`)
+    return { ok: true }
+  }
+
+  /**
+   * 把定义集镜像回库级设置（`pluginSettings`）。
+   *
+   * 为什么两处都写：库级那一份现在是"**新建地图的模板**"（见 `libraryDefinitionSet`），
+   * 不跟着改就会出现"刚调好的线宽，新建一张图又打回出厂"。两处由这一条写入口同时更新，
+   * 于是不会分叉（"一个设置两个来源"那条纪律说的是**两个写入口**，不是两份用途不同的副本）。
+   */
+  private mirrorLibraryDefinitions(set: MapDefinitionSet): void {
+    this.pluginSettings = {
+      ...this.pluginSettings,
+      customTerrains: set.terrains,
+      customMarkers: set.markers,
+      customBiomes: set.biomes,
+      pathTypes: set.pathTypes,
+      regionTypes: set.regionTypes,
+      // 旧字段跟着目录走（它不是渲染依据，但两处自相矛盾会让人看不懂 data.json）
+      pathColors: pathColorsFromEntries(set.pathTypes),
+      regionColors: regionColorsFromEntries(set.regionTypes),
+    }
   }
 
   /**
@@ -1327,42 +1883,44 @@ export default class ProjectKakiPlugin extends Plugin {
     imageLayout?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
     // ID 留空 = 自动生成：手打 ID 是没必要的负担，显示名才是人看的（用户实测反馈）
+    const existing = this.activeDefinitions().terrains
     const result = validateCustomTerrainInput({
       ...input,
       id: isBlankCustomId(input.id)
         ? suggestCustomId(
             typeof input.label === 'string' ? input.label : '',
-            this.pluginSettings.customTerrains.map((item) => item.id),
+            existing.map((item) => item.id),
             CUSTOM_TERRAIN_PREFIX,
             'terrain',
           )
         : input.id,
     })
     if (!result.ok) return result
-    if (this.pluginSettings.customTerrains.some((terrain) => terrain.id === result.terrain.id)) {
+    if (existing.some((terrain) => terrain.id === result.terrain.id)) {
       return { ok: false, problem: `已经有一个地形用了 ID ${result.terrain.id}` }
     }
-    if (this.pluginSettings.customTerrains.length >= MAX_CUSTOM_TERRAINS) {
+    if (existing.length >= MAX_CUSTOM_TERRAINS) {
       return { ok: false, problem: `最多 ${MAX_CUSTOM_TERRAINS} 个自定义地形` }
     }
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      customTerrains: [...this.pluginSettings.customTerrains, result.terrain],
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-    return { ok: true }
+    return this.mutateDefinitions(
+      (set) => ({ ...set, terrains: [...set.terrains, result.terrain] }),
+      `新增自定义地形 ${result.terrain.id}`,
+    )
   }
 
   /**
-   * 改一个自定义地形（按下标定位，因为 ID 不可改）。
+   * 改一个自定义地形（按 **ID** 定位 —— ID 不可改，所以它是这条定义的稳定身份）。
+   *
+   * 为什么不是下标：弹窗渲染出来的那份定义集与"点下去那一刻的活动地图"未必是同一份
+   * （用户可能在弹窗开着时切了画布）。按下标改会**改错条目**，按 ID 改最坏只是"这条不在
+   * 当前地图里 → 什么也不做"，而且弹窗随后的重绘会把真实情况显示出来。
    *
    * 只接受"补丁"：显示名、颜色、字形、图片路径。ID 不在补丁里 ——
    * 改 ID 等于把地图文件里已有的格子指向另一个地形，那不是编辑而是数据迁移，
    * 必须显式做成一个功能，不能顺手提供。
    */
   async updateCustomTerrain(
-    index: number,
+    id: string,
     patch: {
       label?: unknown
       color?: unknown
@@ -1372,27 +1930,28 @@ export default class ProjectKakiPlugin extends Plugin {
       imageLayout?: unknown
     },
   ): Promise<void> {
-    const current = this.pluginSettings.customTerrains[index]
-    if (!current) return
-    const next = validateCustomTerrainInput({
-      id: current.id,
-      label: patch.label !== undefined ? patch.label : current.label,
-      color: patch.color !== undefined ? patch.color : current.color,
-      glyph: patch.glyph !== undefined ? patch.glyph : current.glyph,
-      imagePath: patch.imagePath !== undefined ? patch.imagePath : current.imagePath,
-      // 只切模式时其余字段原样带着走 —— 于是"切回去"不会丢配置（用户来回切不会白配一遍）
-      mode: patch.mode !== undefined ? patch.mode : current.mode,
-      imageLayout: patch.imageLayout !== undefined ? patch.imageLayout : current.imageLayout,
-    })
-    if (!next.ok) {
-      console.warn(`[project-kaki] 自定义地形 ${current.id} 的修改被拒绝：${next.problem}`)
-      return
-    }
-    const list = [...this.pluginSettings.customTerrains]
-    list[index] = next.terrain
-    this.pluginSettings = { ...this.pluginSettings, customTerrains: list }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
+    await this.mutateDefinitions((set) => {
+      const current = set.terrains.find((terrain) => terrain.id === id)
+      if (!current) return set
+      const next = validateCustomTerrainInput({
+        id: current.id,
+        label: patch.label !== undefined ? patch.label : current.label,
+        color: patch.color !== undefined ? patch.color : current.color,
+        glyph: patch.glyph !== undefined ? patch.glyph : current.glyph,
+        imagePath: patch.imagePath !== undefined ? patch.imagePath : current.imagePath,
+        // 只切模式时其余字段原样带着走 —— 于是"切回去"不会丢配置（用户来回切不会白配一遍）
+        mode: patch.mode !== undefined ? patch.mode : current.mode,
+        imageLayout: patch.imageLayout !== undefined ? patch.imageLayout : current.imageLayout,
+      })
+      if (!next.ok) {
+        console.warn(`[project-kaki] 自定义地形 ${current.id} 的修改被拒绝：${next.problem}`)
+        return set
+      }
+      return {
+        ...set,
+        terrains: set.terrains.map((terrain) => (terrain.id === id ? next.terrain : terrain)),
+      }
+    }, `修改自定义地形 ${id}`)
   }
 
   /**
@@ -1401,20 +1960,11 @@ export default class ProjectKakiPlugin extends Plugin {
    * **不动地图数据**：已经画了这个地形的格子仍然留在文件里，只是画成回退样式。
    * 反过来做（顺手把格子删掉）是不可逆的，而且用户只是想改个颜色而已。
    */
-  async removeCustomTerrain(index: number): Promise<void> {
-    const current = this.pluginSettings.customTerrains[index]
-    if (!current) return
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      customTerrains: this.pluginSettings.customTerrains.filter((_terrain, i) => i !== index),
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-  }
-
-  /** 当前路径类型目录（地图层、工具条、设置页都现读它）—— 路径样式的唯一来源 */
-  getPathTypes(): readonly PathTypeEntry[] {
-    return this.pluginSettings.pathTypes
+  async removeCustomTerrain(id: string): Promise<void> {
+    await this.mutateDefinitions((set) => {
+      if (!set.terrains.some((terrain) => terrain.id === id)) return set
+      return { ...set, terrains: set.terrains.filter((terrain) => terrain.id !== id) }
+    }, `删除自定义地形 ${id}`)
   }
 
   /**
@@ -1423,28 +1973,21 @@ export default class ProjectKakiPlugin extends Plugin {
    * 全部校验在 `applyPathTypePatch` 里（纯函数）：非法虚线**整条拒绝**并返回可读原因，
    * 而不是"悄悄回退到出厂值"——后者会让用户以为自己填的生效了。
    *
+   * ⚠️ 改的是**这张地图**的那一套参数（定义随图）：内置 4 种与自定义类型一视同仁。
    * 只影响**之后新画**的路径：已经画好的路径把参数存在地图文件里。
    */
   async updatePathType(
     id: string,
     patch: PathTypePatch,
   ): Promise<{ ok: true } | { ok: false; problem: string }> {
-    const index = this.pluginSettings.pathTypes.findIndex((entry) => entry.id === id)
-    if (index < 0) return { ok: false, problem: `没有这个路径类型：${id}` }
-    const current = this.pluginSettings.pathTypes[index]!
+    const current = this.activeDefinitions().pathTypes.find((entry) => entry.id === id)
+    if (current === undefined) return { ok: false, problem: `没有这个路径类型：${id}` }
     const next = applyPathTypePatch(current, patch)
     if (!next.ok) return next
-    const list = [...this.pluginSettings.pathTypes]
-    list[index] = next.entry
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      pathTypes: list,
-      // 旧字段跟着目录走，避免同一份颜色在两处自相矛盾（它不再是渲染依据）
-      pathColors: pathColorsFromEntries(list),
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-    return { ok: true }
+    return this.mutateDefinitions(
+      (set) => ({ ...set, pathTypes: set.pathTypes.map((entry) => (entry.id === id ? next.entry : entry)) }),
+      `修改路径类型 ${id}`,
+    )
   }
 
   /**
@@ -1464,29 +2007,29 @@ export default class ProjectKakiPlugin extends Plugin {
     join?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
     // ID 留空 = 自动生成（同 addCustomTerrain）
+    const entries = this.activeDefinitions().pathTypes
     const result = validateCustomPathTypeInput({
       ...input,
       id: isBlankCustomId(input.id)
         ? suggestCustomId(
             typeof input.label === 'string' ? input.label : '',
-            customPathTypeEntries(this.pluginSettings.pathTypes).map((item) => item.id),
+            customPathTypeEntries(entries).map((item) => item.id),
             CUSTOM_PATH_TYPE_PREFIX,
             'path',
           )
         : input.id,
     })
     if (!result.ok) return result
-    if (this.pluginSettings.pathTypes.some((entry) => entry.id === result.entry.id)) {
+    if (entries.some((entry) => entry.id === result.entry.id)) {
       return { ok: false, problem: `已经有一个路径类型用了 ID ${result.entry.id}` }
     }
-    if (customPathTypeEntries(this.pluginSettings.pathTypes).length >= MAX_CUSTOM_PATH_TYPES) {
+    if (customPathTypeEntries(entries).length >= MAX_CUSTOM_PATH_TYPES) {
       return { ok: false, problem: `最多 ${MAX_CUSTOM_PATH_TYPES} 个自定义路径类型` }
     }
-    const list = [...this.pluginSettings.pathTypes, result.entry]
-    this.pluginSettings = { ...this.pluginSettings, pathTypes: list, pathColors: pathColorsFromEntries(list) }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-    return { ok: true }
+    return this.mutateDefinitions(
+      (set) => ({ ...set, pathTypes: [...set.pathTypes, result.entry] }),
+      `新增路径类型 ${result.entry.id}`,
+    )
   }
 
   /**
@@ -1496,33 +2039,18 @@ export default class ProjectKakiPlugin extends Plugin {
    * 反过来做（顺手把路径删掉）是不可逆的，而用户通常只是想清理一下列表。
    */
   async removeCustomPathType(id: string): Promise<void> {
-    const list = this.pluginSettings.pathTypes.filter((entry) => entry.id !== id)
-    if (list.length === this.pluginSettings.pathTypes.length) return
-    this.pluginSettings = { ...this.pluginSettings, pathTypes: list, pathColors: pathColorsFromEntries(list) }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-  }
-
-  /** 当前自定义标记（地图层、工具条、放置对话框都现读它） */
-  getCustomMarkers(): readonly CustomMarker[] {
-    return this.pluginSettings.customMarkers
+    await this.mutateDefinitions((set) => {
+      const list = set.pathTypes.filter((entry) => entry.id !== id)
+      if (list.length === set.pathTypes.length) return set
+      return { ...set, pathTypes: list }
+    }, `删除路径类型 ${id}`)
   }
 
   /**
-   * 自定义生物群系目录（来自插件设置）。
+   * 当前活动地图的文档。
    *
-   * 与 `getCustomTerrains` / `getCustomMarkers` 完全同构：它只影响**颜色解析**
-   * （分类字段逐格上色 + 图例），值本身永远在地图文件里 —— 删掉定义不会删数据。
-   */
-  getCustomBiomes(): readonly CustomBiome[] {
-    return this.pluginSettings.customBiomes
-  }
-
-  /**
-   * 当前活动地图的文档（设置页要读它来列"这条分类在地图上用了多少格"）。
-   *
-   * 与 `getCustomBiomes` 一样只是转发 `layers`：设置页不认识地图层管理器，
-   * 由插件层替它取一次。没有活动地图时返回 `null`（设置页照常渲染，只是那一段空着）。
+   * 界面层（设置页的分类用量、信息卡读数）拿不到地图层管理器，由插件层替它取一次。
+   * 没有活动地图时返回 `null`（调用方照常渲染，只是那一段空着）。
    */
   getActiveDocument(): MapDocument | null {
     return this.layers?.getActiveDocument() ?? null
@@ -1543,7 +2071,7 @@ export default class ProjectKakiPlugin extends Plugin {
   ): Array<{ id: string; label: string; color: string; count: number; known: boolean }> {
     const document_ = this.getActiveDocument()
     if (document_ === null) return []
-    const custom = this.getCustomBiomes()
+    const custom = this.definitionsOf(document_).biomes
     const counts = new Map<string, number>()
     for (const cell of Object.values(document_.terrain)) {
       const id = spec.readCategory(cell)
@@ -1579,61 +2107,58 @@ export default class ProjectKakiPlugin extends Plugin {
     mode?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
     // ID 留空 = 自动生成（同 addCustomTerrain）
+    const existing = this.activeDefinitions().markers
     const result = validateCustomMarkerInput({
       ...input,
       id: isBlankCustomId(input.id)
         ? suggestCustomId(
             typeof input.label === 'string' ? input.label : '',
-            this.pluginSettings.customMarkers.map((item) => item.id),
+            existing.map((item) => item.id),
             CUSTOM_MARKER_PREFIX,
             'marker',
           )
         : input.id,
     })
     if (!result.ok) return result
-    if (this.pluginSettings.customMarkers.some((marker) => marker.id === result.marker.id)) {
+    if (existing.some((marker) => marker.id === result.marker.id)) {
       return { ok: false, problem: `已经有一个标记用了 ID ${result.marker.id}` }
     }
-    if (this.pluginSettings.customMarkers.length >= MAX_CUSTOM_MARKERS) {
+    if (existing.length >= MAX_CUSTOM_MARKERS) {
       return { ok: false, problem: `最多 ${MAX_CUSTOM_MARKERS} 个自定义标记` }
     }
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      customMarkers: [...this.pluginSettings.customMarkers, result.marker],
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-    return { ok: true }
+    return this.mutateDefinitions(
+      (set) => ({ ...set, markers: [...set.markers, result.marker] }),
+      `新增自定义标记 ${result.marker.id}`,
+    )
   }
 
   /**
-   * 改一个自定义标记（按下标定位，因为 ID 不可改）。
+   * 改一个自定义标记（按 **ID** 定位 —— 与 `updateCustomTerrain` 逐字同理：
+   * 弹窗显示的那份与"点下去那一刻的活动地图"未必同一份，按下标会改错条目）。
    *
    * 只接受"补丁"，且**只切模式时其余字段原样带着走** ——
    * 于是"字形 ↔ 图片"来回切不会丢配置（切回去时之前选的图还在）。
    */
   async updateCustomMarker(
-    index: number,
+    id: string,
     patch: { label?: unknown; icon?: unknown; imagePath?: unknown; mode?: unknown },
   ): Promise<void> {
-    const current = this.pluginSettings.customMarkers[index]
-    if (!current) return
-    const next = validateCustomMarkerInput({
-      id: current.id,
-      label: patch.label !== undefined ? patch.label : current.label,
-      icon: patch.icon !== undefined ? patch.icon : current.icon,
-      imagePath: patch.imagePath !== undefined ? patch.imagePath : current.imagePath,
-      mode: patch.mode !== undefined ? patch.mode : current.mode,
-    })
-    if (!next.ok) {
-      console.warn(`[project-kaki] 自定义标记 ${current.id} 的修改被拒绝：${next.problem}`)
-      return
-    }
-    const list = [...this.pluginSettings.customMarkers]
-    list[index] = next.marker
-    this.pluginSettings = { ...this.pluginSettings, customMarkers: list }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
+    await this.mutateDefinitions((set) => {
+      const current = set.markers.find((marker) => marker.id === id)
+      if (!current) return set
+      const next = validateCustomMarkerInput({
+        id: current.id,
+        label: patch.label !== undefined ? patch.label : current.label,
+        icon: patch.icon !== undefined ? patch.icon : current.icon,
+        imagePath: patch.imagePath !== undefined ? patch.imagePath : current.imagePath,
+        mode: patch.mode !== undefined ? patch.mode : current.mode,
+      })
+      if (!next.ok) {
+        console.warn(`[project-kaki] 自定义标记 ${current.id} 的修改被拒绝：${next.problem}`)
+        return set
+      }
+      return { ...set, markers: set.markers.map((marker) => (marker.id === id ? next.marker : marker)) }
+    }, `修改自定义标记 ${id}`)
   }
 
   /**
@@ -1642,15 +2167,11 @@ export default class ProjectKakiPlugin extends Plugin {
    * **不动地图数据**：地图上已经用了这个图标的标记仍然留在文件里，只是画成回退视觉。
    * 与删除自定义地形同一条承诺（见各文档里的"认不出 ≠ 丢弃"）。
    */
-  async removeCustomMarker(index: number): Promise<void> {
-    const current = this.pluginSettings.customMarkers[index]
-    if (!current) return
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      customMarkers: this.pluginSettings.customMarkers.filter((_marker, i) => i !== index),
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
+  async removeCustomMarker(id: string): Promise<void> {
+    await this.mutateDefinitions((set) => {
+      if (!set.markers.some((marker) => marker.id === id)) return set
+      return { ...set, markers: set.markers.filter((marker) => marker.id !== id) }
+    }, `删除自定义标记 ${id}`)
   }
 
   private async loadSettings(): Promise<void> {
@@ -1675,15 +2196,10 @@ export default class ProjectKakiPlugin extends Plugin {
    * 旧字段 `regionColors` 只是目录的镜像（不再是渲染依据）。
    */
   async setRegionColor(index: number, color: string): Promise<void> {
-    const builtin = this.pluginSettings.regionTypes.filter((entry) => isBuiltinRegionType(entry.id))
+    const builtin = this.activeDefinitions().regionTypes.filter((entry) => isBuiltinRegionType(entry.id))
     const target = builtin[index]
     if (target === undefined) return
     await this.updateRegionType(target.id, { color })
-  }
-
-  /** 当前区域类型目录（地图层、工具条、设置页、Base 行都现读它）—— 区域样式的唯一来源 */
-  getRegionTypes(): readonly RegionTypeEntry[] {
-    return this.pluginSettings.regionTypes
   }
 
   /**
@@ -1692,28 +2208,21 @@ export default class ProjectKakiPlugin extends Plugin {
    * 全部校验在 `applyRegionTypePatch` 里（纯函数）：非法虚线**整条拒绝**并返回可读原因，
    * 而不是"悄悄回退到出厂值"——后者会让用户以为自己填的生效了。
    *
+   * ⚠️ 改的是**这张地图**的那一套参数（定义随图）：内置 6 种与自定义类型一视同仁。
    * 只影响**之后新画**的区域：已经画好的区域把参数存在地图文件里。
    */
   async updateRegionType(
     id: string,
     patch: RegionTypePatch,
   ): Promise<{ ok: true } | { ok: false; problem: string }> {
-    const index = this.pluginSettings.regionTypes.findIndex((entry) => entry.id === id)
-    if (index < 0) return { ok: false, problem: `没有这个区域类型：${id}` }
-    const current = this.pluginSettings.regionTypes[index]!
+    const current = this.activeDefinitions().regionTypes.find((entry) => entry.id === id)
+    if (current === undefined) return { ok: false, problem: `没有这个区域类型：${id}` }
     const next = applyRegionTypePatch(current, patch)
     if (!next.ok) return next
-    const list = [...this.pluginSettings.regionTypes]
-    list[index] = next.entry
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      regionTypes: list,
-      // 旧字段跟着目录走，避免同一份颜色在两处自相矛盾（它不再是渲染依据）
-      regionColors: regionColorsFromEntries(list),
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-    return { ok: true }
+    return this.mutateDefinitions(
+      (set) => ({ ...set, regionTypes: set.regionTypes.map((entry) => (entry.id === id ? next.entry : entry)) }),
+      `修改区域类型 ${id}`,
+    )
   }
 
   /**
@@ -1733,33 +2242,29 @@ export default class ProjectKakiPlugin extends Plugin {
     borderDash?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
     // ID 留空 = 自动生成（同 addCustomTerrain）
+    const entries = this.activeDefinitions().regionTypes
     const result = validateCustomRegionTypeInput({
       ...input,
       id: isBlankCustomId(input.id)
         ? suggestCustomId(
             typeof input.label === 'string' ? input.label : '',
-            customRegionTypeEntries(this.pluginSettings.regionTypes).map((item) => item.id),
+            customRegionTypeEntries(entries).map((item) => item.id),
             CUSTOM_REGION_TYPE_PREFIX,
             'region',
           )
         : input.id,
     })
     if (!result.ok) return result
-    if (this.pluginSettings.regionTypes.some((entry) => entry.id === result.entry.id)) {
+    if (entries.some((entry) => entry.id === result.entry.id)) {
       return { ok: false, problem: `已经有一个区域类型用了 ID ${result.entry.id}` }
     }
-    if (customRegionTypeEntries(this.pluginSettings.regionTypes).length >= MAX_CUSTOM_REGION_TYPES) {
+    if (customRegionTypeEntries(entries).length >= MAX_CUSTOM_REGION_TYPES) {
       return { ok: false, problem: `最多 ${MAX_CUSTOM_REGION_TYPES} 个自定义区域类型` }
     }
-    const list = [...this.pluginSettings.regionTypes, result.entry]
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      regionTypes: list,
-      regionColors: regionColorsFromEntries(list),
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
-    return { ok: true }
+    return this.mutateDefinitions(
+      (set) => ({ ...set, regionTypes: [...set.regionTypes, result.entry] }),
+      `新增区域类型 ${result.entry.id}`,
+    )
   }
 
   /**
@@ -1769,15 +2274,11 @@ export default class ProjectKakiPlugin extends Plugin {
    * 反过来做（顺手把区域删掉）是不可逆的，而用户通常只是想清理一下列表。
    */
   async removeCustomRegionType(id: string): Promise<void> {
-    const list = this.pluginSettings.regionTypes.filter((entry) => entry.id !== id)
-    if (list.length === this.pluginSettings.regionTypes.length) return
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      regionTypes: list,
-      regionColors: regionColorsFromEntries(list),
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
+    await this.mutateDefinitions((set) => {
+      const list = set.regionTypes.filter((entry) => entry.id !== id)
+      if (list.length === set.regionTypes.length) return set
+      return { ...set, regionTypes: list }
+    }, `删除区域类型 ${id}`)
   }
 
   // -------------------------------------------------- 改 ID 并迁移地图里的引用
@@ -1807,17 +2308,18 @@ export default class ProjectKakiPlugin extends Plugin {
     return { ok: true, toId }
   }
 
-  /** 某一类当前所有定义 ID（含内置：改名时不许撞上内置 ID，否则语义会串） */
+  /** 某一类**当前地图定义集**里所有定义 ID（含内置：改名时不许撞上内置 ID，否则语义会串） */
   private definitionIds(kind: DefinitionKind): string[] {
+    const set = this.activeDefinitions()
     switch (kind) {
       case 'terrain':
-        return this.pluginSettings.customTerrains.map((item) => item.id)
+        return set.terrains.map((item) => item.id)
       case 'marker':
-        return this.pluginSettings.customMarkers.map((item) => item.id)
+        return set.markers.map((item) => item.id)
       case 'path':
-        return this.pluginSettings.pathTypes.map((item) => item.id)
+        return set.pathTypes.map((item) => item.id)
       case 'region':
-        return this.pluginSettings.regionTypes.map((item) => item.id)
+        return set.regionTypes.map((item) => item.id)
     }
   }
 
@@ -1826,6 +2328,10 @@ export default class ProjectKakiPlugin extends Plugin {
    *
    * **只读不写**：预览与执行共用它，于是"对话框里说的"与"实际做的"不可能不一致
    * （与定义文件导入同一套路）。只读打开（版本过高）的文档一律跳过 —— 那些文件我们无权改写。
+   *
+   * ⚠️ 定义随图（方案 B）之后，**当前地图**必须一起产出写盘计划，哪怕它一处引用都没有：
+   * 定义本体就住在它的 `definitions` 段里，不写它就等于"引用的 ID 改了、定义还是旧的"。
+   * 其余地图只改引用（它们各有自己那份定义，不受影响）。
    */
   private async collectRename(
     kind: DefinitionKind,
@@ -1834,9 +2340,13 @@ export default class ProjectKakiPlugin extends Plugin {
   ): Promise<{
     files: RenameFilePlan[]
     writes: Array<{ file: TFile; document: MapDocument; name: string; canvases: string[]; rest: Record<string, string | string[]> }>
+    /** 当前地图改名后那份定义集（用来同步库级模板）；没有可编辑的地图时为 `null` */
+    librarySet: MapDefinitionSet | null
   }> {
     const store = this.store
-    if (store === null) return { files: [], writes: [] }
+    if (store === null) return { files: [], writes: [], librarySet: null }
+    /** 定义本体所在的那张图（就是"当前地图"，见 `definitionTarget`） */
+    const targetPath = this.definitionTarget()?.mapPath ?? null
     const files: RenameFilePlan[] = []
     const writes: Array<{
       file: TFile
@@ -1845,28 +2355,48 @@ export default class ProjectKakiPlugin extends Plugin {
       canvases: string[]
       rest: Record<string, string | string[]>
     }> = []
+    let librarySet: MapDefinitionSet | null = null
     for (const file of store.listMapFiles()) {
       const loaded = await store.load(file)
       if (loaded.document === null || loaded.readOnly) continue
-      const result = renameReferences(loaded.document, kind, fromId, toId)
-      if (result.changed === 0) continue
-      files.push({ path: file.path, changed: result.changed })
+      const renamed = renameReferences(loaded.document, kind, fromId, toId)
+      let document_ = renamed.document
+      /** 这份文件里"定义本体"的那一条是否被改到（只有当前地图才可能为 true） */
+      let definitionChanged = false
+      if (file.path === targetPath) {
+        const next = renameDefinitionEntry(this.definitionsOf(document_), kind, fromId, toId)
+        if (next !== this.definitionsOf(document_)) {
+          librarySet = next
+          definitionChanged = true
+          document_ = {
+            ...document_,
+            definitions: definitionsBlockOf(next, document_.definitions),
+            version: Math.max(document_.version, MAP_DOCUMENT_VERSION),
+          }
+        }
+      }
+      // `changed` 只数**引用**（报告的措辞说的是"几处引用"）；定义本体那一条由 `definitionChanged` 表达
+      if (renamed.changed === 0 && !definitionChanged) continue
+      files.push({ path: file.path, changed: renamed.changed })
       writes.push({
         file,
-        document: result.document,
+        document: document_,
         name: loaded.frontmatter.name ?? defaultMapNameFromPath(file.path),
         canvases: loaded.frontmatter.canvases,
         rest: loaded.frontmatter.rest,
       })
     }
     files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
-    return { files, writes }
+    return { files, writes, librarySet }
   }
 
   /** 只算影响面，不写任何东西（对话框里实时显示） */
   async previewDefinitionRename(kind: DefinitionKind, fromId: string, rawNewId: string): Promise<RenamePreview> {
     const target = this.validateRenameTarget(kind, fromId, rawNewId)
     if (!target.ok) return { ok: false, problem: target.problem }
+    // 先把已经提交、还在防抖窗口里的改动落盘：预览与执行必须扫**同一份**，
+    // 否则会出现"预览说 1 处、执行改了 2 处"（它只是把已提交的东西持久化，不改内容）
+    await this.store?.flush()
     const collected = await this.collectRename(kind, fromId, target.toId)
     const text = describeRenamePlan({
       kind,
@@ -1879,21 +2409,32 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
-   * 真正执行：地图文件里的引用 + 设置里的定义 ID 一起改。
+   * 真正执行：地图文件里的引用 + **当前地图定义段里那条定义**一起改。
    *
-   * 顺序有讲究：**先改文件、再改设置**。反过来的话，中途失败会留下"设置里已经是新 ID、
-   * 但地图里还写着旧 ID"的状态 —— 那种状态下用户看到的是满地"未知（custom:旧）"，
-   * 会以为数据丢了。按现在的顺序，最坏情况是"文件已改、设置没改"，此时旧 ID 仍被地图引用，
-   * 重新跑一次改名即可收敛（幂等）。
+   * 为什么不再有"改设置里的定义 ID"这一步：定义随图之后它不在设置里了 ——
+   * 它在那张地图的 `definitions` 段里，而 `collectRename` 已经把这件事折进**同一次写盘**，
+   * 于是不会出现"引用改了、定义没改"的中间态。
+   *
+   * 顺序照旧：**先改文件、再同步库级模板**。反过来的话，中途失败会留下"模板里是新 ID、
+   * 地图里还是旧 ID"的状态。按现在的顺序，最坏情况是"文件已改、模板没改"，
+   * 此时旧 ID 仍被地图引用，重新跑一次改名即可收敛（幂等）。
    */
   async renameCustomDefinition(kind: DefinitionKind, fromId: string, rawNewId: string): Promise<RenameOutcome> {
     const target = this.validateRenameTarget(kind, fromId, rawNewId)
     if (!target.ok) return { ok: false, problem: target.problem }
+    // 先把地图层的防抖写入落盘：定义随图之后，**定义本体就在这几张文件里**，
+    // 而改名是按"盘上那份"扫的 —— 不 flush 就会漏掉还只在内存里的那一段
+    // （表现是"引用改了、定义没改"，用户看到满地"未知（旧 ID）"）。
+    await this.store?.flush()
     const collected = await this.collectRename(kind, fromId, target.toId)
     for (const write of collected.writes) {
       await this.store?.writeNow(write.file, write.document, write.name, write.canvases, write.rest)
     }
-    await this.patchDefinitionId(kind, fromId, target.toId)
+    if (collected.librarySet !== null) {
+      this.mirrorLibraryDefinitions(collected.librarySet)
+      await this.persistSettings()
+      this.refreshPanel()
+    }
     // 已打开的画布要重新读盘，否则它内存里还是旧 ID（界面会显示"未知（旧 ID）"）
     for (const item of collected.files) await this.layers?.reloadMap(item.path)
     const totalChanged = collected.files.reduce((sum, item) => sum + item.changed, 0)
@@ -1940,32 +2481,6 @@ export default class ProjectKakiPlugin extends Plugin {
         if (current.setSelectionLink(path)) this.refreshPanel()
       },
     })
-  }
-
-  /** 把设置里那一条定义的 ID 换掉（并维护区域预设色的镜像字段） */
-  private async patchDefinitionId(kind: DefinitionKind, fromId: string, toId: string): Promise<void> {
-    const patch = <T extends { id: string }>(list: T[]): T[] =>
-      list.map((item) => (item.id === fromId ? { ...item, id: toId } : item))
-    switch (kind) {
-      case 'terrain':
-        this.pluginSettings = { ...this.pluginSettings, customTerrains: patch(this.pluginSettings.customTerrains) }
-        break
-      case 'marker':
-        this.pluginSettings = { ...this.pluginSettings, customMarkers: patch(this.pluginSettings.customMarkers) }
-        break
-      case 'path': {
-        const pathTypes = patch(this.pluginSettings.pathTypes)
-        this.pluginSettings = { ...this.pluginSettings, pathTypes, pathColors: pathColorsFromEntries(pathTypes) }
-        break
-      }
-      case 'region': {
-        const regionTypes = patch(this.pluginSettings.regionTypes)
-        this.pluginSettings = { ...this.pluginSettings, regionTypes, regionColors: regionColorsFromEntries(regionTypes) }
-        break
-      }
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
   }
 
   /** 打开「改 ID…」对话框（设置页每一行自定义定义都有入口） */
@@ -2151,12 +2666,14 @@ export default class ProjectKakiPlugin extends Plugin {
    * "这一格的群系带不带这个标签"，而 `match` 拿不到目录（见 `selectionRules.ts`）。
    */
   private selectionRuleContext(): SelectionRuleContext {
+    // 目录**按活动地图**解析（与检查器、画布同一份定义）：筛选器列出的是"这张图上真有意义的地形/群系"
+    const definitions = this.activeDefinitions()
     return {
-      terrains: listResolvedTerrainStyles(this.pluginSettings.customTerrains).map((style) => ({
+      terrains: listResolvedTerrainStyles(definitions.terrains).map((style) => ({
         value: style.id,
         label: style.label,
       })),
-      biomes: listResolvedBiomeStyles(this.pluginSettings.customBiomes).map((entry) => ({
+      biomes: listResolvedBiomeStyles(definitions.biomes).map((entry) => ({
         value: entry.id,
         label: entry.label,
         tags: entry.tags,
@@ -2172,16 +2689,17 @@ export default class ProjectKakiPlugin extends Plugin {
 
   /** 取一条定义当前的显示名（找不到就用 ID）—— 只用于对话框标题，帮用户确认删的是哪一条 */
   private definitionDisplayName(kind: DefinitionKind, id: string): string {
+    const set = this.activeDefinitions()
     const found = ((): { label: string } | undefined => {
       switch (kind) {
         case 'terrain':
-          return this.pluginSettings.customTerrains.find((item) => item.id === id)
+          return set.terrains.find((item) => item.id === id)
         case 'marker':
-          return this.pluginSettings.customMarkers.find((item) => item.id === id)
+          return set.markers.find((item) => item.id === id)
         case 'path':
-          return this.pluginSettings.pathTypes.find((entry) => entry.id === id)
+          return set.pathTypes.find((entry) => entry.id === id)
         case 'region':
-          return this.pluginSettings.regionTypes.find((entry) => entry.id === id)
+          return set.regionTypes.find((entry) => entry.id === id)
       }
     })()
     return found?.label ?? id
@@ -2214,23 +2732,22 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
-   * 把定义从设置里移除（复用各目录既有的 `removeCustom*`，行为与设置页时代一字不变）。
+   * 把定义从**当前地图的定义集**里移除。
    *
-   * 地形 / 标记按**下标**定位（它们的删除接口是按下标的），所以这里先把 id 换成下标；
-   * 找不到就不动（用户可能在别处已经删掉了）。
+   * 四类都**按 ID** 定位：ID 是这条定义的稳定身份，而"当前地图"在弹窗开着时可能已经换过 ——
+   * 按 ID 删最坏只是"这条不在这一份里 → 什么也不做"（见 `updateCustomTerrain` 的说明）。
+   *
+   * 定义随图之后，"从设置里移除"这句话本身就不再准确 —— 移除的是**这张地图**的那一条
+   * （其它地图各有自己那份定义，不会被牵连）。
    */
   private async performRemoveCustomDefinition(kind: DefinitionKind, id: string): Promise<void> {
     switch (kind) {
-      case 'terrain': {
-        const index = this.pluginSettings.customTerrains.findIndex((item) => item.id === id)
-        if (index >= 0) await this.removeCustomTerrain(index)
+      case 'terrain':
+        await this.removeCustomTerrain(id)
         return
-      }
-      case 'marker': {
-        const index = this.pluginSettings.customMarkers.findIndex((item) => item.id === id)
-        if (index >= 0) await this.removeCustomMarker(index)
+      case 'marker':
+        await this.removeCustomMarker(id)
         return
-      }
       case 'path':
         await this.removeCustomPathType(id)
         return
@@ -2290,24 +2807,22 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
-   * 样式恢复出厂（设置页的「恢复默认」）。
+   * 路径 / 区域类型的参数恢复出厂（「地图定义」弹窗里那一行「恢复出厂参数」）。
    *
-   * **不动自定义地形 / 标记 / 路径类型 / 区域类型定义**：那些是数据，不是样式偏好。
-   * 内置类型只把**参数**恢复成工厂值（自定义类型是用户建的定义，留着）。
+   * **只改参数、不动定义**：内置类型恢复成工厂值；自定义类型是用户建的定义，留着不动
+   * （见 `resetPathTypeStyles` / `resetRegionTypeStyles` 的注释）。
+   *
+   * ⚠️ 定义随图之后改的是**这张地图**的那一套参数 —— 别的图不受影响。
    */
-  async resetStylePalette(): Promise<void> {
-    const pathTypes = resetPathTypeStyles(this.pluginSettings.pathTypes)
-    const regionTypes = resetRegionTypeStyles(this.pluginSettings.regionTypes)
-    this.pluginSettings = {
-      ...this.pluginSettings,
-      pathTypes,
-      pathColors: pathColorsFromEntries(pathTypes),
-      regionTypes,
-      regionColors: regionColorsFromEntries(regionTypes),
-      labelFontFamily: '',
-    }
-    await this.persistSettings()
-    this.layers?.setStylePalette()
+  async resetDefinitionTypeStyles(): Promise<{ ok: true } | { ok: false; problem: string }> {
+    return this.mutateDefinitions(
+      (set) => ({
+        ...set,
+        pathTypes: resetPathTypeStyles(set.pathTypes),
+        regionTypes: resetRegionTypeStyles(set.regionTypes),
+      }),
+      '恢复路径/区域类型出厂参数',
+    )
   }
 
   /**
@@ -2335,10 +2850,23 @@ export default class ProjectKakiPlugin extends Plugin {
    * 只是它的薄包装，现在已经删掉 —— 留着会让"网格状态"有两个写入口。
    */
   async setLayerVisible(key: LayerKey, value: boolean): Promise<void> {
+    await this.setLayerVisibleFor(this.activeViewMapPath(), key, value)
+  }
+
+  /**
+   * 同上，但**指定是哪张地图**（画布上的工具条走这一条）。
+   *
+   * 为什么值得多一个方法：多画布同开时，"在 B 画布上点 B 的图层开关"必须改 B 那一张图 ——
+   * 按"活动画布"解析会让 B 的按钮点了不翻、A 的图反倒变了（同一份代码在两个画布上的两种表现，
+   * 正是这个项目最怕的那类静默不一致）。
+   */
+  async setLayerVisibleFor(mapPath: string | null, key: LayerKey, value: boolean): Promise<void> {
+    // W4-2：图层开关按**地图**记（"这张图我想看什么"），同时镜像回库级模板
     const next = value === true
-    const layers = withLayerVisibility(this.pluginSettings.layers, key, next)
-    if (layers === this.pluginSettings.layers) return
-    this.pluginSettings = { ...this.pluginSettings, layers }
+    const current = this.layersFor(mapPath)
+    const layers = withLayerVisibility(current, key, next)
+    if (layers === current) return
+    this.commitViewSettings(mapPath, { layers })
     this.layers?.setLayers()
     // 面板自己也显示这六个开关：工具条按钮、设置页、命令都能改图层，
     // 所以刷新要在这里做（而不是只让"点面板的那一次"自己刷新），否则会出现
@@ -2355,12 +2883,15 @@ export default class ProjectKakiPlugin extends Plugin {
    * 面板/设置页自己负责重绘（它们各自知道要保住滚动位置）。
    */
   async setOverlayStyle(field: FieldId, patch: Partial<OverlayStyle>): Promise<void> {
-    const current = this.pluginSettings.overlays[field]
+    // W4-2：色带 / 越界色 / 不透明度 / 显示方式按**地图**记，同时镜像回库级模板。
+    // 规范化（只存改过的那些 / 空表不留键）仍由 `normalizeOverlayStyles` 一处保证
+    const mapPath = this.activeViewMapPath()
+    const current = this.overlaysFor(mapPath)
     const next = normalizeOverlayStyles({
-      ...this.pluginSettings.overlays,
-      [field]: { ...current, ...patch },
+      ...current,
+      [field]: { ...current[field], ...patch },
     })
-    this.pluginSettings = { ...this.pluginSettings, overlays: next }
+    this.commitViewSettings(mapPath, { overlays: next })
     // 色带变了 → 图例里的渐变条与越界计数也要跟着变（图例只在"设置变了"时刷新，不跟每帧走）
     this.layers?.setLayers()
     await this.persistSettings()
@@ -2379,16 +2910,22 @@ export default class ProjectKakiPlugin extends Plugin {
    * 于是"只存改过的那些"与"空表不留键"这两条口径由规范化一处保证，这里不重复实现。
    */
   async setOverlayCategoryColor(field: FieldId, categoryId: string, color: string): Promise<void> {
-    const current = { ...(this.pluginSettings.overlays[field].categoryColors ?? {}) }
+    const current = { ...(this.overlaysFor(this.activeViewMapPath())[field].categoryColors ?? {}) }
     if (color.length === 0) delete current[categoryId]
     else current[categoryId] = color
     await this.setOverlayStyle(field, { categoryColors: current })
   }
 
   async setShowLegend(value: boolean): Promise<void> {
+    await this.setShowLegendFor(this.activeViewMapPath(), value)
+  }
+
+  /** 同上，但**指定是哪张地图**（画布上的工具条走这一条）—— 理由见 `setLayerVisibleFor` */
+  async setShowLegendFor(mapPath: string | null, value: boolean): Promise<void> {
+    // W4-2：图例显隐也按**地图**记（"这张图我要不要看图例"）
     const next = value === true
-    if (next === this.pluginSettings.showLegend) return
-    this.pluginSettings = { ...this.pluginSettings, showLegend: next }
+    if (next === this.showLegendFor(mapPath)) return
+    this.commitViewSettings(mapPath, { showLegend: next })
     this.layers?.setLayers()
     await this.persistSettings()
   }
@@ -2482,6 +3019,23 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
+   * 让用户从**库内文件夹**里挑一个（导出落点用）。
+   *
+   * 与 `pickImageFile` 走同一个 `openAssetPicker`，只是候选换成文件夹：
+   * 候选**从库内文件路径推出来**（`listFolderPaths`），所以库根永远在列，
+   * 永远不会有"没得选"的情况 —— `emptyHint` 只是接口要求，实际到不了。
+   */
+  pickFolder(options: { title?: string; onChoose: (folder: string) => void }): void {
+    this.openAssetPicker({
+      ...(options.title !== undefined ? { title: options.title } : {}),
+      files: listFolderPaths(this.app.vault.getFiles().map((file) => file.path)),
+      kind: 'folder',
+      emptyHint: '库里没有任何文件夹可选（这不该发生：库根目录总在清单里）。',
+      onChoose: options.onChoose,
+    })
+  }
+
+  /**
    * 打开"从库里选一个文件"的弹窗 —— **选文件这件事的唯一实现**。
    *
    * 图片选择器与定义文件导入都走这里，于是三条退化路径（库里没有候选、弹窗构造失败、
@@ -2535,23 +3089,38 @@ export default class ProjectKakiPlugin extends Plugin {
    *    然后拿着一个什么都没有的文件去导入。
    */
   async exportResourceBundle(): Promise<void> {
+    /*
+     * W4-3：资源包是**搬运工具** —— 导的是**当前地图的定义集**（不是库级模板）。
+     *
+     * 为什么这么改：定义随图（W4-1）之后，"我调好的线宽 / 填充"是**每张地图各自一份**，
+     * 而用户想搬的正是它。没有打开地图时就导模板那一份 —— 并在提示里**说清楚**，
+     * 否则用户会以为导的是"刚才那张图"（与"地图定义"弹窗里那句话同一条纪律：别让人猜）。
+     */
+    const target = this.definitionTarget()
+    const definitions = target === null ? this.libraryDefinitionSet() : this.activeDefinitions()
+    if (isFactoryDefinitionSet(definitions)) {
+      new Notice(
+        target === null
+          ? '「新建地图的模板」里全是出厂定义（没有自定义地形 / 标记，路径与区域类型的参数也没改过），没有可导出的东西。'
+          : `这张地图（${target.mapPath}）里全是出厂定义，没有可导出的东西。`,
+        NOTICE_MAX_MS,
+      )
+      return
+    }
     const bundle = buildResourceBundle(
       {
-        terrains: this.pluginSettings.customTerrains,
-        markers: this.pluginSettings.customMarkers,
-        pathTypes: this.pluginSettings.pathTypes,
-        regionTypes: this.pluginSettings.regionTypes,
+        terrains: definitions.terrains,
+        markers: definitions.markers,
+        pathTypes: definitions.pathTypes,
+        regionTypes: definitions.regionTypes,
       },
       { generator: `project-kaki ${this.manifest.version}` },
     )
-    const counts = `地形 ${bundle.terrains.length} · 标记 ${bundle.markers.length} · 路径类型 ${bundle.pathTypes.length} · 区域类型 ${bundle.regionTypes.length}`
-    if (
-      bundle.terrains.length + bundle.markers.length + bundle.pathTypes.length + bundle.regionTypes.length ===
-      0
-    ) {
-      new Notice('设置里还没有自定义地形、标记、路径类型或区域类型，没有可导出的定义。', NOTICE_MAX_MS)
-      return
-    }
+    const counts = `地形 ${bundle.terrains.length} · 标记 ${bundle.markers.length} · 路径类型 ${bundle.pathTypes.length}（含内置）· 区域类型 ${bundle.regionTypes.length}（含内置）`
+    const scope =
+      target === null
+        ? '\n（当前没有打开地图：导出的是「新建地图的模板」那一份）'
+        : `\n（来自当前地图：${target.mapPath}）`
 
     const basePath = bundleFileName().replace(/\.json$/i, '')
     const path = uniqueExportPath(
@@ -2561,7 +3130,7 @@ export default class ProjectKakiPlugin extends Plugin {
     )
     try {
       const created = await this.app.vault.create(path, serializeResourceBundle(bundle))
-      new Notice(`已导出定义文件：${created.path}\n（${counts}）`, NOTICE_MAX_MS)
+      new Notice(`已导出定义文件：${created.path}\n（${counts}）${scope}`, NOTICE_MAX_MS)
     } catch (error) {
       console.error('[project-kaki] 导出定义文件失败', error)
       new Notice(`导出定义文件失败：${error instanceof Error ? error.message : String(error)}`, NOTICE_MAX_MS)
@@ -2611,25 +3180,40 @@ export default class ProjectKakiPlugin extends Plugin {
       return
     }
 
-    const plan = planBundleImport(
-      {
-        terrains: this.pluginSettings.customTerrains,
-        markers: this.pluginSettings.customMarkers,
-        pathTypes: this.pluginSettings.pathTypes,
-        regionTypes: this.pluginSettings.regionTypes,
-      },
-      parsed.bundle,
-      // 解析阶段发现的"条目进来了但有一处被回退"（例如字形名本机不认识）一并带进对话框
-      { notes: parsed.notes },
-    )
+    /*
+     * W4-3：导入的**目标**在这里定下来（就是"当前地图"），而且**一路带到提交**：
+     * 对话框会把它写给用户看（"导入到：X"），提交时 `mutateDefinitions` 收的就是这一次解析出的目标。
+     * 计划也按**这张图**现有的定义算 —— 于是"同名冲突"算的是这张图的事，不是库级模板的事。
+     */
+    const target = this.definitionTarget()
+    const current = target === null ? this.libraryDefinitionSet() : this.definitionsOf(this.currentDocumentFor(target))
+    const planCurrent = {
+      terrains: current.terrains,
+      markers: current.markers,
+      pathTypes: current.pathTypes,
+      regionTypes: current.regionTypes,
+    }
+    const planFor = (overwrite: readonly string[]) =>
+      planBundleImport(planCurrent, parsed.bundle, { notes: parsed.notes, overwrite })
+    const plan = planFor([])
     try {
       this.importModalFactory(this.app, {
         source: path,
+        target:
+          target === null
+            ? '「新建地图的模板」（当前没有打开地图）'
+            : target.mapPath,
         planText: describeImportPlan(plan),
-        // 没有可新增的条目时按钮是灰的：正文已经解释了"为什么一条都进不来"
+        // 没有可新增 / 可覆盖的条目时按钮是灰的：正文已经解释了"为什么一条都进不来"
         //（同 ID 冲突、全部不合法……），点不动比点了报错好
-        canImport: plan.addedCount > 0,
-        onConfirm: () => this.commitBundleImport(plan),
+        canImport: plan.addedCount > 0 || plan.replacedCount > 0,
+        conflicts: plan.conflicts,
+        // 勾选变了就**重算**：正文、按钮状态、最终落盘三处永远来自同一份计划
+        replan: (overwrite) => {
+          const next = planFor(overwrite)
+          return { planText: describeImportPlan(next), canImport: next.addedCount > 0 || next.replacedCount > 0 }
+        },
+        onConfirm: (overwrite) => this.commitBundleImport(planFor(overwrite), target),
       }).open()
     } catch (error) {
       console.error('[project-kaki] 打开导入对话框失败', error)
@@ -2637,52 +3221,37 @@ export default class ProjectKakiPlugin extends Plugin {
     }
   }
 
+  /** 某个目标当前那份定义文档（计划要用它算冲突；读不到就退回库级模板） */
+  private currentDocumentFor(target: DefinitionTarget): MapDocument | null {
+    if (target.editor !== null) return this.layers?.getDocument(target.canvasPath) ?? null
+    return this.definitionDocCache.get(target.mapPath) ?? null
+  }
+
   /**
-   * 真正写入设置。
+   * 真正写入。
    *
-   * 顺序是"**先落盘、成功后才改内存**"（与 `setLayerVisible` 的"先广播后落盘"不同，
-   * 因为这里没有"必须立刻看到"的画面）：落盘失败时内存保持原样，用户看到的就是
-   * "导入失败：<原因>"，而不是"界面变了但重启后又变回去"。
+   * W4-3 起走的是**定义写入口**（`mutateDefinitions`）：有地图层就落在那张图的 `definitions` 段
+   * （可撤销），没有就直接读改写盘；没有地图时写进"新建地图的模板"（与 W4-1b 同一条路）。
    *
-   * 计划是在打开对话框时算好的：这里只把它加上去。因为 `planBundleImport` 已经保证
-   * 新增的 ID 与现有条目都不冲突，所以直接追加即可（同 ID 一律保留现有 —— 见 resourceBundle）。
+   * 写的是**计划算出来的那一份最终目录**（`plan.result`）—— 计划本身已经是"现有 + 新增 + 覆盖"
+   * 的完整结果，所以这里不再自己拼一遍（"对话框说的"与"实际做的"必须逐字一致）。
    */
-  private async commitBundleImport(plan: BundleImportPlan): Promise<ImportBundleOutcome> {
-    const current = this.pluginSettings
-    const pathTypes = normalizePathTypeEntries([
-      ...current.pathTypes,
-      ...plan.pathTypes.added,
-    ])
-    const regionTypes = normalizeRegionTypeEntries([
-      ...current.regionTypes,
-      ...plan.regionTypes.added,
-    ])
-    const next: CartographerSettings = {
-      ...current,
-      customTerrains: [...current.customTerrains, ...plan.terrains.added],
-      customMarkers: [...current.customMarkers, ...plan.markers.added],
-      pathTypes,
-      // 旧字段跟着目录走（它不是渲染依据，但两处自相矛盾会让人看不懂 data.json）
-      pathColors: pathColorsFromEntries(pathTypes),
-      regionTypes,
-      regionColors: regionColorsFromEntries(regionTypes),
-    }
-
-    try {
-      await this.saveData(next)
-    } catch (error) {
-      console.error('[project-kaki] 保存导入结果失败', error)
-      return {
-        ok: false,
-        reason: `写入插件设置失败：${error instanceof Error ? error.message : String(error)}（设置未改动）`,
-      }
-    }
-    this.pluginSettings = next
-
-    // 工具条 / 图例 / 画布：一次调用全部刷新（与设置页里改定义走的是同一条路）
-    this.layers?.setStylePalette()
-    this.refreshPanel()
-    this.refreshSettingsTab()
+  private async commitBundleImport(
+    plan: BundleImportPlan,
+    target: DefinitionTarget | null,
+  ): Promise<ImportBundleOutcome> {
+    const written = await this.mutateDefinitions(
+      (set) => ({
+        ...set,
+        terrains: plan.result.terrains,
+        markers: plan.result.markers,
+        pathTypes: plan.result.pathTypes,
+        regionTypes: plan.result.regionTypes,
+      }),
+      '导入定义文件',
+      target,
+    )
+    if (!written.ok) return { ok: false, reason: written.problem }
     new Notice(describeImportResult(plan), NOTICE_MAX_MS)
     return { ok: true }
   }
@@ -2863,7 +3432,14 @@ export default class ProjectKakiPlugin extends Plugin {
     const store = this.store
     if (!store) return
     try {
-      const file = await store.createMap({ name, folder: DEFAULT_MAP_FOLDER, canvasPath })
+      const file = await store.createMap({
+        name,
+        folder: DEFAULT_MAP_FOLDER,
+        canvasPath,
+        // 定义随图（方案 B）：新建的图把"当时库级设置那一份定义"写进自己的文件。
+        // 老图不在此列 —— 它们读到的是内存快照，只有用户真的改了定义才回写升版（见 §5.1）。
+        definitions: this.libraryDefinitionsBlock(),
+      })
       new Notice(`已创建地图：${file.path}（已绑定 ${canvasPath}）`, NOTICE_MAX_MS)
       await this.app.workspace.getLeaf(true).openFile(file)
     } catch (error) {
@@ -2917,7 +3493,8 @@ export default class ProjectKakiPlugin extends Plugin {
     const sizeKiB = (new TextEncoder().encode(loaded.rawText).length / 1024).toFixed(1)
     // 地形分类：内置保持原来的 `forest×2` 形式（既有报告格式不变 —— 用户不该为了新功能
     // 重新适应一份报告）；自定义地形补上显示名与原始 ID，未知 ID 直接报出它是未知的。
-    const custom = this.getCustomTerrains()
+    // 目录**按被报告的那份文档**解析：报的是"这张图里的地形叫什么"
+    const custom = this.definitionsOf(loaded.document).terrains
     const breakdown =
       summary.terrainBreakdown
         .map((item) => {
@@ -2960,8 +3537,10 @@ export default class ProjectKakiPlugin extends Plugin {
    * 而真相往往只是某个图层被关掉了。让它可查，比让人去猜便宜得多。
    */
   private describeLayers(): string {
-    const hidden = hiddenLayerLabels(this.pluginSettings.layers)
-    if (allLayersHidden(this.pluginSettings.layers)) {
+    // 状态报告说的是"当前这张图" ⇒ 图层开关也按活动画布那张地图解析（W4-2）
+    const visibility = this.layersFor(this.activeViewMapPath())
+    const hidden = hiddenLayerLabels(visibility)
+    if (allLayersHidden(visibility)) {
       return '图层：全部隐藏（地图上看不到任何东西，这是设置导致的，数据仍在）'
     }
     return hidden.length === 0 ? '图层：全部显示' : `图层：已隐藏 ${hidden.join(' / ')}`

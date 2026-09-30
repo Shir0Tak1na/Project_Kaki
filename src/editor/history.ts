@@ -10,7 +10,15 @@
 
 import { cellKey } from '../core/hex.ts'
 import { cellsEqual } from '../data/mapDocument.ts'
-import type { MapDocument, MapLabel, MapMarker, MapPath, MapRegion, TerrainCell } from '../data/mapDocument.ts'
+import type {
+  MapDefinitions,
+  MapDocument,
+  MapLabel,
+  MapMarker,
+  MapPath,
+  MapRegion,
+  TerrainCell,
+} from '../data/mapDocument.ts'
 import type { ElevationCalibration } from '../render/elevationUnits.ts'
 import type { DataDefaults } from '../render/dataDefaults.ts'
 
@@ -155,6 +163,7 @@ export type MapOp =
   | TranslateObjectOp
   | SetElevationOp
   | SetDataDefaultsOp
+  | SetDefinitionsOp
 
 /**
  * 改对象上的**一个字段**（类型 / 颜色 / 线宽 / 虚线 / 不透明度 / 位置…）。
@@ -239,6 +248,23 @@ export interface SetDataDefaultsOp {
   kind: 'setDataDefaults'
   from: DataDefaults | null
   to: DataDefaults | null
+}
+
+/**
+ * 改地图级的**定义集**（`document.definitions` 那一段，v2 方案 B）。
+ *
+ * 与 `SetElevationOp` / `SetDataDefaultsOp` 同一个形状、同一个理由：它是与 `grid` 同级的顶层段。
+ * `null` = 没有这一段（v1 老图）。
+ *
+ * ⚠️ 比那两个多一对**版本号**：老图（v1）第一次改定义要升到 v2，撤销必须把这个数字也还原 ——
+ * 否则"改一次再撤销"会留下一张版本号变了、内容却没变的文件（老图「一个字节都不动」的承诺就破了）。
+ */
+export interface SetDefinitionsOp {
+  kind: 'setDefinitions'
+  from: MapDefinitions | null
+  fromVersion: number
+  to: MapDefinitions | null
+  toVersion: number
 }
 
 /**
@@ -389,6 +415,14 @@ export function applyOp(document: MapDocument, op: MapOp): void {
       else document.dataDefaults = { ...op.to }
       return
     }
+    case 'setDefinitions': {
+      // 整段替换 / 整段删除：与标定同一条路。
+      // 版本号一起写回 —— 老图第一次改定义升到 v2，撤销时再落回 v1（见 `SetDefinitionsOp`）
+      if (op.to === null) delete document.definitions
+      else document.definitions = op.to
+      document.version = op.toVersion
+      return
+    }
   }
 }
 
@@ -439,6 +473,15 @@ export function invertOp(op: MapOp): MapOp {
     case 'setDataDefaults':
       // 同一个形状：整段对调（`from` / `to` 里为 `null` 的那一端就是"删掉这一段"）
       return { kind: 'setDataDefaults', from: op.to, to: op.from }
+    case 'setDefinitions':
+      // 整段对调，**连同版本号一起**（见 `SetDefinitionsOp`）
+      return {
+        kind: 'setDefinitions',
+        from: op.to,
+        fromVersion: op.toVersion,
+        to: op.from,
+        toVersion: op.fromVersion,
+      }
   }
 }
 

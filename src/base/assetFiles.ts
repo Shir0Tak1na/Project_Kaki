@@ -61,6 +61,35 @@ export function describeAssetChoice(path: string): string {
 }
 
 /**
+ * 从"一串库内文件路径"里推出**库内文件夹**清单（去重、确定排序）。
+ *
+ * 为什么从文件路径推、而不是问 vault 要目录树：`getFiles()` 是各版本都有的 API，
+ * 而目录树遍历要另一套接口（`getAllLoadedFiles()` + `TFolder` 判定），
+ * 测试环境里也没有它。代价是"**只装了空文件夹**的目录不会出现"——
+ * 那种目录对"导出落点"没有用处，不值得为它多一条接口。
+ *
+ * 库根（`''`）**永远在清单里**：导出到库根是常见选择，而"库里一个文件都没有"时
+ * 清单也不该是空的（否则选择器直接报错，用户连库根都选不了）。
+ * 排序用码点比较（与 `listImagePaths` 同一条理由：不用 `localeCompare`，否则换台机器顺序就变）。
+ */
+export function listFolderPaths(paths: unknown): string[] {
+  const folders = new Set<string>([''])
+  if (Array.isArray(paths)) {
+    for (const item of paths) {
+      if (typeof item !== 'string') continue
+      const folder = assetFolderOf(item.replace(/\\/g, '/'))
+      if (folder.length > 0) folders.add(folder)
+    }
+  }
+  return [...folders].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+/** 文件夹选项在弹窗里的短标签：根目录说成人话，而不是显示一个空行 */
+export function describeFolderChoice(folder: string): string {
+  return folder.trim().length === 0 ? '（库根目录）' : folder.trim()
+}
+
+/**
  * 从"一串库内路径"里筛出可用的图片，去重并**确定排序**。
  *
  * 排序用码点比较（不用 `localeCompare`）：后者的结果取决于运行环境的语言与 ICU 版本，

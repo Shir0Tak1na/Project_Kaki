@@ -385,19 +385,80 @@ export function hitTestSelection(input: SelectionHitContext): MapSelection | nul
   return null
 }
 
+/**
+ * **悬停读数**（§2.6「画布信息卡只做**进行中**的事」里的第一件）。
+ *
+ * 用户口径的落点：指针压在标记 / 区域上时报**那个对象**，而不是它下面那一格的地形 ——
+ * 这需要走一次**与点击同一套**的命中测试（`hitTestSelection`），否则"点得中、悬停报另一个"。
+ *
+ * 三种结果：什么都没命中 / 压在某格上（报格键，读数由调用方按展示单位格式化）/
+ * 压在某个对象上（直接给人话的名称与补充信息，因为目录解析在这一层做不了）。
+ */
+export type HoverReadout =
+  | { kind: 'none' }
+  | { kind: 'cell'; key: string }
+  | { kind: 'object'; kindLabel: string; label: string; detail: string }
+
+/**
+ * 悬停读数：**命中对象优先**，否则退回"这一格"（§2.6）。
+ *
+ * 沿用 `hitTestSelection` 的顺序（标记 → 名称 → 路径/区域 → 地块），所以
+ * "悬停看到什么"与"点下去选中什么"永远一致 —— 两套判定迟早分叉成
+ * "指针说有标记、点下去选中了格子"（那是这个项目已经踩过的那类两套命中，§5.x）。
+ */
+export function probeHover(input: SelectionHitContext, labels: SelectionLabelResolvers): HoverReadout {
+  const hit = hitTestSelection(input)
+  if (hit === null) return { kind: 'none' }
+  if (hit.kind === 'cell') return { kind: 'cell', key: hit.id }
+  const spec = SELECTION_KINDS[hit.kind]
+  const data = spec.data(input.document, hit.id, labels)
+  // 对象刚好不在了（撤销 / 重载的间隙）：当作没命中，而不是显示一条指向幽灵的读数
+  if (data === null) return { kind: 'none' }
+  return {
+    kind: 'object',
+    kindLabel: spec.label,
+    label: data.name.length > 0 ? data.name : spec.label,
+    detail: data.detail,
+  }
+}
+
+/**
+ * 「数据显示」的**多对象形态**要显示的那一份数据（§2.6「多个**同类**对象」）。
+ *
+ * 由编辑器现算（它握着文档、目录解析与那张表），面板只画 —— 与 `BatchEditInfo` 同一条边界。
+ *
+ * 三条口径：
+ * - **只列还存在的对象**（撤销 / 换文档之后选择里可能留着幽灵）；
+ * - **公共字段混合时报 `null`**（各不相同）：面板据此留空并写明"各不相同"，
+ *   **不猜一个共同值**（猜了以后一提交就把一半对象改成错的，同 §C.5 那条）；
+ * - 哪些字段算"公共"：**类型那一列 + 链接 + 删除**，全部读 `SELECTION_KINDS[kind]`，
+ *   面板里没有任何 `kind === 'xxx'` 判断。
+ */
+export interface ObjectBatchInfo {
+  /** 真的还存在的选中对象个数 */
+  count: number
+  /** 人话的种类名（标记 / 名称 / 路径 / 区域） */
+  kindLabel: string
+  /** 逐项一行（可移除）：名称 + 一行补充信息 */
+  items: ReadonlyArray<{ id: string; label: string; detail: string }>
+  /** 类型写在文件里的键（`icon` / `type`）；`null` = 这类对象没有类型 */
+  typeField: string | null
+  /** 类型候选从哪个目录来 */
+  typeSource: SelectionTypeSource | null
+  /** 当前**共同**类型；各不相同 → `null` */
+  typeValue: string | null
+  /** 当前**共同**链接（全是空串就是 `''`）；各不相同 → `null` */
+  link: string | null
+  canLink: boolean
+  canDelete: boolean
+}
+
 /** 检查器要显示的一条选中信息 */
 export interface SelectionInfo {
   kind: SelectionKind
   /** 人话的种类名（标记 / 名称 / 路径 / 区域 / 地块） */
   kindLabel: string
   id: string
-  /**
-   * **本次选中之后一共改了几处**（由编辑器按撤销栈算，见 `MapEditor.editsSinceSelection`）。
-   *
-   * 面板据此显示"已改 N 处 + 撤销这些改动"：用户的原话是想要一个能确认改动的按钮，
-   * 而"逐条撤销"已经能精确回到选中那一刻 —— 不必引入"暂存后统一提交"那套（那会丢掉逐步撤销）。
-   */
-  editsSinceSelection: number
   /** 可编辑的名称（地块没有名字 → 空串） */
   name: string
   /** 当前链接的笔记路径（空串 = 没链接） */
@@ -523,8 +584,6 @@ export function describeSelection(
     kind: selection.kind,
     kindLabel: spec.label,
     id: selection.id,
-    // 这一层看不到历史栈，先给 0；真正的数字由 `MapEditor.selectionInfo()` 覆盖
-    editsSinceSelection: 0,
     name: data.name,
     link: data.link,
     detail: data.detail,

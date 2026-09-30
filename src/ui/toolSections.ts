@@ -136,10 +136,10 @@ export const BRUSH_FIELD_OPTIONS: ReadonlyArray<{ value: string; label: string }
 /** 数值字段的算法按钮（顺序就是界面上的顺序） */
 export const BRUSH_OPS: ReadonlyArray<{ value: BrushOp; label: string; hint: string }> = [
   { value: 'set', label: '＝', hint: '这一笔把这些格直接设成这个数（分类字段只有这一种）' },
-  { value: '+', label: '＋', hint: '在原来的数上加：**没有值的格从「每格默认值」起算**（没有就 0）——会把默认值固化进这些格' },
-  { value: '-', label: '−', hint: '在原来的数上减：**没有值的格从「每格默认值」起算**（没有就 0）——会把默认值固化进这些格' },
-  { value: '×', label: '×', hint: '乘一个系数：**没有值的格跳过**（拿"没量过"去乘没有意义）' },
-  { value: '÷', label: '÷', hint: '除以一个系数：**没有值的格跳过**；除以 0 不生效' },
+  { value: '+', label: '＋', hint: '在原来的数上加：没有值的格从「每格默认值」起算（没有就 0）——会把默认值固化进这些格' },
+  { value: '-', label: '−', hint: '在原来的数上减：没有值的格从「每格默认值」起算（没有就 0）——会把默认值固化进这些格' },
+  { value: '×', label: '×', hint: '乘一个系数：没有值的格跳过（拿"没量过"去乘没有意义）' },
+  { value: '÷', label: '÷', hint: '除以一个系数：没有值的格跳过；除以 0 不生效' },
 ]
 
 /** 路径/区域的几何模式（仅这两个工具下显示） */

@@ -18,6 +18,7 @@ import {
   DEFAULT_SETTINGS,
   LABEL_SCALE_MAX,
   LABEL_SCALE_MIN,
+  normalizeExportFolder,
   normalizeLabelScale,
   normalizeSettings,
   paletteOf,
@@ -192,12 +193,96 @@ test('引导可见性：归一化是幂等的（写回再读回不改变结果�
   assert.deepEqual(twice, once)
 })
 
+/* ------------------------------------------- 导出落点（上次用的目录）
+
+   它是唯一一个"用户操作留下的痕迹"型设置：默认空串（= 没记录过 ⇒ 导出回落到
+   地图文件所在目录，与加这个字段之前的行为一致），落盘在插件设置而不是地图文件。 */
+
+test('导出目录：默认空串（没记录过），清洗成库内相对路径', () => {
+  assert.equal(DEFAULT_SETTINGS.exportFolder, '')
+  assert.equal(normalizeSettings({}).exportFolder, '')
+  assert.equal(normalizeExportFolder('Maps/导出'), 'Maps/导出')
+  assert.equal(normalizeExportFolder('/Maps/导出/'), 'Maps/导出', '两端斜杠不算路径的一部分')
+  assert.equal(normalizeExportFolder('Maps\\导出'), 'Maps/导出', 'Windows 上复制来的路径也要能用')
+  assert.equal(normalizeExportFolder('Maps//导出'), 'Maps/导出')
+  assert.equal(normalizeExportFolder('A/../B'), 'A/B', '`..` 段被丢掉，不能靠它跳出库')
+  assert.equal(normalizeExportFolder('./A'), 'A')
+  // 垃圾值一律收敛成空串（= 没记录过），而不是让路径变成 "undefined"
+  for (const bad of [42, null, undefined, {}, [], true]) {
+    assert.equal(normalizeExportFolder(bad), '', String(bad))
+    assert.equal(normalizeSettings({ exportFolder: bad }).exportFolder, '', String(bad))
+  }
+})
+
+test('导出目录：归一化幂等（写回再读回不改变结果，`A/../B` 这类不会越洗越短）', () => {
+  for (const raw of ['Maps', 'Maps/导出', 'A/../B', 'A/./B/', '\\X\\Y']) {
+    const once = normalizeExportFolder(raw)
+    assert.equal(normalizeExportFolder(once), once, raw)
+  }
+})
+
 test('图层对象是新建的（不与出厂默认共享引用，避免一处改动污染所有实例）', () => {
   const settings = normalizeSettings({})
   assert.deepEqual(settings.layers, DEFAULT_LAYER_VISIBILITY)
   assert.notEqual(settings.layers, DEFAULT_LAYER_VISIBILITY, '必须是新对象')
   settings.layers.terrain = false
   assert.equal(DEFAULT_LAYER_VISIBILITY.terrain, true, '改实例不该影响出厂默认')
+})
+
+test('按地图分份的视图偏好：老配置不收窄（缺省即空表 ⇒ 每张图都用库级模板）', () => {
+  /* W4-2：`mapViews` 是新增维度，老 data.json 里没有它 —— 迁移**不需要做任何事**：
+     空表 ⇒ `overlaysFor/layersFor/showLegendFor` 全部回落库级那一份 ⇒ 视觉完全一致。
+     这一条钉住的正是"迁移前后一模一样"这个承诺。 */
+  assert.deepEqual(DEFAULT_SETTINGS.mapViews, {})
+  assert.deepEqual(normalizeSettings({}).mapViews, {})
+  const old = normalizeSettings({ overlays: { temperature: { opacity: 0.44 } }, showLegend: true })
+  assert.deepEqual(old.mapViews, {}, '老配置不该被凭空长出地图条目')
+  assert.equal(old.showLegend, true, '库级那一份照旧带着老值')
+})
+
+test('按地图分份的视图偏好：键被清洗归一（同一张图不许被拆成两份设置）', () => {
+  const settings = normalizeSettings({
+    mapViews: { 'Maps//World.map.md': { showLegend: true } },
+  })
+  assert.deepEqual(Object.keys(settings.mapViews), ['Maps/World.map.md'])
+  assert.equal(settings.mapViews['Maps/World.map.md']?.showLegend, true)
+  // 反斜杠（Windows 复制来的）/ 两端空白 / `.` 段都要归到同一个键
+  for (const raw of ['Maps\\World.map.md', ' Maps/World.map.md ', './Maps/World.map.md']) {
+    assert.deepEqual(Object.keys(normalizeSettings({ mapViews: { [raw]: { showLegend: true } } }).mapViews), [
+      'Maps/World.map.md',
+    ], raw)
+  }
+})
+
+test('按地图分份的视图偏好：坏条目整条丢掉（不许用默认值盖住库级模板）', () => {
+  /* 为什么不是"填成默认值"：那样这条会**盖住**模板 ——
+     数据被手工改坏时，用户宁可按模板显示，也不要莫名其妙看到"全部图层都开着"。 */
+  const settings = normalizeSettings({
+    mapViews: {
+      'Maps/A.map.md': 'nonsense',
+      'Maps/B.map.md': { layers: 42, overlays: 'x' },
+      'Maps/C.map.md': { showLegend: 'yes' },
+      '': { showLegend: true },
+      'Maps/D.map.md': { layers: { grid: false } },
+    },
+  })
+  assert.deepEqual(Object.keys(settings.mapViews), ['Maps/D.map.md'], '只有真给了合法内容的才留键')
+  // 合法的那条按字段规范化：没提到的层按出厂默认补齐（坏值不会变成"隐藏"）
+  assert.equal(settings.mapViews['Maps/D.map.md']?.layers?.grid, false)
+  assert.equal(settings.mapViews['Maps/D.map.md']?.layers?.terrain, true)
+  assert.equal('overlays' in (settings.mapViews['Maps/D.map.md'] ?? {}), false, '没提的字段不该被凭空填上')
+})
+
+test('按地图分份的视图偏好：归一化幂等（写回再读回不改变结果）', () => {
+  const raw = {
+    mapViews: {
+      'Maps//A.map.md': { showLegend: false, layers: { grid: false } },
+      'B.map.md': { overlays: { depth: { opacity: 0.3 } } },
+    },
+  }
+  const once = normalizeSettings(raw)
+  const twice = normalizeSettings(JSON.parse(JSON.stringify(once)))
+  assert.deepEqual(twice.mapViews, once.mapViews)
 })
 
 test('幂等性：归一化两次与一次结果完全相同（能抓住"归一化不彻底"的回归）', () => {

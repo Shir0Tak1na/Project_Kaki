@@ -22,6 +22,7 @@ import { ItemView, setIcon, type WorkspaceLeaf } from 'obsidian'
 import {
   formatSelectionFieldValue,
   SELECTION_EMPTY_HINT,
+  type ObjectBatchInfo,
   type SelectionActionId,
   type SelectionInfo,
 } from '../editor/selection.ts'
@@ -30,6 +31,7 @@ import {
   LAYER_TABLE,
   isLayerVisible,
   type LayerKey,
+  type LayerSpec,
   type LayerVisibility,
 } from '../render/layerVisibility.ts'
 import {
@@ -116,12 +118,6 @@ export interface MapPanelDeps {
    * 空串 = 清除该字段（`null`，例如"清除覆盖色"）。
    */
   onSetSelectionField: (field: string, rawValue: string) => void
-  /**
-   * 撤销"本次选中期间的所有改动"（检查器上那个后悔按钮）。
-   *
-   * 面板只负责画按钮：撤销多少次由编辑器按撤销栈算（面板不认识文档，也不该认识）。
-   */
-  onUndoSelectionEdits?: () => void
   /** 给点对象（标记 / 名称）设坐标；面板已经把两个输入框解析成数字 */
   onSetSelectionPosition: (x: number, y: number) => void
   /** 把当前选中项整体移到视口中心（形状按包围盒中心平移） */
@@ -167,6 +163,29 @@ export interface MapPanelDeps {
    * （那时它就是"一个地块对象"，逐字段编辑已经够用）。
    */
   getBatchEdit: () => BatchEditInfo | null
+  /**
+   * 「数据显示」里那几行**只读读数**（§2.6 形态 3）：单选一格时的温度 / 深度 / 生物群系，
+   * 已经按**当前展示单位**格式化好（与画布信息卡同一份 `describeCellReadings`）。
+   *
+   * `null` = 不是"恰好一格"这种情形（对象 / 多格 / 没选中），这几行就不出现。
+   * 与 `getBatchEdit` 同一思路：面板只画，格式化与目录解析全在外面。
+   */
+  getSelectionReadings: () => ReadonlyArray<{ label: string; value: string }> | null
+  /**
+   * 「数据显示」的**多对象形态**（§2.6「多个**同类**对象」）：`null` = 当前不是多选对象。
+   *
+   * 由编辑器现算（文档 + 目录解析 + 那张表都在它那儿），面板只画。异类混选在编辑器里
+   * 就被归一化掉了，所以面板拿到的这一份**一定同类** —— 公共字段（类型 / 链接）因此成立。
+   */
+  getObjectBatch: () => ObjectBatchInfo | null
+  /** 把某一项**移出**这次选择（不删除对象；选择不进撤销栈） */
+  onRemoveObjectItem: (id: string) => void
+  /** 给选中的**全部**对象设同一个类型（图标 / 路径类型 / 区域类型）；一次提交 = 一条历史 */
+  onSetObjectsType: (value: string) => void
+  /** 给选中的**全部**对象设同一个链接（空串 = 清除） */
+  onSetObjectsLink: (link: string) => void
+  /** 删除选中的**全部**对象（一次提交 = 一条历史，Ctrl+Z 一次全回来） */
+  onRemoveObjects: () => void
   /**
    * 给当前选择的每一格写同一个字段。**传原始文本**：解析与范围检查都在外面做
    * （与 `onSetSelectionField` 同一条纪律）。空串 = 清除该字段。
@@ -216,6 +235,22 @@ export interface MapPanelDeps {
 export interface BatchEditInfo {
   /** 选中的格数 */
   count: number
+  /**
+   * 头部那**一行摘要**（§2.6：多格 ⇒ 整批编辑 + **摘要 1 行进侧栏头部**）。
+   *
+   * 用户追加口径原话（m01930）：「多选模式，侧栏里稍微加一行显示，**不要裸着**」——
+   * 形态照施工文件给的例子：`苔原 30 · 雪原 12 · 3 格无数据`。
+   * 由插件层格式化（面板不认识文档与目录，只画这一行字）。
+   */
+  summary: string
+  /**
+   * 这批格的**统计行**（坐标范围 / 温度众数 / 温度平均 / 缺数据与兜底格 / 生物群系清单 / 已不存在）。
+   *
+   * §C.4 那份统计原来长在画布信息卡上；W2-3 把卡片降级成"只做进行中的事"之后，
+   * 它**必须搬进侧栏**（用户验收时当场指出："并没有收进侧栏里"）。
+   * 与卡片共用 `selectionStatRows`，不在这里另算一份。
+   */
+  details: ReadonlyArray<{ label: string; value: string }>
   /** 每个可批量写的字段：标签 / 单位 / 这批里混不混（有的有值、有的没有）/ 有几格没数据 */
   fields: ReadonlyArray<{
     key: string
@@ -230,16 +265,26 @@ export interface BatchEditInfo {
   missing: number
 }
 
+/**
+ * 面板**尾部**那几个动作组的顺序（UI 整理 W1④ · 施工文件 §2.4 的定稿顺序）。
+ *
+ * 「编辑」组**不在这里**：它要画在面板上部、紧贴数据显示面板
+ * （用户口径"编辑部分要放在数据显示面板下面，不然是反直觉的"），
+ * 所以由 `renderEditSection` 单独渲染，见 `EDIT_GROUP_TITLE`。
+ */
 const GROUP_ORDER: ReadonlyArray<{ group: PanelActionGroup; title: string }> = [
+  // 「panel」只含「打开地图面板」，而它已 `panelHidden`（面板里点它必然没反应）⇒ 这一组通常是空的
   { group: 'panel', title: '' },
   { group: 'map', title: '地图层' },
-  { group: 'edit', title: '编辑' },
   // 定义管理（增删改自定义地形/标记/路径类型/区域类型）：从设置页搬来之后单独成组，
-  // 摆在编辑与文件之间 —— 它既不是画布操作，也不是文件导入导出
+  // 摆在地图层之后 —— 它既不是画布操作，也不是文件导入导出
   { group: 'def', title: '地图定义' },
   { group: 'file', title: '文件与导出' },
   { group: 'dev', title: '开发工具（仅开发者模式）' },
 ]
+
+/** 「编辑」那一组的标题（位置由 `renderEditSection` 决定，不在 `GROUP_ORDER` 里） */
+const EDIT_GROUP_TITLE = '编辑'
 
 /**
  * 按 `dataset` 的键值找第一个后代元素（面板用来在重建后认回"同一个控件"）。
@@ -488,10 +533,12 @@ export class MapPanelView extends ItemView {
         ? 'none'
         : `${selection.kind}:${selection.id}:${selection.name}:${selection.link}:${selection.detail}`
     const batch = this.deps.getBatchEdit()
+    const readings = this.deps.getSelectionReadings()
+    const objectBatch = this.deps.getObjectBatch()
     const batchSignature =
       batch === null
         ? 'batch:none'
-        : `batch:${batch.count}:${batch.missing}:${batch.fields.map((field) => `${field.key}/${field.mixed ? 1 : 0}/${field.missing}`).join(',')}`
+        : `batch:${batch.count}:${batch.missing}:${batch.summary}:${batch.details.map((row) => `${row.label}=${row.value}`).join('|')}:${batch.fields.map((field) => `${field.key}/${field.mixed ? 1 : 0}/${field.missing}`).join(',')}`
     /**
      * 「显示」那一组（§F.1 三组）也要进签名：
      * - 数据层的样式（色带锚点 / 分类配色 / 不透明度 / 显示方式 / 单位）**就是控件里的值**，
@@ -534,6 +581,15 @@ export class MapPanelView extends ItemView {
       // 「显示图例」的当前状态进签名：否则点了之后签名没变，面板会跳过重绘，
       // 按钮上的 ●/○ 停在旧状态（同 §5.9）
       `legend:${this.deps.getShowLegend() ? 1 : 0}`,
+      // 「数据显示」里那几行只读读数也要进签名：否则"在画布上刷了一格温度"之后，
+      // 侧栏那行还写着旧值（同一类"签名漏了状态就静默不更新"，§5.9）
+      `readings:${readings === null ? 'none' : readings.map((row) => `${row.label}=${row.value}`).join(',')}`,
+      // 多对象那一段同理：选了另一个对象 / 改完公共字段之后，签名不变就会停在旧值（§5.9）
+      `objects:${
+        objectBatch === null
+          ? 'none'
+          : `${objectBatch.count}:${objectBatch.items.map((item) => item.id).join(',')}:${objectBatch.typeValue ?? '×'}:${objectBatch.link ?? '×'}`
+      }`,
       `overlays:${overlaySignature}`,
       `tools:${toolSignature}`,
       // 引导的可见性也要进签名：否则点了「不再显示」之后签名没变，面板会**跳过重绘**，
@@ -561,26 +617,65 @@ export class MapPanelView extends ItemView {
 
     this.renderQuickStart(root, quickStartVisible)
 
-    this.renderDisplay(root, visibility)
-
-    // §F.2 的次序：显示 → 笔刷 → 选择 → 工具。三节控件都排在动作列表**之前** ——
-    // 它们是"边看画布边调"的东西，让用户先滚过一屏命令按钮才够到笔刷是本末倒置
-    // （ISSUE-002 那句话就是"找不到笔刷"）。
-    renderBrushSection(root, toolControls)
-    renderSelectionModeSection(root, toolControls)
-    this.renderSelection(root, selection, batch)
-    renderToolSection(root, toolControls)
-
+    /**
+     * 从上到下的定稿顺序（施工文件 §2.4 · 用户 m01803 逐字）：
+     *
+     * ① **数据显示面板**（常驻、置顶、整块高度不上下缩动）
+     * ② **编辑**（工具 / 笔刷 / 选择方式 + 「编辑」动作组；筛选归编辑）
+     * ③ **视图**（底图 / 地物两小组折进一节；数据层的「画法」跟着它那一层走）
+     * ④ 地图层 / 地图定义 / 文件与导出 / 开发工具（动作组，走 `GROUP_ORDER`）
+     */
+    this.renderSelection(root, selection, batch, readings, objectBatch)
+    this.renderEditSection(root, rows, toolControls)
+    this.renderViewSection(root, visibility)
     for (const { group, title } of GROUP_ORDER) {
-      const items = rows.filter((row) => row.action.group === group)
-      if (items.length === 0) continue
-      const list = root.createEl('div', { cls: 'fc-panel-group' })
-      if (title.length > 0) list.createEl('div', { cls: 'fc-panel-group-title', text: title })
-      for (const row of items) this.renderAction(list, row.action, row.available, row.description)
+      this.renderActionGroup(root, rows, group, title)
     }
     this.restoreFocusedInput()
     this.restoreScrollTop(scrollTop)
     this.rendered = true
+  }
+
+  /**
+   * 一个动作组（标题 + 若干按钮 + 悬停说明）。
+   *
+   * 没有可见动作时**整组不出现**（而不是留一个空标题）：`panelHidden` 的两个文件级动作
+   * 与开发者模式过滤都会让某几组为空。
+   */
+  private renderActionGroup(
+    root: HTMLElement,
+    rows: ReadonlyArray<{ action: PluginAction; available: boolean; description: string }>,
+    group: PanelActionGroup,
+    title: string,
+  ): void {
+    const items = rows.filter((row) => row.action.group === group)
+    if (items.length === 0) return
+    const list = root.createEl('div', { cls: 'fc-panel-group' })
+    if (title.length > 0) list.createEl('div', { cls: 'fc-panel-group-title', text: title })
+    for (const row of items) this.renderAction(list, row.action, row.available, row.description)
+  }
+
+  /**
+   * 「编辑」区（§2.4 第 3 项）：工具 → 笔刷 → 选择方式 → 「编辑」动作组。
+   *
+   * 两条口径都写死在这里：
+   * - **紧贴数据显示面板下面** —— 用户原话"编辑部分要放在数据显示面板下面，不然是反直觉的"：
+   *   选中一个对象之后的下一件事就是改它；
+   * - **筛选属于编辑** —— 用户原话"筛选错误的放进了地图层里面，这个应该是编辑工具"
+   *   ⇒ 动作 `filter-selection` 的组已改成 `edit`（见 `main.ts`），不再挂在地图层那组下面。
+   *
+   * 三节控件都排在动作列表**之前**：它们是"边看画布边调"的东西，让用户先滚过一屏命令按钮
+   * 才够到笔刷是本末倒置（ISSUE-002 那句话就是"找不到笔刷"）。
+   */
+  private renderEditSection(
+    root: HTMLElement,
+    rows: ReadonlyArray<{ action: PluginAction; available: boolean; description: string }>,
+    toolControls: ToolControlsHost,
+  ): void {
+    renderToolSection(root, toolControls)
+    renderBrushSection(root, toolControls)
+    renderSelectionModeSection(root, toolControls)
+    this.renderActionGroup(root, rows, 'edit', EDIT_GROUP_TITLE)
   }
 
   /** 重建前：当前焦点是不是落在面板里某个"有身份"的输入框上（`dataset.fcFocusKey`） */
@@ -924,6 +1019,22 @@ export class MapPanelView extends ItemView {
     const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-batch' })
     block.dataset.fcBatch = 'group'
     block.createEl('div', { cls: 'fc-panel-group-title', text: `整批编辑（${info.count} 格）` })
+    // 头部**一行摘要**：否则这一节进去就是一片输入框（用户原话"不要裸着"）
+    const summaryLine = block.createEl('div', { cls: 'fc-batch-summary', text: info.summary })
+    summaryLine.dataset.fcBatchSummary = '1'
+    // §C.4 那份统计（卡片降级后搬进侧栏）：坐标范围 / 众数 / 平均 / 缺数据 / 群系清单 / 已不存在
+    if (info.details.length > 0) {
+      const details = block.createEl('div', { cls: 'fc-selection-readings fc-batch-details' })
+      details.dataset.fcBatchDetails = '1'
+      for (const row of info.details) {
+        // 刻意用**独立的 class**（不是 `fc-selection-reading`）：那样"单格三行读数"与
+        // "整批统计"才分得开 —— 否则"多格时不该有单格读数"那条断言会被这一块误伤
+        const line = details.createEl('div', { cls: 'fc-batch-detail-row' })
+        line.dataset.fcBatchDetailRow = row.label
+        line.createEl('span', { cls: 'fc-batch-detail-label', text: row.label })
+        line.createEl('span', { cls: 'fc-batch-detail-value', text: row.value })
+      }
+    }
 
     if (info.missing > 0) {
       // 生命周期那条（§C.3）：撤销 / 重载之后选择里可能留着地图里已经没有的格
@@ -978,109 +1089,158 @@ export class MapPanelView extends ItemView {
       }
     }
 
-    const buttons = block.createEl('div', { cls: 'fc-selection-buttons' })
-    const clearSelection = buttons.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
-    clearSelection.dataset.fcRole = 'clear-cell-selection'
-    clearSelection.setText('清空选择')
-    clearSelection.title = '取消"我在看这些格"（选择不进撤销栈）'
-    clearSelection.addEventListener('click', () => {
+    // 「清空选择」**不在这里**：它已经升到「数据显示」的标题行上（§2.6"侧栏是选择的唯一家"），
+    // 同一件事挂两处正是 §1 第 1 条要消掉的缺陷。
+  }
+
+  /**
+   * 数据显示面板（§2.4 第 1 项）：**常驻、置顶、整块高度不上下缩动**。
+   *
+   * 用户原话：「在单选状态下，提供最简洁的信息和修改数据（类型、值、引用）的面板，
+   * 面板不要动来动去（尤其是上下缩动），所以提前留好整个窗口。」
+   * 于是这一节**永远存在** —— 没选择时也留一块（写清"怎么办"），
+   * 而且内容区有固定最小高度（`styles.css` 的 `.fc-selection-body`）：
+   * 从"没选"切到"选中一个对象"时面板不会突然长高，把下面整段推走。
+   *
+   * 标题固定为「数据显示」，内容区随选择换成四种形态之一（无选择 / 对象 / 单个地块 /
+   * 整批编辑，见 `docs/UI-REORG-PLAN.md` §2.6）。
+   */
+  private renderSelection(
+    root: HTMLElement,
+    selection: SelectionInfo | null,
+    batch: BatchEditInfo | null,
+    readings: ReadonlyArray<{ label: string; value: string }> | null,
+    objectBatch: ObjectBatchInfo | null,
+  ): void {
+    const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-selection' })
+    block.dataset.fcSelectionPanel = '1'
+    const titleRow = block.createEl('div', { cls: 'fc-selection-title-row' })
+    titleRow.createEl('div', { cls: 'fc-panel-group-title', text: '数据显示' })
+    /**
+     * 「清空选择」**在侧栏**（§2.6：侧栏是"选择"的唯一家）。
+     *
+     * 它原来是画布信息卡上那个按钮；卡片降级成"只做进行中的事"之后，那一个入口就靠不住了，
+     * 所以把它挪到这里 —— 没选择时**灰掉**（点了不会有任何变化），而不是消失（§F.2 那条口径）。
+     */
+    const clearButton = titleRow.createEl('button', { cls: 'fc-selection-clear' })
+    clearButton.dataset.fcSelectionClear = '1'
+    clearButton.textContent = '清空选择'
+    clearButton.title = '取消"我在看这些"（对象与格一起清；选择不进撤销栈）'
+    clearButton.disabled = selection === null && batch === null && objectBatch === null
+    clearButton.addEventListener('click', () => {
       this.lastSignature = null
       this.deps.onClearSelection()
       this.requestRender()
     })
-  }
+    const body = block.createEl('div', { cls: 'fc-selection-body' })
 
-  private renderSelection(root: HTMLElement, selection: SelectionInfo | null, batch: BatchEditInfo | null): void {
     if (batch !== null) {
-      this.renderBatchEdit(root, batch)
+      this.renderBatchEdit(body, batch)
       return
     }
-    const block = root.createEl('div', { cls: 'fc-panel-group fc-panel-selection' })
-    block.createEl('div', { cls: 'fc-panel-group-title', text: '选中的对象' })
+
+    // 多个同类对象（§2.6）：整段换成"逐项一行 + 公共字段"，不再显示第一个对象的检查器 ——
+    // 五个选中项里只有第一个有完整检查器、其余没有，比"一屏都是同一套控件"更让人困惑
+    if (objectBatch !== null) {
+      this.renderObjectBatch(body, objectBatch)
+      return
+    }
 
     if (selection === null) {
-      block.createEl('div', { cls: 'fc-selection-hint', text: SELECTION_EMPTY_HINT })
+      body.createEl('div', { cls: 'fc-selection-hint', text: SELECTION_EMPTY_HINT })
       return
     }
 
-    const head = block.createEl('div', { cls: 'fc-selection-head' })
+    const head = body.createEl('div', { cls: 'fc-selection-head' })
     head.createEl('span', { cls: 'fc-selection-kind', text: selection.kindLabel })
     head.createEl('span', { cls: 'fc-selection-detail', text: selection.detail })
 
     // ID 是"信息"不是"动作"：它是写在地图文件里的标识，改名要用设置页的「改 ID…」
-    block.createEl('div', { cls: 'fc-selection-id', text: `ID：${selection.id}` })
+    body.createEl('div', { cls: 'fc-selection-id', text: `ID：${selection.id}` })
 
-    for (const action of selection.actions) {
-      SELECTION_ACTION_RENDERERS[action]({ block, info: selection, deps: this.deps })
+    // 只读读数（单选一格才有）：先"看得见值"，再往下才是"改它"的那些控件
+    if (readings !== null && readings.length > 0) {
+      const list = body.createEl('div', { cls: 'fc-selection-readings' })
+      list.dataset.fcSelectionReadings = '1'
+      for (const row of readings) {
+        const line = list.createEl('div', { cls: 'fc-selection-reading' })
+        line.createEl('span', { cls: 'fc-selection-reading-label', text: row.label })
+        line.createEl('span', { cls: 'fc-selection-reading-value', text: row.value })
+      }
     }
 
-    // 「已改 N 处 / 撤销这些改动」：用户要一个"确认改动"的按钮（2026-09-27）。
-    // 刻意**不做暂存-保存**那套：现在的每一次提交都是一条可撤销的 op，逐条撤销就能精确
-    // 回到"选中那一刻"，而暂存会把撤销粒度变粗、还会让改动在确认前不落盘。
-    // 只在**真的改过**时才出现 —— 常态下不占位置（这一栏平时只有"是什么 + 能干什么"）。
-    if (selection.editsSinceSelection > 0) {
-      const row = block.createEl('div', { cls: 'fc-selection-edits' })
-      row.createEl('span', {
-        cls: 'fc-selection-edits-count',
-        text: `本次选中已改 ${selection.editsSinceSelection} 处`,
-      })
-      const undo = row.createEl('button', { cls: 'fc-panel-button fc-selection-button' })
-      undo.dataset.fcField = 'undo-selection-edits'
-      undo.setText('撤销这些改动')
-      undo.addEventListener('click', () => {
-        this.lastSignature = null
-        this.deps.onUndoSelectionEdits?.()
-        this.requestRender()
-      })
+    for (const action of selection.actions) {
+      SELECTION_ACTION_RENDERERS[action]({ block: body, info: selection, deps: this.deps })
     }
 
     // 三组就地编辑放在动作之后、且**默认收起**：首屏仍然是"是什么 + 能干什么"
-    this.renderSelectionGroups(block, selection)
+    this.renderSelectionGroups(body, selection)
   }
 
   /**
-   * 侧栏「显示」：**三组，每个开关只出现一次**（施工文件 §F.1）。
+   * 「视图」（§2.4 第 4 项）：把原来散在「底图」「地物」两组里的视图类开关**整个折进一节**，
+   * 但**保留原有的二分类**（底图 / 地物）—— 用户 m01803 原话：
+   * 「视图按钮现在有相当多个建议整个按照现在的二分类折叠到「视图」里面。」
    *
    * ```
-   * 显示
-   * ├─ 底图    地形 · 网格 + 数据层（温度 / 深度 / 生物群系）   ← 这片地方长什么样
-   * ├─ 地物    区域 · 路径 · 标记 · 名称  +「显示图例」          ← 这片地方上有什么
-   * └─ 数据层  每个字段：色带（或分类配色）· 越界色 · 不透明度 · 显示方式 · 展示单位 · 恢复色带
+   * 视图
+   * ├─ 底图    地形 · 温度 ▸画法 · 深度 ▸画法 · 生物群系 ▸画法 · 网格   ← 这片地方长什么样
+   * └─ 地物    区域 · 路径 · 标记 · 名称  +「显示图例」                  ← 这片地方上有什么
    * ```
    *
    * 两条纪律：
    * - **分组来自图层登记表的一列**（`displayGroup`），不在这里按 id 硬编码 ——
    *   加一层仍然只加一行；
    * - **顺序 = 表里的行序**，所以九个开关的先后与登记表完全一致（有断言钉着）。
+   *
+   * 默认**展开**：图层开关是高频使用的功能（用户第 6 条"建议只留在侧栏里"），
+   * 进来就该先看见"现在显示着什么"；想省地方可以整节收起来（开合状态跨重建保留，§5.64）。
    */
-  private renderDisplay(root: HTMLElement, visibility: LayerVisibility): void {
-    this.renderLayerGroup(root, visibility, 'base', '底图')
-    this.renderLayerGroup(root, visibility, 'feature', '地物')
-    this.renderDataParams(root)
+  private renderViewSection(root: HTMLElement, visibility: LayerVisibility): void {
+    const group = this.createSection(root, {
+      title: '视图',
+      role: 'panel-view',
+      cls: 'fc-panel-view',
+      dataKey: 'fcView',
+      defaultOpen: true,
+    })
+    group.createEl('div', {
+      cls: 'fc-panel-hint',
+      text: '每一行管"看不看"；带「画法」的层可以展开调它怎么画（色带 / 配色 / 不透明度 / 显示方式）。',
+    })
+    this.renderLayerGroup(group, visibility, 'base', '底图')
+    this.renderLayerGroup(group, visibility, 'feature', '地物')
   }
 
   /**
-   * 一组的图层开关（数量与名字都来自图层登记表）。
-   *
-   * 放在**最上面**、状态行下面：用户是"边看画布边切层"，而侧边栏很窄、
-   * 动作列表可能比一屏还长 —— 放在中间或末尾就意味着每次切层都要先滚动。
+   * 一组里的图层开关：**一行一层**（数量与名字都来自图层登记表）。
    *
    * 这些按钮刻意用**独立的 class**（`fc-layer-toggle`）而不是复用 `fc-panel-button`：
    * 两者语义不同（一个执行动作、一个切换状态），样式与测试选择器都该分得开。
+   *
+   * 数据层的**「画法」跟着它那一层走**（用户本轮口径）：温度 / 深度 / 生物群系三行
+   * 各带一个展开项，点开就是这一层的色带 / 配色 / 不透明度 / 显示方式 ——
+   * 于是不再有"开关在上面、画法在下面另一组"这种要来回滚的拆法。
    */
   private renderLayerGroup(
-    root: HTMLElement,
+    parent: HTMLElement,
     visibility: LayerVisibility,
     group: 'base' | 'feature',
     title: string,
   ): void {
-    const list = root.createEl('div', { cls: 'fc-panel-group fc-panel-layers' })
+    const list = parent.createEl('div', { cls: 'fc-panel-layers' })
     list.dataset.fcDisplayGroup = group
     list.createEl('div', { cls: 'fc-panel-group-title', text: title })
-    for (const spec of LAYER_TABLE) {
+    // `LAYER_TABLE` 是 `as const` 的字面量联合（`overlay` 只写在那三条数据层的行上），
+    // 按接口读它才能安全地问"这一层有没有 overlay"。注意这里要的是**行序 = 界面顺序**，
+    // 与 `LAYERS_BY_DRAW_ORDER`（画布上的叠加次序）不是同一个顺序。
+    const specs: readonly LayerSpec[] = LAYER_TABLE
+    for (const spec of specs) {
       if (spec.displayGroup !== group) continue
+      const row = list.createEl('div', { cls: 'fc-layer-row' })
+      row.dataset.fcLayerRow = spec.id
       const visible = isLayerVisible(visibility, spec.id)
-      const button = list.createEl('button', { cls: 'fc-layer-toggle' })
+      const button = row.createEl('button', { cls: 'fc-layer-toggle' })
       button.dataset.layer = spec.id
       if (visible) button.addClass('is-active')
       button.title = `${spec.label}：${spec.hint}（点一下${visible ? '隐藏' : '显示'}）`
@@ -1093,13 +1253,17 @@ export class MapPanelView extends ItemView {
         this.deps.onToggleLayer(spec.id, !visible)
         this.requestRender()
       })
+      // 表里声明了 `overlay` 的层才有「画法」（温度 / 深度 / 生物群系）
+      if (spec.overlay !== undefined) this.renderLayerDraw(row, spec.overlay)
     }
 
     // 「显示图例」跟着**地物**那一组（它列的就是"地图上有什么"）：图例的可见性也是图层设置，
     // 属于"看不看"这一类；这里出现一次，别处不再重复挂同名开关（§5.12）。
     if (group !== 'feature') return
     const showLegend = this.deps.getShowLegend()
-    const legendButton = list.createEl('button', { cls: 'fc-legend-toggle' })
+    const legendRow = list.createEl('div', { cls: 'fc-layer-row' })
+    legendRow.dataset.fcLayerRow = 'legend'
+    const legendButton = legendRow.createEl('button', { cls: 'fc-legend-toggle' })
     legendButton.dataset.fcLegendToggle = '1'
     if (showLegend) legendButton.addClass('is-active')
     legendButton.title = `显示图例：在画布右下角列出地图上实际有的地形 / 群系 / 路径 / 区域（点一下${showLegend ? '隐藏' : '显示'}）`
@@ -1113,30 +1277,140 @@ export class MapPanelView extends ItemView {
   }
 
   /**
-   * 「数据层」那一组的**参数**（第三组）：每个字段一节，控件与设置页**共用同一份渲染**。
+   * 一层底下那个「画法」展开项（用户本轮口径：数据层的参数跟着它那一层走）。
    *
-   * 默认收起：色带锚点逐行编辑，一屏放不下，而面板首屏该留给"状态 + 开关 + 动作"。
-   * 头部那句说明点明"开关不在这里"（在「底图」一组），免得用户在这一组里找开关。
+   * 展开状态**不用 `<details>`**：这一节本身已经是一个折叠组，而"展开"只要记住一个 role ——
+   * 直接存在 `openGroups` 里（与折叠组同一个集合，同样跨整块重建保留）。
+   * 展开时整行会独占一行（`styles.css` 的 `.fc-layer-row[data-fc-draw-open]`）：
+   * 色带锚点那种"输入框 + 取色器"的控件在半格宽里排不下。
+   *
+   * 控件本体仍然走 `renderOverlayFieldSection` —— 与设置页**共用同一份渲染**（§5.12）。
    */
-  private renderDataParams(root: HTMLElement): void {
-    const group = createCollapsibleGroup(root, {
-      title: '数据层参数',
-      role: 'panel-data',
-      cls: 'fc-panel-group fc-panel-data',
-      titleCls: 'fc-panel-group-title',
-      open: this.openGroups.has('panel-data'),
+  private renderLayerDraw(row: HTMLElement, fieldId: FieldId): void {
+    const spec = OVERLAY_FIELDS.find((item) => item.id === fieldId)
+    // 登记表写了 `overlay` 却没有对应的字段定义：不画这一项，而不是拿 undefined 去渲染
+    if (spec === undefined) return
+    const role = `layer-draw-${fieldId}`
+    const open = this.openGroups.has(role)
+    if (open) row.dataset.fcDrawOpen = '1'
+    const toggle = row.createEl('button', { cls: 'fc-layer-draw-toggle' })
+    toggle.dataset.fcDrawToggle = fieldId
+    toggle.textContent = open ? '画法 ▾' : '画法 ▸'
+    toggle.title = `${spec.label}这一层怎么画：色带（或分类配色）、不透明度、显示方式、展示单位`
+    toggle.addEventListener('click', () => {
+      if (open) this.openGroups.delete(role)
+      else this.openGroups.add(role)
+      this.lastSignature = null
+      this.requestRender()
     })
-    this.groupEls.set('panel-data', group)
-    group.dataset.fcPanelData = 'group'
-    group.createEl('div', {
-      cls: 'fc-settings-note',
-      text: '这里只调"怎么画"（色带 / 配色 / 不透明度 / 显示方式）。每一层的**开关**在「底图」一组里。',
-    })
-    for (const spec of OVERLAY_FIELDS) {
-      const section = group.createEl('div', { cls: 'fc-panel-data-field' })
-      section.dataset.fcOverlayField = spec.id
-      section.createEl('div', { cls: 'fc-panel-field-title', text: spec.label })
-      renderOverlayFieldSection(section, spec, this.overlaySectionHost())
+    if (!open) return
+    const body = row.createEl('div', { cls: 'fc-layer-draw-body fc-panel-data-field' })
+    body.dataset.fcDrawBody = fieldId
+    body.dataset.fcOverlayField = fieldId
+    renderOverlayFieldSection(body, spec, this.overlaySectionHost())
+  }
+
+  /**
+   * 「数据显示」的**多对象形态**（§2.6）：`已选 3 个标记` + 逐项一行（可移除）+ 公共字段。
+   *
+   * 三条口径：
+   * - **逐项一行**：名称 + 一行补充信息（位置 / 顶点数）+「移除」——移除只把它移出这次选择，
+   *   **不删对象**（选择不进撤销栈，所以这一步没有"撤销"可言）；
+   * - **公共字段只有三项**：类型（图标 / 路径类型 / 区域类型）、链接、删除。这三样是
+   *   "所有选中项都有"的（`ObjectBatchInfo` 里已经按表算好 canLink / canDelete）；
+   * - **共同的才预填**：各不相同（`null`）时输入框留空 + 一行说明，**不猜共同值** ——
+   *   猜了以后一提交就把一半对象改成错的（与 §C.5 的整批编辑同一条理由）。
+   */
+  private renderObjectBatch(root: HTMLElement, info: ObjectBatchInfo): void {
+    const head = root.createEl('div', { cls: 'fc-selection-head' })
+    head.createEl('span', { cls: 'fc-selection-kind', text: `已选 ${info.count} 个${info.kindLabel}` })
+    head.createEl('span', { cls: 'fc-selection-detail', text: 'Shift 点选加进来 · Alt 点选移出去' })
+
+    const list = root.createEl('div', { cls: 'fc-object-items' })
+    list.dataset.fcObjectItems = '1'
+    for (const item of info.items) {
+      const row = list.createEl('div', { cls: 'fc-object-item' })
+      row.dataset.fcObjectItem = item.id
+      const text = row.createEl('div', { cls: 'fc-object-item-text' })
+      text.createEl('div', { cls: 'fc-object-item-name', text: item.label })
+      text.createEl('div', { cls: 'fc-object-item-detail', text: item.detail })
+      const remove = row.createEl('button', { cls: 'fc-selection-mini fc-object-remove' })
+      remove.dataset.fcObjectRemove = item.id
+      remove.setText('移除')
+      remove.title = '把它移出这次选择（不删除对象）'
+      remove.addEventListener('click', () => {
+        this.lastSignature = null
+        this.deps.onRemoveObjectItem(item.id)
+        this.requestRender()
+      })
+    }
+
+    // ---- 公共字段：类型 ----
+    if (info.typeField !== null && info.typeSource !== null) {
+      const row = root.createEl('div', { cls: 'fc-selection-row' })
+      const select = row.createEl('select', { cls: 'fc-selection-select dropdown' })
+      select.dataset.fcField = 'objects-type'
+      const options = [...this.deps.getSelectionTypeOptions()]
+      // 各不相同：留空并写清"各不相同"，**不猜**（首个选项是一句占位，不是可提交的值）
+      if (info.typeValue === null) {
+        const placeholder = select.createEl('option', { text: '（各不相同 · 选一个就能统一）' })
+        placeholder.value = ''
+      } else if (options.every((option) => option.value !== info.typeValue)) {
+        // 当前值不在候选里（本机没有这个定义）：补一条「未知（ID）」，用户因此改得掉它
+        options.unshift({ value: info.typeValue, label: `未知（${info.typeValue}）` })
+      }
+      for (const option of options) {
+        const optionEl = select.createEl('option', { text: option.label })
+        optionEl.value = option.value
+      }
+      select.value = info.typeValue ?? ''
+      select.addEventListener('change', () => {
+        if (select.value.length === 0) return
+        this.lastSignature = null
+        this.deps.onSetObjectsType(select.value)
+        this.requestRender()
+      })
+      root.createEl('div', { cls: 'fc-selection-hintline', text: `类型：一次改这 ${info.count} 个（可撤销）` })
+    }
+
+    // ---- 公共字段：链接 ----
+    if (info.canLink) {
+      const row = root.createEl('div', { cls: 'fc-selection-row' })
+      const input = row.createEl('input', { cls: 'fc-selection-input' })
+      input.type = 'text'
+      input.dataset.fcRole = 'objects-link'
+      input.placeholder = info.link === null ? '链接各不相同（留空这里 = 不动）' : '链接的笔记（留空 = 清除）'
+      input.value = info.link ?? ''
+      const commit = (): void => {
+        this.lastSignature = null
+        this.deps.onSetObjectsLink(input.value)
+        this.requestRender()
+      }
+      input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        commit()
+      })
+      input.addEventListener('blur', () => {
+        // 各不相同又没改：什么都不做（否则"点一下别处"就把它们统一成了空）
+        if (info.link === null && input.value.length === 0) return
+        commit()
+      })
+      root.createEl('div', { cls: 'fc-selection-hintline', text: '链接：在画布上点这个对象时会跳回那篇笔记' })
+    }
+
+    // ---- 公共字段：删除 ----
+    if (info.canDelete) {
+      const buttons = root.createEl('div', { cls: 'fc-selection-buttons' })
+      const button = buttons.createEl('button', { cls: 'fc-panel-button fc-selection-button mod-warning' })
+      button.dataset.fcRole = 'objects-delete'
+      button.createEl('span', { cls: 'fc-panel-button-label', text: `删除这 ${info.count} 个` })
+      button.title = '一次提交 = 一条历史（Ctrl/Cmd+Z 一次全回来）'
+      button.addEventListener('click', () => {
+        this.lastSignature = null
+        this.deps.onRemoveObjects()
+        this.requestRender()
+      })
     }
   }
 
@@ -1160,7 +1434,7 @@ export class MapPanelView extends ItemView {
         this.requestRender()
       },
       getCategoryUsage: (spec) => this.deps.getCategoryUsage(spec),
-      // 面板这一节已经挂在「数据层参数」折叠组下面，再写一个标题就是重复的
+      // 「画法」那一行已经写着是哪一层的（就在它的层名正下方），再写一个标题就是重复的
       heading: false,
       requestRerender: () => {
         this.lastSignature = null

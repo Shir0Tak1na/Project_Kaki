@@ -256,6 +256,8 @@ export interface LayerSpec {
   defaultVisible: boolean
   isDataLayer: boolean
   order: number
+  /** 侧栏「视图」里它属于哪一小组（`base` = 底图 / `feature` = 地物） */
+  displayGroup: 'base' | 'feature'
   overlay?: FieldId
   draw?: (context: LayerDrawContext) => LayerDrawOutcome | void
 }

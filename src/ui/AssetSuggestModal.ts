@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 「从库里选一个文件」的弹窗（图片 / 定义文件）。
  *
  * 为什么是"库内文件"而不是系统文件对话框：
@@ -17,13 +17,23 @@
  */
 
 import { FuzzySuggestModal, type App } from 'obsidian'
-import { describeAssetChoice, listBundlePaths, listImagePaths, listNotePaths } from '../base/assetFiles.ts'
+import {
+  describeAssetChoice,
+  describeFolderChoice,
+  listBundlePaths,
+  listFolderPaths,
+  listImagePaths,
+  listNotePaths,
+} from '../base/assetFiles.ts'
 
 /**
  * 候选属于哪一类。**必须由调用方显式给出**，不能在弹窗里靠扩展名猜 ——
  * 「该列什么」是调用方的知识（它才知道自己在选图片还是选定义文件）。
+ *
+ * `folder` 是唯一"候选不是文件"的一类（导出落点用它）：清单从文件路径推出来，
+ * 短标签也换成文件夹的说法（根目录要显示成「（库根目录）」而不是一个空行）。
  */
-export type AssetPickerKind = 'image' | 'bundle' | 'note'
+export type AssetPickerKind = 'image' | 'bundle' | 'note' | 'folder'
 
 export interface AssetPickerOptions {
   /** 候选路径（应当是库内文件路径；这里会按 `kind` 再筛一遍，避免调用方漏筛） */
@@ -48,6 +58,7 @@ export interface AssetPickerOptions {
 function defaultPickerPlaceholder(kind: AssetPickerKind): string {
   if (kind === 'bundle') return '选择定义文件…'
   if (kind === 'note') return '选择要链接的笔记…'
+  if (kind === 'folder') return '选择导出位置…'
   return '选择库内图片…'
 }
 
@@ -69,13 +80,15 @@ export class AssetSuggestModal extends FuzzySuggestModal<string> {
    * 这里必须按 `kind` 分流：写死图片白名单会让定义文件的选择器恒为空（见 `AssetPickerOptions.kind`）。
    */
   override getItems(): string[] {
-    const pick = this.options.kind === 'bundle' ? listBundlePaths : this.options.kind === 'note' ? listNotePaths : listImagePaths
-    return pick(this.options.files)
+    if (this.options.kind === 'bundle') return listBundlePaths(this.options.files)
+    if (this.options.kind === 'note') return listNotePaths(this.options.files)
+    if (this.options.kind === 'folder') return listFolderPaths(this.options.files)
+    return listImagePaths(this.options.files)
   }
 
-  /** 显示成 `forest.png · Assets/地形`：同名文件也能分辨 */
+  /** 文件显示成 `forest.png · Assets/地形`（同名文件也能分辨）；文件夹显示路径本身 */
   override getItemText(item: string): string {
-    return describeAssetChoice(item)
+    return this.options.kind === 'folder' ? describeFolderChoice(item) : describeAssetChoice(item)
   }
 
   override onChooseItem(item: string): void {

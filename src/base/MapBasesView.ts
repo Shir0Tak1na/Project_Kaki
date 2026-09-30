@@ -50,39 +50,47 @@ export interface BasesViewDeps {
   }
   store: MapDocumentStore
   /**
-   * 用户自定义地形（来自插件设置）。
+   * 用户自定义地形。
    *
    * 缩略图与画布必须**同一套解析**：缩略图里出现一个和画布不同颜色的格子，
    * 用户第一反应是"地图文件坏了"。传函数而不是值，理由同 `getStylePalette`（现读）。
+   *
+   * ⚠️ 参数是**这份视图自己加载的那张地图文档**（W4-1b）：定义随图（方案 B）之后，
+   * 目录是"哪张地图的目录"这个问题的答案 —— Base 视图按地图路径工作（没有 canvas），
+   * 所以它交出的必须是 `this.document`，而不是某个插件级单例。
    */
-  getCustomTerrains?: () => readonly CustomTerrain[]
+  getCustomTerrains?: (document: MapDocument | null) => readonly CustomTerrain[]
   /**
-   * 当前自定义标记（来自插件设置）：缩略图里也要把标记画成**它自己的字形**，
+   * 当前自定义标记：缩略图里也要把标记画成**它自己的字形**，
    * 而自定义标记的字形名只有目录知道（与画布走同一份 `resolveMarkerStyle`）。
+   * 按地图解析，同 `getCustomTerrains`。
    */
-  getCustomMarkers?: () => readonly CustomMarker[]
+  getCustomMarkers?: (document: MapDocument | null) => readonly CustomMarker[]
   /**
    * 数据层（温度 / 深度）的样式（色带 / 不透明度 / 显示方式）与图层开关。
    *
    * 缩略图与画布、导出必须是"当前设置 + 当前地图"的同一份合成结果：
    * 关掉温度层后缩略图里也不该有它，改了色带也不该还是旧色（传函数 = 每次现读）。
+   * 参数是**这份视图自己那张地图的路径**（W4-2 起色带与图层按地图分份）——
+   * Base 视图没有 canvas，"这是哪张图"只有它自己知道。
    */
-  getOverlayStyles?: () => OverlayStyles
-  getLayers?: () => LayerVisibility
+  getOverlayStyles?: (mapPath: string | null) => OverlayStyles
+  getLayers?: (mapPath: string | null) => LayerVisibility
   /**
-   * 路径类型目录（来自插件设置）。
+   * 路径类型目录。
    *
    * Base 行里"（未命名河流）"这类文案必须与画布、图例用**同一套**名字 ——
    * 表里写 `custom:highway` 而画布上叫"官道"，用户会以为是两条不同的东西。
+   * 按地图解析（参数是这份视图加载的文档），同 `getCustomTerrains`。
    */
-  getPathTypes?: () => readonly PathTypeEntry[]
+  getPathTypes?: (document: MapDocument | null) => readonly PathTypeEntry[]
   /**
-   * 区域类型目录（来自插件设置）。
+   * 区域类型目录。
    *
    * 与 `getPathTypes` 同理：Base 行里区域的类型名必须与画布、图例说同一句话。
    * 缺省时不带类型名（旧区域本来也没有类型字段）。
    */
-  getRegionTypes?: () => readonly RegionTypeEntry[]
+  getRegionTypes?: (document: MapDocument | null) => readonly RegionTypeEntry[]
   /** 诊断与测试用：最近一次渲染的统计 */
   onRendered?: (info: { rows: number; notes: number; mapEntries: number; reason?: string }) => void
 }
@@ -218,9 +226,9 @@ export class MapBasesView extends BasesView {
         mapPath: this.mapPath,
         notes: this.noteInputs(),
         // 路径类型的显示名跟着**目录**走（自定义类型显示用户起的名字，未知 ID 显示「未知（…）」）
-        resolvePathTypeLabel: (type) => pathTypeLabelOf(type, this.deps.getPathTypes?.() ?? []),
+        resolvePathTypeLabel: (type) => pathTypeLabelOf(type, this.deps.getPathTypes?.(this.document) ?? []),
         // 区域同理；没有类型字段的旧区域由 mapRows 退回通用名「区域」
-        resolveRegionTypeLabel: (type) => regionTypeLabelOf(type, this.deps.getRegionTypes?.() ?? []),
+        resolveRegionTypeLabel: (type) => regionTypeLabelOf(type, this.deps.getRegionTypes?.(this.document) ?? []),
       })
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error)
@@ -259,13 +267,13 @@ export class MapBasesView extends BasesView {
         width,
         height,
         padding: 12,
-        customTerrains: this.deps.getCustomTerrains?.() ?? [],
+        customTerrains: this.deps.getCustomTerrains?.(this.document) ?? [],
         // 缩略图与导出**共用同一份实现**：标记按字形画、区域带自己的不透明度与边框
-        customMarkers: this.deps.getCustomMarkers?.() ?? [],
+        customMarkers: this.deps.getCustomMarkers?.(this.document) ?? [],
         iconSvgFor: lucideIconFragment,
-        // 数据层同理：样式与开关都现读（关掉的层不会出现在缩略图里）
-        ...(this.deps.getOverlayStyles ? { overlayStyles: this.deps.getOverlayStyles() } : {}),
-        ...(this.deps.getLayers ? { layers: this.deps.getLayers() } : {}),
+        // 数据层同理：样式与开关都现读、且按**这张图**解析（关掉的层不会出现在缩略图里）
+        ...(this.deps.getOverlayStyles ? { overlayStyles: this.deps.getOverlayStyles(this.mapPath) } : {}),
+        ...(this.deps.getLayers ? { layers: this.deps.getLayers(this.mapPath) } : {}),
       })
     }
     redraw()

@@ -5,14 +5,14 @@
  * 1. **缺数据不画**（`null` 角点不许长出等值线、NaN 样本不许变成一个色块）；
  * 2. **插值真的在按距离加权**（不是最近邻，也不是平均值）；
  * 3. **等值线要接成折线**（否则一个场会切出几百条两点的短线）；
- * 4. **越界值走纯色**（-60 ℃ 用纯蓝底，不是被夹到色带端点）。
+ * 4. **越界值照样上色**（-60 ℃ 从端色往外渐变，不是被夹到色带端点、也不是透明）。
  */
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import type { GridSpec } from '../src/core/hex.ts'
-import { DEFAULT_OVER, DEFAULT_UNDER, defaultTemperatureRamp, textColorOf } from '../src/render/colorRamp.ts'
+import { DEFAULT_OVER, DEFAULT_UNDER, colorForValue, defaultTemperatureRamp, textColorOf } from '../src/render/colorRamp.ts'
 import { OVERLAY_LABEL_SCALE } from '../src/render/overlayFields.ts'
 import {
   CONTOUR_LABEL_SCALE,
@@ -159,7 +159,7 @@ test('contourLevels：给了间距就落在整齐的数值上；没给就用色�
   assert.deepEqual(contourLevels(RAMP, 0), [-30, 0, 15, 30, 45], '间距 <= 0 视为没给')
 })
 
-test('buildFieldPlan（hex）：越界值走纯色、透明度被夹取、每格是 6 个顶点的多边形', () => {
+test('buildFieldPlan（hex）：越界值走越界渐变、透明度被夹取、每格是 6 个顶点的多边形', () => {
   const plan = buildFieldPlan({
     samples: [
       { q: 0, r: 0, value: -100 },
@@ -177,8 +177,11 @@ test('buildFieldPlan（hex）：越界值走纯色、透明度被夹取、每格
   assert.equal(cold.kind, 'polygon')
   assert.equal(hot.kind, 'polygon')
   if (cold.kind === 'polygon' && hot.kind === 'polygon') {
-    assert.equal(cold.color, DEFAULT_UNDER.color, '-100 ℃ 应走"低于下端"的纯蓝')
-    assert.equal(hot.color, DEFAULT_OVER.color, '100 ℃ 应走"高于上端"的纯红')
+    // -100 ℃ 越出下端 70 ℃（跨度 75 ℃）⇒ 已经从端蓝走向"极白"；关键是**没被夹到端点色**
+    assert.notEqual(cold.color, DEFAULT_UNDER.color, '越界值不该被夹到色带端点')
+    assert.equal(colorForValue(-100, RAMP)?.outOfRange, 'under', '越界方向要标出来')
+    assert.notEqual(hot.color, DEFAULT_OVER.color)
+    assert.equal(colorForValue(100, RAMP)?.outOfRange, 'over')
     assert.equal(cold.opacity, 1, '透明度必须夹在 0–1')
     assert.equal(cold.points.length, 6, '六边形必须是 6 个顶点')
     assert.notDeepEqual(cold.points, hot.points, '不同格的多边形位置不该相同')

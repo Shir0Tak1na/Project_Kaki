@@ -14,8 +14,46 @@ import type { GeometryMode } from '../core/hexEdges.ts'
 import { normalizeElevationCalibration, type ElevationCalibration } from '../render/elevationUnits.ts'
 import { normalizeDataDefaults, type DataDefaults } from '../render/dataDefaults.ts'
 
+
 /** 当前插件支持的文档版本 */
-export const MAP_DOCUMENT_VERSION = 1
+export const MAP_DOCUMENT_VERSION = 2
+
+/**
+ * 地图文件里的**定义集**（v2 新增）—— "这张地图用到的自定义定义 + 对内置参数的覆盖"。
+ *
+ * ## 为什么进地图文件（方案 B，用户 m01845 裁定）
+ *
+ * 把一张用了自定义地形的图分享给别人，对方打开时不该出现"未定义类型"。
+ * 定义是**这个世界的事实**，不是使用者的偏好 —— 判据见 `UI-REORG-PLAN.md` §1 第 9 条。
+ *
+ * ## 什么进、什么不进
+ *
+ * - **内置定义仍留在代码里**（`TERRAIN_STYLES` / `MARKER_ICONS` / `BUILTIN_REGION_TYPES`…），
+ *   这里只放"自定义的" + "参数被用户改过的内置项"；
+ * - 地形 / 标记 / 生物群系三类的目录里**本来就只有自定义项**，所以直接整表带走；
+ * - 路径类型 / 区域类型的目录里**含内置项**（它们的参数可由用户改），所以整表带走 ——
+ *   这样"这张图用的是哪套线宽 / 填充色"在文件里是完整的，不依赖打开者本机的设置；
+ * - **不重复存颜色覆盖表**：`pathColors` / `regionColors` 是上一代的只读兼容字段，
+ *   颜色本事就住在 `pathTypes[].params.color` / `regionTypes[].params.*` 里
+ *   （两处都存就是"一个设置两个来源"，`PLAN.md` §4 明确禁止）。
+ *
+ * ## 与解析层的关系
+ *
+ * 这里只做**结构**约束（每类是一个数组）；条目级校验交给 `data/mapDefinitions.ts`
+ * —— 那一层才 import 各目录的 `normalize*`，避免 `data/` 与 `render/` 相互 import 成环。
+ */
+export interface MapDefinitions {
+  // 五类都写成 `readonly unknown[]`：**文件里的形状是"待校验的数据"，不是已规范化的目录**。
+  // 写成 `CustomTerrain[]` 会逼着解析层在还没有校验时就假装它是合法的（那正是"用类型掩盖风险"）。
+  // 真正带类型的那一份在 `data/mapDefinitions.ts` 的 `MapDefinitionSet`。
+  terrains?: readonly unknown[]
+  markers?: readonly unknown[]
+  biomes?: readonly unknown[]
+  pathTypes?: readonly unknown[]
+  regionTypes?: readonly unknown[]
+  /** 本插件未知的定义分类，原样保留（与顶层 `extra` 同一条口径，给未来的数据类型留窗口） */
+  extra?: Record<string, unknown>
+}
 
 export type TerrainType =
   | 'mountain'
@@ -306,6 +344,14 @@ export interface MapDocument {
   markers: MapMarker[]
   labels: MapLabel[]
   settings?: { colorPalette?: Record<string, string> }
+  /**
+   * 这张地图的**定义集**（v2 新增，见 `MapDefinitions`）。
+   *
+   * 缺省 = **v1 老文件**：读的时候用"当时库级设置那一份"做内存里的快照，
+   * **不写回文件**；只有用户真的改了定义才写回并升到 v2
+   * （避免"打开一张老图就批量重写文件"，见 `UI-REORG-PLAN.md` §5.1）。
+   */
+  definitions?: MapDefinitions
   /** 本插件未知的顶层字段，原样保留以便前向兼容 */
   extra?: Record<string, unknown>
 }
@@ -360,6 +406,55 @@ function readPointList(value: unknown): Array<[number, number]> | null {
   return out.length > 0 ? out : null
 }
 
+/** `definitions` 里五个已知分类（顺序 = 写盘顺序，固定以便 Git diff 稳定） */
+const DEFINITION_LIST_KEYS = ['terrains', 'markers', 'biomes', 'pathTypes', 'regionTypes'] as const
+
+/**
+ * 读定义集：**只做结构约束**（每类是一个数组、项是对象）。
+ *
+ * 条目级校验交给 `data/mapDefinitions.ts` 的 `normalize*`（那一层才 import 各目录，
+ * 见 `MapDefinitions` 的说明）—— 那里沿用既有口径："整份结构性错误拒绝加载，
+ * 单条目错误跳过并告警"。
+ *
+ * 坏形状（不是对象）给一条 warning 并按"没有这一节"处理：猜一份定义只会把用户的图改样，
+ * 宁可退回内置默认 —— 与 `elevation` 的处理同一口径。
+ */
+function readDefinitions(value: unknown, issues: MapDocumentIssue[]): MapDefinitions | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    issues.push({ level: 'warning', path: 'definitions', message: 'definitions 不是对象，已按"没有这一节"处理' })
+    return undefined
+  }
+  const lists: Record<string, unknown[]> = {}
+  for (const key of DEFINITION_LIST_KEYS) {
+    const list = value[key]
+    if (list === undefined) continue
+    if (!Array.isArray(list)) {
+      issues.push({ level: 'warning', path: `definitions.${key}`, message: `definitions.${key} 不是数组，已忽略` })
+      continue
+    }
+    // 非对象项在这里先拦一道（`normalize*` 那一层还会再兜一次）
+    const entries = list.filter((item) => isRecord(item))
+    if (entries.length !== list.length) {
+      issues.push({
+        level: 'warning',
+        path: `definitions.${key}`,
+        message: `definitions.${key} 里有 ${list.length - entries.length} 条不是对象，已跳过`,
+      })
+    }
+    lists[key] = entries
+  }
+  const extra: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if ((DEFINITION_LIST_KEYS as readonly string[]).includes(key)) continue
+    extra[key] = item
+  }
+  // 项已按结构收好，条目级类型由 `mapDefinitions.ts` 的 `normalize*` 保证
+  const out = lists as unknown as MapDefinitions
+  if (Object.keys(extra).length > 0) out.extra = extra
+  return out
+}
+
 const KNOWN_TOP_LEVEL_KEYS = new Set([
   'version',
   'grid',
@@ -371,6 +466,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   'markers',
   'labels',
   'settings',
+  'definitions',
 ])
 
 // ---------------------------------------------------------------- 解析
@@ -857,6 +953,11 @@ export function parseMapDocument(input: unknown): ParseResult {
     markers: parseArrayField(input.markers, 'markers', issues, parseMarker),
     labels: parseArrayField(input.labels, 'labels', issues, parseLabel),
   }
+  // 定义集（v2）：**只有文件里真的有这一段才带上** —— 与海拔标定同一条口径，
+  // v1 老图因此逐字节不变（迁移是"读的时候用库级设置做内存快照"，见 `MapDefinitions`）。
+  const definitions = readDefinitions(input.definitions, issues)
+  if (definitions !== undefined) document.definitions = definitions
+
   // 海拔标定：**只有文件里真的有这一段才带上**（老地图因此逐字节不变）。
   // 坏形状（不是对象）给一条 warning 并按未标定处理 —— 标定是"读法"的锚，猜一个只会更糟。
   if (input.elevation !== undefined) {
@@ -905,6 +1006,32 @@ function sortedTerrainEntries(terrain: Record<string, TerrainCell>): Array<[stri
   })
   entries.sort((a, b) => (a.r === b.r ? a.q - b.q : a.r - b.r))
   return entries.map((entry) => [entry.key, entry.cell])
+}
+
+/**
+ * 定义集：**紧凑一行**、键序固定（五个分类按 `DEFINITION_LIST_KEYS`，未知分类按字典序跟在后面）。
+ *
+ * 为什么不像地形那样"一项一行"：定义集只有几条到几十条，一行足够读；
+ * 而且它整块要么没有、要么一次换掉，逐行 diff 的价值不如"顺序绝对稳定"。
+ *
+ * **五类都写**（空的也写 `[]`）：见 `mapDefinitions.definitionsBlockOf` —— 缺一个键
+ * 就会被读取侧理解成"沿用库级快照"，那样"删掉最后一个自定义地形"就删不掉。
+ */
+function serializeDefinitions(definitions: MapDefinitions): string {
+  const out: Record<string, unknown> = {}
+  for (const key of DEFINITION_LIST_KEYS) {
+    const list = definitions[key]
+    // 已归一化的定义集里五类都在；`undefined` 只可能来自"别的版本写下的手写块"，
+    // 那种情况按"这一类没有"写一个空表，形状才稳定
+    out[key] = Array.isArray(list) ? list : []
+  }
+  if (definitions.extra) {
+    for (const key of Object.keys(definitions.extra).sort()) {
+      if (key in out) continue
+      out[key] = definitions.extra[key]
+    }
+  }
+  return JSON.stringify(out)
 }
 
 /** 数组：每项一行（便于 diff），项内紧凑 */
@@ -1016,6 +1143,12 @@ export function serializeMapDocument(document: MapDocument, indent = 2): string 
     for (const key of sorted) ordered[key] = document.dataDefaults[key]!
     push('dataDefaults', JSON.stringify(ordered))
   }
+  // 定义集（v2）：位置紧跟"这张地图级别的事实"那几段之后、内容之前。
+  // v1 老图没有这一段 ⇒ 一个字节都不多写（迁移只在用户真的改了定义时才升版，见 §5.1）。
+  if (document.definitions) {
+    const block = serializeDefinitions(document.definitions)
+    if (block !== '{}') push('definitions', block)
+  }
   push('terrain', serializeTerrain(document.terrain, indent))
   push('paths', serializeArray(document.paths, indent))
   push('regions', serializeArray(document.regions, indent))
@@ -1030,8 +1163,15 @@ export function createEmptyMapDocument(options: {
   orientation?: GridSpec['orientation']
   size?: number
   origin?: [number, number]
+  /**
+   * 新建时写进文件的**定义集**（v2；由调用方从库级设置快照出来，见 `data/mapDefinitions.ts`）。
+   *
+   * 为什么新建就写而老图不写：新文件本来就要从头写一遍，把定义一起装进去才是方案 B
+   * （"分享即完整"）；而**老图**一个字节都不该被我们动 —— 那条路走的是"读时快照 + 改定义才回写"。
+   */
+  definitions?: MapDefinitions
 }): MapDocument {
-  return {
+  const document: MapDocument = {
     version: MAP_DOCUMENT_VERSION,
     grid: {
       kind: 'hex',
@@ -1045,6 +1185,8 @@ export function createEmptyMapDocument(options: {
     markers: [],
     labels: [],
   }
+  if (options.definitions) document.definitions = options.definitions
+  return document
 }
 
 /** 粗略统计，供「地图状态」命令与诊断报告使用 */

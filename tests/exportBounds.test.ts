@@ -15,10 +15,13 @@ import {
   MIN_EXPORT_SPAN,
   boundsSize,
   exportFileNameFor,
+  exportTargetProblem,
+  joinExportTarget,
   listExportRegions,
   padBounds,
   resolveExportBounds,
   sanitizeFileSegment,
+  stripExportExtension,
 } from '../src/base/exportBounds.ts'
 import { buildMapExportSvg } from '../src/base/mapPreview.ts'
 import { axialToWorld } from '../src/core/hex.ts'
@@ -227,6 +230,42 @@ test('文件名：全部内容不加后缀（既有文件名不变），视口/�
   // 未命名区域退回一个通用词，而不是拼出以 `-` 结尾的名字
   assert.equal(exportFileNameFor('Maps/Los', { kind: 'region', regionId: 'r2' }, document), 'Maps/Los-未命名区域 2')
   assert.equal(exportFileNameFor('Maps/Los', { kind: 'region', regionId: 'gone' }, document), 'Maps/Los-区域')
+})
+
+/* ------------------------------------------- 落点（保存位置 + 文件名）
+
+   用户的要求是「导出的时候应该有个文件资源管理器一样的浏览功能」——
+   以前路径是从地图文件推导出来的，既看不到也改不了。这块纯函数就是那个功能的守门：
+   拼接（`joinExportTarget`）、校验（`exportTargetProblem`）、扩展名归位（`stripExportExtension`）。 */
+
+test('落点拼接：文件夹为空 = 库根；重复斜杠与反斜杠都收敛掉', () => {
+  assert.equal(joinExportTarget('', 'World'), 'World', '库根不带前导斜杠')
+  assert.equal(joinExportTarget('Maps', 'World'), 'Maps/World')
+  assert.equal(joinExportTarget('/Maps/', 'World'), 'Maps/World')
+  assert.equal(joinExportTarget('Maps//子目录', 'World'), 'Maps/子目录/World')
+  assert.equal(joinExportTarget('Maps\\Win', 'World'), 'Maps/Win/World', 'Windows 上复制来的路径也要能用')
+  assert.equal(joinExportTarget('  Maps  ', '  World  '), 'Maps/World', '两端的空白不算名字的一部分')
+})
+
+test('落点校验：空文件名 / 斜杠 / 非法字符各给一句人话；合法名一律放行', () => {
+  assert.equal(exportTargetProblem('Maps', 'World'), null)
+  assert.equal(exportTargetProblem('', 'World'), null, '库根是合法的保存位置')
+  assert.match(String(exportTargetProblem('', '   ')), /文件名/)
+  assert.match(String(exportTargetProblem('', 'a/b')), /斜杠/)
+  assert.match(String(exportTargetProblem('Maps', 'a:b')), /不能有这些字符/)
+  assert.match(String(exportTargetProblem('Maps:x', 'World')), /保存位置/, '非法字符在文件夹里也要报')
+  assert.match(String(exportTargetProblem('..', 'World')), /保存位置/, '不能靠 .. 跳出库')
+  assert.equal(exportTargetProblem('', '..'), '文件名不能是「.」或「..」。')
+  // 中文、空格、点号都不是非法字符 —— 别把正常名字拒了
+  assert.equal(exportTargetProblem('导出/子目录', '世界地图 2.0'), null)
+})
+
+test('扩展名剥离：只去掉 .svg / .png；点号本身是名字的一部分时不动', () => {
+  assert.equal(stripExportExtension('World.svg'), 'World')
+  assert.equal(stripExportExtension('World.PNG'), 'World')
+  assert.equal(stripExportExtension('World'), 'World')
+  assert.equal(stripExportExtension('  世界地图  '), '世界地图')
+  assert.equal(stripExportExtension('版本2.0'), '版本2.0', '别的扩展名不动（点号可能是名字的一部分）')
 })
 
 test('文件名清洗：路径分隔符与非法字符不会造出子目录或非法名', () => {

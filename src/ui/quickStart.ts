@@ -53,8 +53,8 @@ export const QUICK_START_SETTINGS: readonly QuickStartItem[] = [
     commandId: 'toggle-edit-mode',
   },
   {
-    title: '改**单个**对象 → 去侧栏',
-    hint: '在画布上点一个对象，右侧面板会给出它的类型 / 位置 / 外观。下面这些设置只管**新画出来的**对象。',
+    title: '改单个对象 → 去侧栏',
+    hint: '在画布上点一个对象，右侧面板会给出它的类型 / 位置 / 外观。下面这些设置只管新画出来的对象。',
   },
   {
     title: '新增 / 删除 / 改 ID 定义 → 去「地图定义…」',

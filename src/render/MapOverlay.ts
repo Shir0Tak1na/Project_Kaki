@@ -206,6 +206,13 @@ export interface MapOverlayOptions {
    */
   getSelection?: () => MapSelection | null
   /**
+   * 当前选中的**全部对象**（同类多选，§2.6；每帧现读）。
+   *
+   * 缺省时退回 `getSelection` 那一个 —— 长度 ≤ 1 时两者完全一样，
+   * 所以没有这条注入的老宿主（测试桩）行为不变。
+   */
+  getObjectSelection?: () => readonly MapSelection[]
+  /**
    * 当前**格选择**（多格；每帧现读）。
    *
    * 与 `getSelection` 分开：那是"侧栏检查器在编辑哪一个对象"（单选，走 `SELECTION_HIGHLIGHTS` 那张表），
@@ -1189,28 +1196,35 @@ export class MapOverlay {
     document_: MapDocument,
     targetRadius: number,
   ): { kind: SelectionKind; id: string } | null {
-    const selection = this.options.getSelection?.() ?? null
-    if (selection === null) return null
+    // 多个同类对象逐个画（§2.6 的"同类多选"）；只看第一个的话，选了三个标记却只亮一个
+    const injected = this.options.getObjectSelection?.()
+    const single = this.options.getSelection?.() ?? null
+    const list = injected !== undefined ? injected : single === null ? [] : [single]
+    if (list.length === 0) return null
 
-    // 对象自身的线宽：路径/区域的高亮要比它略粗，否则细线上的高亮看不见
-    const objectWidth =
-      selection.kind === 'path'
-        ? (plan.paths.find((item) => item.id === selection.id)?.width ?? 0)
-        : selection.kind === 'region'
-          ? (plan.regions.find((item) => item.id === selection.id)?.borderWidth ?? 0)
-          : 0
+    let last: { kind: SelectionKind; id: string } | null = null
+    for (const selection of list) {
+      // 对象自身的线宽：路径/区域的高亮要比它略粗，否则细线上的高亮看不见
+      const objectWidth =
+        selection.kind === 'path'
+          ? (plan.paths.find((item) => item.id === selection.id)?.width ?? 0)
+          : selection.kind === 'region'
+            ? (plan.regions.find((item) => item.id === selection.id)?.borderWidth ?? 0)
+            : 0
 
-    ctx.save()
-    const drawn = SELECTION_HIGHLIGHTS[selection.kind]({
-      ctx,
-      plan,
-      document: document_,
-      id: selection.id,
-      targetRadius,
-      objectWidth,
-    })
-    ctx.restore()
-    return drawn ? { kind: selection.kind, id: selection.id } : null
+      ctx.save()
+      const drawn = SELECTION_HIGHLIGHTS[selection.kind]({
+        ctx,
+        plan,
+        document: document_,
+        id: selection.id,
+        targetRadius,
+        objectWidth,
+      })
+      ctx.restore()
+      if (drawn) last = { kind: selection.kind, id: selection.id }
+    }
+    return last
   }
 
   /**

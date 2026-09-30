@@ -51,7 +51,7 @@ export class ElevationCalibrationModal extends Modal {
       cls: 'fc-settings-note',
       text:
         '这两个数决定"相对值 0–1"锚在哪：填最深深度与最高高度（都是正数，单位米）。' +
-        '它们写进**地图文件**（这个世界的事实），而"用米 / 千米 / 相对值来看"是你的显示偏好，在设置页的「数据层」里。',
+        '它们写进地图文件（这个世界的事实），而"用米 / 千米 / 相对值来看"是你的显示偏好，在设置页的「数据层」里。',
     })
 
     new Setting(contentEl)

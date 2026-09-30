@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 设置的**数据模型**：接口、出厂默认、以及"把任何输入收敛成一份可用设置"的纯函数。
  *
  * 为什么它必须和设置界面分开（`SettingsTab.ts`）：
@@ -22,7 +22,7 @@ import { normalizePathTypeEntries, pathColorsFromEntries } from '../render/pathT
 import type { RegionTypeEntry } from '../render/regionTypeCatalog.ts'
 import { normalizeRegionTypeEntries, regionColorsFromEntries } from '../render/regionTypeCatalog.ts'
 import type { LayerVisibility } from '../render/layerVisibility.ts'
-import { DEFAULT_LAYER_VISIBILITY, layerVisibilityFromLegacy } from '../render/layerVisibility.ts'
+import { DEFAULT_LAYER_VISIBILITY, layerVisibilityFromLegacy, normalizeLayerVisibility } from '../render/layerVisibility.ts'
 import {
   defaultOverlayStyles,
   normalizeOverlayStyles,
@@ -30,6 +30,19 @@ import {
 } from '../render/overlayFields.ts'
 import type { PathColorMap, StylePalette } from '../render/stylePalette.ts'
 import { normalizeFontFamily } from '../render/stylePalette.ts'
+
+/**
+ * **一张地图自己的**视图偏好（W4-2「按地图分键」）。
+ *
+ * 三个字段都可选：**缺 = 这张图没单独调过，用库级那一份**（`CartographerSettings` 里那三个同名字段，
+ * 语义是"默认值 / 新建地图的初值"）。按字段分别回落，而不是整块替换 ——
+ * 于是"只调过不透明度"的那张图也只在那一处留一条覆盖，别处继续跟着模板走。
+ */
+export interface MapViewSettings {
+  overlays?: OverlayStyles
+  layers?: LayerVisibility
+  showLegend?: boolean
+}
 
 export interface CartographerSettings {
   /** 名称字号倍率（1 = 默认）。范围 0.5–3.0，步长 0.1。 */
@@ -102,24 +115,43 @@ export interface CartographerSettings {
    */
   customBiomes: CustomBiome[]
   /**
-   * 图层可见性（地形 / 网格 / 区域 / 路径 / 标记 / 名称）。
+   * 图层可见性（地形 / 网格 / 区域 / 路径 / 标记 / 名称）—— **库级那一份**。
    *
    * 为什么放在设置里而不是写进地图文件：图层是"我现在想看到什么"，
    * 地图文件描述的是"世界上有什么"。把显示偏好写进数据，
    * 等于换个看法就改了用户的地图，还会污染 Git diff。
+   *
+   * ⚠️ W4-2 起它是**"默认值 / 新建地图的初值"**，不再是一张图的实况：某张图单独调过之后，
+   * 它那一份住在 `mapViews[那张图的路径].layers`；读的时候"按地图优先、缺则回落到这里"。
+   * 写入侧两处一起更新（镜像），于是"新建一张图会沿用你上次调好的样子"。
    */
   layers: LayerVisibility
   /**
-   * 数据层（温度 / 深度…）的渲染参数：色带、越界色、不透明度、是否画数值。
+   * 数据层（温度 / 深度…）的渲染参数：色带、越界色、不透明度、是否画数值 —— **库级那一份**。
    *
    * 与 `layers` 的分工是**刻意**的：`layers` 管"看不看"，这里管"怎么看"。
    * 两边都只存一份（§5.12）—— 所以这里**没有** `visible` 字段，
    * 可见性一律去 `layers` 里读（设计草案 §4.6 曾把 `visible` 写进这一节，那是两处真相，已改）。
    * 值本身属于地图文件，**不在这里**。
+   *
+   * ⚠️ 与 `layers` 同一条（W4-2）：它是"默认值 / 初值"，某张图的实况在 `mapViews[…].overlays`。
    */
   overlays: OverlayStyles
-  /** 是否显示画布上的图例（默认关：图例是"要看的时候才看"的东西） */
+  /** 是否显示画布上的图例（默认关）—— **库级那一份**（W4-2 起同样是"默认值 / 初值"） */
   showLegend: boolean
+  /**
+   * **按地图路径分份**的视图偏好（W4-2）。
+   *
+   * 键 = **库内相对路径**（`Maps/World.map.md`），与 `store` / frontmatter 用的是同一套标识：
+   * - 不用 canvas 路径：同一张图可以被多个 Canvas 引用，按 canvas 分份会给**同一张图两份设置**
+   *   （与"按地图分份"自相矛盾）；
+   * - 不用 frontmatter 的 `name`：可能重名，而且改名会把设置丢掉。
+   *
+   * 老配置迁移**不需要做任何事**：老 `data.json` 里只有库级那三个字段 ⇒ 这张表是空的 ⇒
+   * 每张图都用库级那一份 ⇒ 迁移前后视觉完全一致。**刻意不给现有地图各复制一条记录**：
+   * 用户没改过的东西不该被写下来，也不该让 `data.json` 无端膨胀。
+   */
+  mapViews: Record<string, MapViewSettings>
   /**
    * 是否隐藏**设置页顶部**的「快速上手」清单。
    *
@@ -131,6 +163,14 @@ export interface CartographerSettings {
   hideQuickStartSettings: boolean
   /** 是否隐藏**侧栏面板顶部**的「快速上手」清单（同上，两份互不影响） */
   hideQuickStartPanel: boolean
+  /**
+   * 上次导出地图时用的库内文件夹（`''` = 库根）—— 导出的**默认落点**。
+   *
+   * 为什么留在这里而不是写进地图文件：它不是"这个世界的事实"，只是"我上次把图放哪了"。
+   * 写进地图文件的话，把图分享给别人会连带改掉对方的导出位置（判据见 `UI-REORG-PLAN.md` §5 第 9 条）。
+   * 没记录过（`''`）时，默认落点仍是**地图文件所在目录** —— 与加这个字段之前的行为一致。
+   */
+  exportFolder: string
 }
 
 /** 出厂路径类型目录（内置 4 种、参数即出厂值） */
@@ -154,8 +194,12 @@ export const DEFAULT_SETTINGS: CartographerSettings = {
   // 出厂色带 / 透明度：每次新对象，避免与 DEFAULT_SETTINGS 共用同一份引用
   overlays: defaultOverlayStyles(),
   showLegend: false,
+  // 按地图分份的视图偏好：出厂是空的（每张图都用上面那三份"模板"）
+  mapViews: {},
   hideQuickStartSettings: false,
   hideQuickStartPanel: false,
+  // 空串 = 没记录过：导出默认还落在地图文件所在目录（与加这个字段之前一致）
+  exportFolder: '',
 }
 
 export const LABEL_SCALE_MIN = 0.5
@@ -176,6 +220,26 @@ export function normalizeLabelScale(value: unknown): number {
     typeof value === 'number' ? value : typeof value === 'string' && value.trim().length > 0 ? Number(value) : Number.NaN
   if (!Number.isFinite(numeric)) return DEFAULT_SETTINGS.labelScale
   return Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, Math.round(numeric * 10) / 10))
+}
+
+/**
+ * 把任意输入收敛成"可用的库内文件夹路径"。
+ *
+ * 只做清洗、不做白名单：文件夹**不要求存在**（用户可以先写一个新目录名，
+ * 导出时由 Obsidian 自己建 —— 与"能填库内路径"的既有口径一致）。
+ * 反斜杠一律换成 `/`（Windows 上复制来的路径），空段、`.`、`..` 段丢掉 ——
+ * 否则 `A/../B` 这种路径会绕过"库内"这个前提。
+ * 幂等：再跑一次结果相同（`tests/settings.test.ts` 钉住）。
+ */
+export function normalizeExportFolder(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value
+    .trim()
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+    .join('/')
 }
 
 /**
@@ -223,10 +287,15 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     // 数据层样式：缺项 / 坏值按出厂补齐（色带交给 colorRamp 自己的规范化）
     overlays: normalizeOverlayStyles(source.overlays),
     showLegend: source.showLegend === true,
+    // 按地图分份的视图偏好（W4-2）：老配置里没有这一项 ⇒ 空表 ⇒ 每张图都用上面那三份模板
+    // （于是"迁移前后视觉完全一致"，而且不需要给现有地图各复制一条记录）
+    mapViews: normalizeMapViews(source.mapViews),
     // 引导可见性：与 showLegend / developerMode 同一口径 —— 只有明确写着 true 才算"关掉了"。
     // 反过来的话（垃圾值当"已隐藏"）会让用户与引导失联，而引导正是他唯一能找到入口的地方。
     hideQuickStartSettings: source.hideQuickStartSettings === true,
     hideQuickStartPanel: source.hideQuickStartPanel === true,
+    // 导出落点：清洗成库内相对路径；垃圾值收敛成 `''`（= 没记录过，回落到地图所在目录）
+    exportFolder: normalizeExportFolder(source.exportFolder),
   }
 }
 
@@ -235,6 +304,38 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined
+}
+
+/**
+ * 把任意输入收敛成 `mapViews`：键按"库内相对路径"清洗，值是三个可选字段。
+ *
+ * 三条刻意的选择：
+ * 1. **键要去重与清洗**：`A//B`、`A\B`、` A/B ` 都应归到同一个键，否则同一张图会被拆成两份设置
+ *    （与"值本身"那条纪律同源：**同一件事只能有一个键**）；
+ * 2. **值不是对象就整条丢掉**（不是"填成默认值"）：填默认值会让这条**盖住**库级模板 ——
+ *    数据被手工改坏时，用户宁可按模板显示，也不要莫名其妙看到"全部图层都开着"；
+ * 3. **空条目（三个字段一个都没有）不留键**：与"空表不留键"同一条口径，别让 data.json 长垃圾。
+ *
+ * 幂等：再跑一次结果相同（`tests/settings.test.ts` 钉住）。
+ */
+export function normalizeMapViews(raw: unknown): Record<string, MapViewSettings> {
+  const source = asRecord(raw)
+  if (source === undefined) return {}
+  const out: Record<string, MapViewSettings> = {}
+  for (const [rawKey, value] of Object.entries(source)) {
+    const key = normalizeExportFolder(rawKey)
+    if (key.length === 0) continue
+    const entry = asRecord(value)
+    if (entry === undefined) continue
+    const item: MapViewSettings = {}
+    const overlays = asRecord(entry.overlays)
+    if (overlays !== undefined) item.overlays = normalizeOverlayStyles(overlays)
+    const layers = asRecord(entry.layers)
+    if (layers !== undefined) item.layers = normalizeLayerVisibility(layers)
+    if (typeof entry.showLegend === 'boolean') item.showLegend = entry.showLegend
+    if (Object.keys(item).length > 0) out[key] = item
+  }
+  return out
 }
 
 /** 设置 → 绘制层消费的调色板 */

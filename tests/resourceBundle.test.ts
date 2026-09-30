@@ -282,24 +282,60 @@ test('区域类型一起往返：五个参数一个都不能丢（含"边框跟�
   assert.equal(march.params.borderWidth, 5)
 })
 
-test('内置 6 种区域类型不进文件（带进去只会得到一串"同 ID 已存在"）', () => {
+/* ------------------------------------------- W4-3：内置项也进文件 + 逐条「覆盖」 */
+
+/** 一条内置路径类型（河流，出厂参数）—— 下面几条测试反复用到 */
+const BUILTIN_RIVER: PathTypeEntry = {
+  id: 'river',
+  label: '河流',
+  kind: 'path',
+  params: { color: '#4f9dd9', width: 8, dash: [], taper: true, smooth: false, cap: 'round', join: 'round' },
+}
+
+test('内置区域类型也进文件（W4-3：要带走调好的参数，就得连内置的一起走）', () => {
+  // W4-1 之后参数是**每张地图各自一份**，而用户调得最勤的恰恰是内置那 6 种的填充与边框。
+  // 把它们排除在文件之外，跨地图搬运就只剩一堆通常为空的自定义类型 —— 等于这个功能没用。
   const withBuiltin = [...defaultRegionTypeEntries(), ...SAMPLE_REGION_TYPES]
   const bundle = buildResourceBundle({ terrains: [], regionTypes: withBuiltin })
-  assert.deepEqual(bundle.regionTypes.map((entry) => entry.id), ['custom:march', 'custom:oasis'])
+  assert.deepEqual(
+    bundle.regionTypes.map((entry) => entry.id),
+    [...defaultRegionTypeEntries().map((entry) => entry.id), 'custom:march', 'custom:oasis'],
+  )
+
+  // 代价：内置 ID 在每张图里都存在 ⇒ 导入时每一条都是同名冲突，**默认跳过**（只增不删的老口径）
+  const builtin = defaultRegionTypeEntries()[0]!
+  const incoming: RegionTypeEntry[] = [{ ...builtin, params: { ...builtin.params, opacity: 0.9 } }]
+  const kept = mergeRegionTypes(defaultRegionTypeEntries(), incoming)
+  assert.deepEqual(kept.added, [])
+  assert.deepEqual(kept.replaced, [])
+  assert.match(kept.skipped[0]!.reason, /内置类型/)
+  assert.match(kept.skipped[0]!.reason, /覆盖/, '"怎么才能换成文件里的"必须写在原因里')
+  assert.notEqual(kept.regionTypes.find((entry) => entry.id === builtin.id)!.params.opacity, 0.9)
+
+  // 勾了「覆盖」才真的换掉 —— 覆盖是**在原位**换：顺序（也就是用户的列表次序）不动
+  const replaced = mergeRegionTypes(defaultRegionTypeEntries(), incoming, { overwrite: () => true })
+  assert.deepEqual(replaced.replaced, [builtin.id])
+  assert.equal(replaced.regionTypes.find((entry) => entry.id === builtin.id)!.params.opacity, 0.9)
+  assert.deepEqual(
+    replaced.regionTypes.map((entry) => entry.id),
+    defaultRegionTypeEntries().map((entry) => entry.id),
+    '覆盖不许把条目挪到列表末尾',
+  )
 })
 
-test('内置路径类型不进文件（带进去只会得到一串"同 ID 已存在"）', () => {
-  const withBuiltin: PathTypeEntry[] = [
-    {
-      id: 'river',
-      label: '河流',
-      kind: 'path',
-      params: { color: '#4f9dd9', width: 8, dash: [], taper: true, smooth: false, cap: 'round', join: 'round' },
-    },
-    ...SAMPLE_PATH_TYPES,
-  ]
-  const bundle = buildResourceBundle({ terrains: [], pathTypes: withBuiltin })
-  assert.deepEqual(bundle.pathTypes.map((entry) => entry.id), ['custom:highway'])
+test('内置路径类型也进文件（同一条改动、同一个理由）', () => {
+  const bundle = buildResourceBundle({ terrains: [], pathTypes: [BUILTIN_RIVER, ...SAMPLE_PATH_TYPES] })
+  assert.deepEqual(bundle.pathTypes.map((entry) => entry.id), ['river', 'custom:highway'])
+
+  const incoming: PathTypeEntry[] = [{ ...BUILTIN_RIVER, params: { ...BUILTIN_RIVER.params, width: 16 } }]
+  const kept = mergePathTypes([BUILTIN_RIVER], incoming)
+  assert.deepEqual(kept.added, [])
+  assert.match(kept.skipped[0]!.reason, /内置类型/)
+  assert.equal(kept.pathTypes[0]!.params.width, 8, '没勾覆盖就保留这张图现有的线宽')
+
+  const replaced = mergePathTypes([BUILTIN_RIVER], incoming, { overwrite: () => true })
+  assert.deepEqual(replaced.replaced, ['river'])
+  assert.equal(replaced.pathTypes[0]!.params.width, 16)
 })
 
 test('v1 文件（只有 terrains）仍然能导入，且不动用户的标记与路径类型', () => {
@@ -538,8 +574,89 @@ test('没有可新增条目时正文要说清"为什么一条都进不来"', () 
   )
   assert.equal(plan.addedCount, 0)
   const text = describeImportPlan(plan)
-  assert.match(text, /没有可新增的定义/)
+  // 一个字面的改口（W4-3）：正文现在说的是"没有可导入的定义"而不是"没有可新增的" ——
+  // 因为"可导入"包含覆盖那一路（勾了覆盖是能导入的），只说"新增"会让用户以为没救了
+  assert.match(text, /没有可导入的定义/)
   assert.match(text, /保留现有的/)
+})
+
+test('同名冲突逐条摆出来，勾「覆盖」之后正文与落盘一起换（同一次计算）', () => {
+  // W4-3 的核心：一份**整套目录**的文件导进一张已经有内置项的地图，冲突会有一大串。
+  // 用户要能逐条看见"这张图现在是什么 / 文件里是什么"，再决定覆盖哪几条。
+  const current = {
+    terrains: [] as CustomTerrain[],
+    markers: [] as CustomMarker[],
+    pathTypes: [BUILTIN_RIVER],
+    regionTypes: defaultRegionTypeEntries(),
+  }
+  const exported = buildResourceBundle({
+    terrains: [],
+    pathTypes: current.pathTypes,
+    regionTypes: current.regionTypes,
+  })
+  const parsed = parseResourceBundle(serializeResourceBundle(exported))
+  assert.equal(parsed.ok, true, JSON.stringify(parsed))
+  if (!parsed.ok) return
+
+  const before = planBundleImport(current, parsed.bundle)
+  const expectedConflicts = 1 + defaultRegionTypeEntries().length
+  assert.equal(before.addedCount, 0, '内置 ID 全都已经有了 ⇒ 一条新增都没有')
+  assert.equal(before.replacedCount, 0, '没勾覆盖 ⇒ 一条都不换')
+  assert.equal(before.conflicts.length, expectedConflicts)
+  assert.ok(
+    before.conflicts.every((conflict) => conflict.current.length > 0 && conflict.incoming.length > 0),
+    '每条冲突两侧都要有一句人话，用户才有依据决定',
+  )
+  assert.match(describeImportPlan(before), new RegExp(`同名冲突 ${expectedConflicts} 条`))
+
+  // 逐条勾：调用方拿新的 ID 组重新算一遍计划，正文、按钮状态、落盘都来自这一份
+  const ids = before.conflicts.map((conflict) => conflict.id)
+  const after = planBundleImport(current, parsed.bundle, { overwrite: ids })
+  assert.equal(after.addedCount, 0)
+  assert.equal(after.replacedCount, expectedConflicts)
+  assert.match(describeImportPlan(after), new RegExp(`将覆盖 ${expectedConflicts} 条`))
+  assert.deepEqual(
+    after.result.pathTypes.map((entry) => entry.id),
+    ['river'],
+    '落盘结果就是计划里的 result：覆盖在原位，条目数不变',
+  )
+  assert.deepEqual(after.result.regionTypes.map((entry) => entry.id), current.regionTypes.map((entry) => entry.id))
+
+  // 只勾一条时，其余照旧跳过（"全都是文件里的版本"是动作按钮，不是默认值）
+  const one = planBundleImport(current, parsed.bundle, { overwrite: ['river'] })
+  assert.deepEqual(one.pathTypes.replaced, ['river'])
+  assert.equal(one.replacedCount, 1)
+  assert.equal(one.skippedCount, expectedConflicts - 1)
+})
+
+test('plan.result 就是落盘那一份：**新增的条目必须在里面**（说的与做的同一次计算）', () => {
+  // 这条钉的是一个真实缺陷：路径 / 区域类型那段分支一度只把新增记进"给用户看的清单"，
+  // 没放进"最终目录" —— 于是对话框说"将新增 1 条"，落盘却一条都没进（冒烟场景 36 抓住的）。
+  // 计划里那句"result 就是最终状态"只有在这里被真的检查过才成立。
+  const parsed = parseResourceBundle(
+    serializeResourceBundle(
+      buildResourceBundle({
+        terrains: SAMPLE,
+        markers: SAMPLE_MARKERS,
+        pathTypes: SAMPLE_PATH_TYPES,
+        regionTypes: SAMPLE_REGION_TYPES,
+      }),
+    ),
+  )
+  assert.equal(parsed.ok, true, JSON.stringify(parsed))
+  if (!parsed.ok) return
+  const plan = planBundleImport(
+    { terrains: [], markers: [], pathTypes: [BUILTIN_RIVER], regionTypes: defaultRegionTypeEntries() },
+    parsed.bundle,
+  )
+  assert.equal(plan.addedCount, 7, JSON.stringify(plan.conflicts))
+  assert.deepEqual(plan.result.terrains, SAMPLE)
+  assert.deepEqual(plan.result.markers, SAMPLE_MARKERS)
+  assert.deepEqual(plan.result.pathTypes.map((entry) => entry.id), ['river', 'custom:highway'])
+  assert.deepEqual(
+    plan.result.regionTypes.map((entry) => entry.id),
+    [...defaultRegionTypeEntries().map((entry) => entry.id), 'custom:march', 'custom:oasis'],
+  )
 })
 
 test('文件里的字形名本机不认识时：条目照样导入，但必须留下一条"回退说明"', () => {

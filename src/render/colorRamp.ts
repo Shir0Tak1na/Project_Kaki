@@ -9,9 +9,10 @@
  * 1. **插值空间可选，默认 Oklab**。用户明确要求 Lab / Oklab：RGB 直接线性插值在
  *    蓝 → 绿 → 红这种长弧上会经过发灰的中间色，而 Oklab 是感知均匀空间。
  *    要再加 'hsl' 之类，只需在 `mixColors` 里多一个分支（转换 + 色相走短弧）。
- * 2. **越界不是错误**：超出色带两端的是合法数据（-60 ℃ 就是一个温度），
- *    用 `under` / `over` 里用户指定的纯色画出来，并按对比度给出可读的文字颜色
- *    —— 需求原话是"纯蓝底白字 / 纯红底白字"。
+ * 2. **越界不是错误，而且不止一档**：超出色带两端的是合法数据（-60 ℃ 就是一个温度），
+ *    刚出界用 `under` / `over` 的端色画，走得越远越接近"极色"
+ *    （需求原话："远远低于最低限度：从蓝色渐变到白底黑字，低于最低限度蓝底白字"）。
+ *    文字色在近端 / 远端两个候选之间按对比度挑，行程 = **一个色带跨度**。
  * 3. **"填上下限"和"5 个体感分类"是同一份数据**：两者都只是 stops 数量不同
  *    （2 个 vs 5 个锚点），渐变率就是相邻锚点的斜率，不需要两套实现。
  */
@@ -25,10 +26,24 @@ export interface ColorStop {
   color: string
 }
 
-/** 越界区间（`under` / `over`）的画法：底色 + 文字色 */
+/**
+ * 越界区间（`under` / `over`）的画法：端色 + 文字色，外加"再往外会渐变成什么"。
+ *
+ * 为什么不是"整段一个纯色"：需求原话是"**远远**低于最低限度：从蓝色渐变到白底黑字，
+ * 低于最低限度蓝底白字"—— 越界这一段自己还分远近：刚出界是端色，越远越像极色。
+ * 行程定死为**一个色带跨度**：`min - span` 处到达 `farColor`，再远就是纯 `farColor`。
+ * 远端的文字色 `farTextColor` 与近端 `textColor` 之间**按对比度**挑一个，
+ * 于是"蓝底白字 → 白底黑字"的过渡里不会出现白字压白底的那一段。
+ *
+ * `farColor` 等于 `color` 时就是纯色（不渐变）：深度那种"两端本身就是极色"的字段用它。
+ */
 export interface RangeStyle {
   color: string
   textColor: string
+  /** 远远低于 / 高于色带两端时渐变成的颜色 */
+  farColor: string
+  /** `farColor` 上的文字色（与 `textColor` 按对比度二选一） */
+  farTextColor: string
 }
 
 /** 插值空间。要加新空间就在 `mixColors` 里加一个分支 */
@@ -48,10 +63,20 @@ export const RAMP_MIN_STOPS = 2
 export const RAMP_MAX_STOPS = 32
 
 export const DEFAULT_INTERPOLATE: InterpolationSpace = 'oklab'
-/** 低于下端：纯蓝底白字（需求原话） */
-export const DEFAULT_UNDER: RangeStyle = { color: '#0000ff', textColor: '#ffffff' }
-/** 高于上端：纯红底白字（需求原话） */
-export const DEFAULT_OVER: RangeStyle = { color: '#ff0000', textColor: '#ffffff' }
+/** 低于下端：纯蓝底白字（需求原话）。**回退值不渐变**（far = 本色） */
+export const DEFAULT_UNDER: RangeStyle = {
+  color: '#0000ff',
+  textColor: '#ffffff',
+  farColor: '#0000ff',
+  farTextColor: '#ffffff',
+}
+/** 高于上端：纯红底白字（需求原话）。回退值不渐变 */
+export const DEFAULT_OVER: RangeStyle = {
+  color: '#ff0000',
+  textColor: '#ffffff',
+  farColor: '#ff0000',
+  farTextColor: '#ffffff',
+}
 /** 深色文字：与 `shapeDraw.ts` 里的描边同色系，避免纯黑在深色主题下发死 */
 const DARK_TEXT = '#111827'
 const LIGHT_TEXT = '#ffffff'
@@ -71,32 +96,67 @@ export function defaultTemperatureRamp(): RampSpec {
       { value: 30, color: '#f59e0b' },
       { value: 45, color: '#ff0000' },
     ],
-    under: { ...DEFAULT_UNDER },
-    over: { ...DEFAULT_OVER },
+    // 越界不是"另一个纯色"而是**渐变**（需求原话）：刚过下端仍是蓝底白字，
+    // 再往低走一个色带跨度（75 ℃）之外就渐成白底黑字 —— 越冷越白，方向一眼可辨。
+    under: { color: '#0000ff', textColor: '#ffffff', farColor: '#ffffff', farTextColor: DARK_TEXT },
+    // 高温端镜像：刚过上限红底白字，远远更热渐成黑底白字。
+    over: { color: '#ff0000', textColor: '#ffffff', farColor: '#000000', farTextColor: '#ffffff' },
     interpolate: DEFAULT_INTERPOLATE,
   }
 }
 
 /**
- * 深度 / 海拔色带的出厂值：**高处浅米 → 海平面浅蓝 → 深海深蓝**。
+ * 深度 / 海拔色带的出厂值：**低 → 高 = 黑 → 白**（用户 2026-09-29 定的口径）。
  *
- * 数值轴与 `depth` 同口径（0 = 海平面，正 = 向下），所以锚点是**降序的语义、升序的值**：
- * `-4000`（高海拔）在左、`4000`（深海）在右。
- *
- * 越界两端刻意**不用**温度那套纯蓝/纯红：那是温度的体感语言（冷 / 热）。
- * 这里的越界是"比最高峰还高"与"比最深海沟还深"，所以用纯白 / 近黑蓝 —— 方向一眼可辨。
+ * 数值轴与 `depth` 同口径（0 = 海平面，正 = 向下），所以锚点仍是**升序的值**：
+ * `-4000`（高海拔）在左、`4000`（深海）在右，颜色从黑走到白。
+ * 越界两端就是这条轴自己的两个极色，所以**不再另做渐变**（far = 本色）：
+ * 比最高峰更高的一侧纯黑、比最深海沟更深的一侧纯白。
  */
 export function defaultDepthRamp(): RampSpec {
   return {
     stops: [
-      { value: -4000, color: '#f2ead9' },
-      { value: 0, color: '#7dd3fc' },
-      { value: 4000, color: '#1e3a8a' },
+      { value: -4000, color: '#000000' },
+      { value: 0, color: '#808080' },
+      { value: 4000, color: '#ffffff' },
     ],
-    under: { color: '#ffffff', textColor: '#111827' },
-    over: { color: '#0b1f4b', textColor: '#ffffff' },
+    under: { color: '#000000', textColor: '#ffffff', farColor: '#000000', farTextColor: '#ffffff' },
+    over: { color: '#ffffff', textColor: DARK_TEXT, farColor: '#ffffff', farTextColor: DARK_TEXT },
     interpolate: DEFAULT_INTERPOLATE,
   }
+}
+
+/* ------------------------------------------------------------------ 轴上的位置 */
+
+/** 色带的读数范围（`stops` 已升序、至少两条；`span` 恒 > 0） */
+export interface RampBounds {
+  min: number
+  max: number
+  span: number
+}
+
+/** 取两端的值与跨度 —— 轴上的所有位置换算都从它出发（图例与轴共用同一套公式） */
+export function rampBounds(stops: readonly ColorStop[]): RampBounds {
+  const first = stops[0]
+  const last = stops[stops.length - 1]
+  const min = first ? first.value : 0
+  const max = last ? last.value : 0
+  return { min, max, span: max - min }
+}
+
+/**
+ * 值 → 轴上位置（0 = 最低端，1 = 最高端）。
+ *
+ * **不夹取**：越界的位置由调用方决定怎么画（轴上要画成两端的"端帽"，
+ * 而"锚点间距 = 渐变率"这条只有在位置真的按值算时才对）。
+ */
+export function positionForValue(value: number, bounds: RampBounds): number {
+  return bounds.span === 0 ? 0 : (value - bounds.min) / bounds.span
+}
+
+/** 轴上位置 → 值（`positionForValue` 的逆；点轴上任意一处新建锚点时用它） */
+export function valueForPosition(position: number, bounds: RampBounds): number {
+  return bounds.min + position * bounds.span
 }
 
 /* ------------------------------------------------------------------ 颜色解析 */
@@ -242,13 +302,20 @@ export function oppositeTextColor(color: string): string {
 
 function normalizeRangeStyle(raw: unknown, fallback: RangeStyle): RangeStyle {
   const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
-  const hex = parseHexColor(source.color)
-  const color = hex === null ? fallback.color : rgbToHex(hex)
-  const textHex = parseHexColor(source.textColor)
+  const read = (key: 'color' | 'textColor' | 'farColor' | 'farTextColor'): string => {
+    const hex = parseHexColor(source[key])
+    return hex === null ? fallback[key] : rgbToHex(hex)
+  }
   // 越界区的文字色**默认就跟着 fallback（出厂是白字）**，不按对比度自动挑：
   // 需求原话是"超过两端的值用纯蓝底白字 / 纯红底白字"，而纯红底按对比度算出来会选深色 ——
   // 这里以用户明确说过的行为为准。用户当然可以自己指定别的文字色。
-  return { color, textColor: textHex === null ? fallback.textColor : rgbToHex(textHex) }
+  // 远端同理：老设置里**没有** farColor / farTextColor 这两个键，缺失时回退成"不渐变"。
+  return {
+    color: read('color'),
+    textColor: read('textColor'),
+    farColor: read('farColor'),
+    farTextColor: read('farTextColor'),
+  }
 }
 
 /**
@@ -318,8 +385,9 @@ export function colorForValue(value: number, ramp: RampSpec): ValueColor | null 
   const first = stops[0]!
   const last = stops[stops.length - 1]!
 
-  if (value < first.value) return { ...ramp.under, outOfRange: 'under' }
-  if (value > last.value) return { ...ramp.over, outOfRange: 'over' }
+  // 越界不是"贴一个纯色"：端色 → 极色按"越出去多远"渐变（见 outOfRangeValue）
+  if (value < first.value) return outOfRangeValue(ramp, 'under', first.value - value)
+  if (value > last.value) return outOfRangeValue(ramp, 'over', value - last.value)
   if (value === first.value) return { color: first.color, textColor: textColorOf(first.color), outOfRange: null }
   if (value === last.value) return { color: last.color, textColor: textColorOf(last.color), outOfRange: null }
 
@@ -338,6 +406,54 @@ export function colorForValue(value: number, ramp: RampSpec): ValueColor | null 
 
   // 理论上到不了这里（上面的区间已经覆盖了 first..last）
   return { color: last.color, textColor: textColorOf(last.color), outOfRange: null }
+}
+
+/**
+ * 越界值 → 颜色：端色 → 极色按"越出去多远"渐变（行程 = 一个色带跨度，再远就饱和）。
+ *
+ * 两端**原样返回、不经过插值**：Oklab 往返会把 `#0000ff` 变成 `#0001ff` 之类的近邻色，
+ * 而"刚越界就是端色"这句话必须逐字为真（端帽与格子的颜色都要对得上）。
+ * 中间那一段的文字色在近端 / 远端两个候选之间**按对比度**挑。
+ */
+function outOfRangeValue(ramp: RampSpec, side: 'under' | 'over', distance: number): ValueColor {
+  const style = side === 'under' ? ramp.under : ramp.over
+  // 远端极色和端色一样 ⇒ 这一侧根本不该渐变：直接给端色，
+  // 既保住"纯红底白字"这条明确要求，也避免 Oklab 往返把 #0000ff 变成 #0001ff
+  if (style.farColor === style.color) return { color: style.color, textColor: style.textColor, outOfRange: side }
+  const bounds = rampBounds(ramp.stops)
+  const t = bounds.span <= 0 ? 1 : Math.min(1, Math.max(0, distance / bounds.span))
+  if (t <= 0) return { color: style.color, textColor: style.textColor, outOfRange: side }
+  if (t >= 1) return { color: style.farColor, textColor: style.farTextColor, outOfRange: side }
+  const from = parseHexColor(style.color) ?? [0, 0, 0]
+  const to = parseHexColor(style.farColor) ?? from
+  const color = rgbToHex(mixColors(from, to, t, ramp.interpolate))
+  return { color, textColor: pickReadableTextColor(color, style.textColor, style.farTextColor), outOfRange: side }
+}
+
+/**
+ * 在两种文字色里挑与底色对比度更高的那一个。
+ *
+ * 为什么不直接用 `textColorOf`：越界区的字色是"用户指定的近端 / 远端两个候选"，
+ * 自动挑会违背"纯红底白字"那条明确要求；但过渡段的底色既不是红也不是黑，
+ * 死守任一侧都会出现读不清的一段 —— 所以**只在两个候选之间**挑。
+ * 两个候选都不是合法 hex 时给深色。
+ */
+function pickReadableTextColor(background: string, a: string, b: string): string {
+  const bg = parseHexColor(background)
+  if (bg === null) return DARK_TEXT
+  const luminance = relativeLuminance(bg)
+  const contrastOf = (candidate: string): number => {
+    const rgb = parseHexColor(candidate)
+    if (rgb === null) return -1
+    const other = relativeLuminance(rgb)
+    const lighter = Math.max(luminance, other)
+    const darker = Math.min(luminance, other)
+    return (lighter + 0.05) / (darker + 0.05)
+  }
+  const contrastA = contrastOf(a)
+  const contrastB = contrastOf(b)
+  if (contrastA < 0 && contrastB < 0) return DARK_TEXT
+  return contrastB > contrastA ? b : a
 }
 
 /**

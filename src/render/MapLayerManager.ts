@@ -12,6 +12,7 @@ import type { MapDocument } from '../data/mapDocument.ts'
 import type { MapDocumentStore } from '../data/MapDocumentStore.ts'
 import { MapEditor, type EditorStatus } from '../editor/MapEditor.ts'
 import { MapInteraction } from '../editor/MapInteraction.ts'
+import type { HoverReadout } from '../editor/selection.ts'
 import { PlaceMarkerModal, type PlaceMarkerOptions } from '../ui/PlaceMarkerModal.ts'
 import { TextPromptModal, type TextPromptOptions } from '../ui/TextPromptModal.ts'
 import { MapToolbar } from '../ui/MapToolbar.ts'
@@ -63,48 +64,51 @@ export interface MapLayerManagerDeps {
   /** 名称字号倍率（用户设置；1 = 默认） */
   getLabelScale?: () => number
   /**
-   * 样式调色板（区域颜色 / 名称字体族），来自插件设置。
+   * 名称字体族的来源（来自插件设置）。
    *
    * 传函数而不是值：地图层的存活时间远长于设置页，取值必须"每次现读"，
    * 否则用户改完设置要重开画布才生效。
    *
-   * ⚠️ 路径样式**不在**这里：它唯一来源是 `getPathTypes`（见下）。
+   * ⚠️ 现在真正被读的只有 `fontFamily`：路径颜色住在 `getPathTypes`、区域颜色住在
+   * `getRegionTypes`（各目录是唯一样式来源）；字体是"怎么看"，按 §5.1 的判据**留插件设置、不随图**。
    */
   getStylePalette?: () => StylePalette
   /**
-   * 路径类型目录（内置 4 种 + 用户自定义，含全部画法参数），来自插件设置。
+   * 路径类型目录（内置 4 种 + 用户自定义，含全部画法参数）。
    *
-   * 与 `getStylePalette` 同理传函数：用户改完线宽/颜色/端点后，画布与工具条要立刻跟上。
-   */
-  getPathTypes?: () => readonly PathTypeEntry[]
-  /**
-   * 区域类型目录（内置 6 种 + 用户自定义，含填充/不透明度/边框参数），来自插件设置。
+   * ⚠️ **按地图解析**（W4-1b）：参数带的是"要哪张地图的定义"，由调用方从那份文档的
+   * `definitions` 段还原（缺段时退回库级设置那一份快照，见 `data/mapDefinitions.ts`）。
+   * 多画布同开是硬约束 —— 插件级单例会让 A 图的线宽污染 B 图。
    *
-   * 与 `getPathTypes` 逐字同理：区域样式的唯一来源，用户改完设置后画布、工具条、
-   * 图例要立刻跟上。
+   * 传函数而不是值：用户改完线宽/颜色后，画布与工具条要立刻跟上。
    */
-  getRegionTypes?: () => readonly RegionTypeEntry[]
+  getPathTypes?: (document: MapDocument | null) => readonly PathTypeEntry[]
   /**
-   * 用户自定义地形（来自插件设置）。
+   * 区域类型目录（内置 6 种 + 用户自定义，含填充/不透明度/边框参数）。
+   *
+   * 与 `getPathTypes` 逐字同理：区域样式的唯一来源，用户改完后画布、工具条、图例要立刻跟上。
+   */
+  getRegionTypes?: (document: MapDocument | null) => readonly RegionTypeEntry[]
+  /**
+   * 用户自定义地形。
    *
    * 与 `getStylePalette` 同理传函数：地图层活得比设置页久，必须"每次现读"，
-   * 否则用户新增一个地形后要重开画布才看得到。
+   * 否则用户新增一个地形后要重开画布才看得到。**按地图解析**见 `getPathTypes`。
    */
-  getCustomTerrains?: () => readonly CustomTerrain[]
+  getCustomTerrains?: (document: MapDocument | null) => readonly CustomTerrain[]
   /**
-   * 用户自定义标记图标（来自插件设置）。
+   * 用户自定义标记图标。
    *
-   * 与 `getCustomTerrains` 逐字同理：地图层活得比设置页久，必须"每次现读"，
-   * 否则用户新增一个标记图标后要重开画布才看得到。
+   * 与 `getCustomTerrains` 逐字同理（含"按地图解析"）。
    */
-  getCustomMarkers?: () => readonly CustomMarker[]
+  getCustomMarkers?: (document: MapDocument | null) => readonly CustomMarker[]
   /**
-   * 用户自定义**生物群系**（来自插件设置）。
+   * 用户自定义**生物群系**。
    *
-   * 与 `getCustomTerrains` 逐字同理：目录活得比设置页久，必须"每次现读"。
+   * 与 `getCustomTerrains` 逐字同理（含"按地图解析"）。
    * 它只影响**颜色解析**（分类字段的逐格上色与图例）—— 值本身永远在地图文件里。
    */
-  getCustomBiomes?: () => readonly CustomBiome[]
+  getCustomBiomes?: (document: MapDocument | null) => readonly CustomBiome[]
   /**
    * 请求打开「按规则筛选选择…」对话框。
    *
@@ -131,30 +135,22 @@ export interface MapLayerManagerDeps {
    */
   onEditorStateChanged?: () => void
   /**
-   * 图层可见性（来自插件设置）。
+   * 图层可见性（**按画布自己那张地图**解析，W4-2）。
    *
-   * 同样传函数：图层开关会被用户在设置页或工具条上随手改，必须"每次现读"，
-   * 否则要让用户重开画布才生效。
+   * 传函数而不是值：图层开关会被用户在侧栏、工具条、设置页随手改，必须"每次现读"，
+   * 否则要让用户重开画布才生效。参数是**哪张画布**（多画布同开时不许看"谁是活动画布"：
+   * 那会让 B 画布上的控件去改 A 那张图的设置）。
    */
-  getLayers?: () => LayerVisibility
+  getLayers?: (canvasPath: string) => LayerVisibility
   /**
    * 数据层（温度 / 深度…）的渲染参数（色带 / 不透明度）。
    *
    * 与 `getLayers` 同样是"每帧现读"的函数：色带是可随时调的旋钮，
-   * 传值会让"改完设置画布不变"变成一类要靠重开画布才能绕过的怪现象。
+   * 传值会让"改完设置画布不变"变成一类要靠重开画布才能绕过的怪现象。按画布解析，同 `getLayers`。
    */
-  getOverlayStyles?: () => OverlayStyles
-  /** 图例是否显示（来自插件设置；默认关着，图例不该默认占画布） */
-  getShowLegend?: () => boolean
-  /**
-   * 写回图层开关（由插件实现：同步改内存 + 落盘 + 广播）。
-   *
-   * 侧栏面板「地物」一组里的图层开关走这个口子 —— 图层是持久化设置，
-   * 界面上的按钮只是它的一个入口，不能让按钮自己留一份状态。
-   */
-  setLayerVisible?: (key: LayerKey, value: boolean) => void
-  /** 写回图例显示开关（同上） */
-  setShowLegend?: (value: boolean) => void
+  getOverlayStyles?: (canvasPath: string) => OverlayStyles
+  /** 图例是否显示（默认关着，图例不该默认占画布）—— 按画布解析，同 `getLayers` */
+  getShowLegend?: (canvasPath: string) => boolean
 }
 
 interface LayerEntry {
@@ -248,6 +244,16 @@ export class MapLayerManager {
 
   /** 当前覆盖层持有的地图文档（诊断与测试用） */
   getDocument(canvasPath: string): MapDocument | null {
+    return this.entries.get(canvasPath)?.document ?? null
+  }
+
+  /**
+   * 某画布当前那份文档（定义解析要用它，见 `MapLayerManagerDeps.getPathTypes`）。
+   *
+   * 与 `getDocument` 同义，只是一个给外部、一个给内部：定义访问器散布在十几个闭包里，
+   * 每个都写一遍 `this.entries.get(canvasPath)?.document ?? null` 是纯粹的噪音。
+   */
+  private entryDocument(canvasPath: string): MapDocument | null {
     return this.entries.get(canvasPath)?.document ?? null
   }
 
@@ -469,25 +475,28 @@ export class MapLayerManager {
           document: document_,
           projection,
           viewportRect,
-          // 自定义标记同样每帧现读：设置里删掉一个定义之后，画布下个重绘帧就会回退字形
-          customMarkers: this.deps.getCustomMarkers?.() ?? [],
+          // 自定义标记同样每帧现读：用户删掉一个定义之后，画布下个重绘帧就会回退字形。
+          // 定义**按这张地图解析**（v2 的 `definitions` 段），所以传的是刚拿到的那份文档
+          customMarkers: this.deps.getCustomMarkers?.(document_) ?? [],
         }),
       // 进行中的路径/区域草稿：与地形同帧绘制（橡皮筋要每帧跟随光标）
       getDraft: () => this.entries.get(canvasPath)?.editor.getDraft() ?? null,
       // 名称字号倍率：来自插件设置
       getLabelScale: () => this.deps.getLabelScale?.() ?? 1,
-      // 图层可见性（含 grid 与 labels）：六个层唯一的入口，每帧现读
-      getLayers: () => this.layersVisibility(),
-      // 数据层的色带 / 不透明度：同样每帧现读（改设置下一帧就是新颜色）
-      getOverlayStyles: () => this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
+      // 图层可见性（含 grid 与 labels）：六个层唯一的入口，每帧现读；W4-2 起按**这张画布**那张地图解析
+      getLayers: () => this.deps.getLayers?.(canvasPath) ?? DEFAULT_LAYER_VISIBILITY,
+      // 数据层的色带 / 不透明度：同样每帧现读（改设置下一帧就是新颜色），按画布解析
+      getOverlayStyles: () => this.deps.getOverlayStyles?.(canvasPath) ?? DEFAULT_OVERLAY_STYLES,
       // **分类字段**的"值 → 颜色"：现读分类目录（内置 34 条 + 用户自定义）。
       // 与色带同一条口径：改一条颜色，下一帧就是新颜色（没有第二份缓存要失效）。
       getCategoryColors: (fieldId) =>
-        fieldId === 'biome' ? biomeColorMap(this.deps.getCustomBiomes?.() ?? []) : undefined,
-      // 名称字体族：来自插件设置（空串 = 跟随主题）
+        fieldId === 'biome'
+          ? biomeColorMap(this.deps.getCustomBiomes?.(this.entryDocument(canvasPath)) ?? [])
+          : undefined,
+      // 名称字体族：来自插件设置（空串 = 跟随主题）。字体是"怎么看"，按 §5.1 判据留插件设置
       getLabelFontFamily: () => this.deps.getStylePalette?.().fontFamily ?? '',
-      // 自定义地形：目录与图片加载都从这里注入（渲染层不认识 vault）
-      getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
+      // 自定义地形：目录与图片加载都从这里注入（渲染层不认识 vault）；目录**按这张地图解析**
+      getCustomTerrains: () => this.deps.getCustomTerrains?.(this.entryDocument(canvasPath)) ?? [],
       // 标记图片走 `<img src>`（不是 canvas），所以这里交出一个**同步**的地址解析器
       resolveImageSrc: (path) => this.resourceUrlFor(path),
       loadTerrainImage: (path) => this.loadTerrainImage(path),
@@ -503,6 +512,8 @@ export class MapLayerManager {
       },
       // 高亮每帧现读：选中变化时编辑器会请求重绘
       getSelection: () => this.entries.get(canvasPath)?.editor.getSelection() ?? null,
+      // 同类多选（§2.6）：高亮要**逐个**画，否则选了三个标记只亮一个
+      getObjectSelection: () => this.entries.get(canvasPath)?.editor.getObjectSelection() ?? [],
       // 格选择（多格）同样每帧现读：框选拖动中要跟着手指实时变
       getCellSelection: () => this.entries.get(canvasPath)?.editor.getCellSelection() ?? [],
       // 拖动移动：客户端坐标 → 世界坐标的换算只在这里做（标记层不认识画布内部坐标系）
@@ -532,14 +543,14 @@ export class MapLayerManager {
       getDocument: () => this.entries.get(canvasPath)?.document ?? null,
       onChanged: () => overlay.requestRedraw(),
       onSaveRequested: () => this.scheduleSave(canvasPath),
-      // 新画的路径取当前路径类型目录里的画法参数、新画的区域取当前区域类型目录里的参数。
-      // 两个都必须是"现读"：已画好的对象用文件里存的值，不受设置影响。
+      // 新画的路径取**这张地图**的路径类型目录里的画法参数、新画的区域取同样来源的参数。
+      // 两个都必须是"现读"：已画好的对象用文件里存的值，改定义不影响它们。
       getPalette: () => this.deps.getStylePalette?.() ?? defaultStylePalette(),
-      getPathTypes: () => this.deps.getPathTypes?.() ?? defaultPathTypeEntries(),
-      getRegionTypes: () => this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries(),
+      getPathTypes: () => this.deps.getPathTypes?.(this.entryDocument(canvasPath)) ?? defaultPathTypeEntries(),
+      getRegionTypes: () => this.deps.getRegionTypes?.(this.entryDocument(canvasPath)) ?? defaultRegionTypeEntries(),
       // 检查器要显示人话名称（"标记 · 港口"而不是 `custom:port`），所以目录也要进来
-      getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
-      getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
+      getCustomTerrains: () => this.deps.getCustomTerrains?.(this.entryDocument(canvasPath)) ?? [],
+      getCustomMarkers: () => this.deps.getCustomMarkers?.(this.entryDocument(canvasPath)) ?? [],
       onSelectionChanged: () => {
         this.lastInspectorPath = canvasPath
         overlay.requestRedraw()
@@ -563,6 +574,11 @@ export class MapLayerManager {
     let toolbar: MapToolbar | null = null
     // 信息卡同理：交互层的 `getUiExclusions` 与模式回调都会用到它
     let selectionCard: SelectionCard | null = null
+    /**
+     * 最近一次的**悬停读数**（§2.6）。卡片与覆盖层都"每帧现读"，所以它只活在这里：
+     * 交互层收到 `pointermove` 就更新它并让卡片重绘（卡片不认识指针与画布）。
+     */
+    let hoverReadout: HoverReadout = { kind: 'none' }
 
     const interaction = new MapInteraction({
       app: this.deps.app,
@@ -579,11 +595,19 @@ export class MapLayerManager {
       getUiExclusions: () => [
         toolbar?.getElement() ?? null,
         overlay.getMarkerLayer()?.getElement() ?? null,
-        // 信息卡也在同一个视图容器里，而且**是可点的**（"清空选择"按钮）：
-        // 不排除的话，捕获阶段的 stopImmediatePropagation 会把那一击吃掉
+        // 信息卡也在同一个视图容器里：不排除的话，捕获阶段的 stopImmediatePropagation
+        // 会把落在卡片上的那一击吃掉（卡片现在只显示读数，但它仍不该被穿透到画布）
         selectionCard?.getElement() ?? null,
       ],
       onHover: (hover) => overlay.setHover(hover),
+      /**
+       * 悬停读数（§2.6）：交互层只报"指针在哪"，**"那是什么"由编辑器回答**
+       * （命中顺序与点击同一套）。卡片拿到之后立刻重绘自己。
+       */
+      onHoverReadout: (readout) => {
+        hoverReadout = readout
+        selectionCard?.refresh()
+      },
       onModeChanged: (mode) => {
         // 覆盖层始终 pointer-events: none（只负责画）；模式只影响交互层、标记层与工具条
         toolbar?.refresh()
@@ -594,9 +618,9 @@ export class MapLayerManager {
         const options: PlaceMarkerOptions = {
           kind: tool,
           initialIcon: editor.markerIcon,
-          // 打开对话框时现读自定义标记：自动测试注入的替身对话框不关心它，
+          // 打开对话框时现读**这张地图**的自定义标记：自动测试注入的替身对话框不关心它，
           // 而真实对话框要在下拉里列出用户自己定义的图标
-          getCustomMarkers: () => this.deps.getCustomMarkers?.() ?? [],
+          getCustomMarkers: () => this.deps.getCustomMarkers?.(this.entryDocument(canvasPath)) ?? [],
           onSubmit: (input) => {
             if (tool === 'marker') {
               editor.setMarkerIcon(input.icon)
@@ -636,8 +660,9 @@ export class MapLayerManager {
       try {
         toolbar = new MapToolbar(toolbarHost, {
           editor,
-          // 副行要写出当前地形笔刷的中文名（自定义地形也得有名字，不能显示成一串 ID）
-          getCustomTerrains: () => this.deps.getCustomTerrains?.() ?? [],
+          // 副行要写出当前地形笔刷的中文名（自定义地形也得有名字，不能显示成一串 ID）；
+          // 目录**按这张地图解析**
+          getCustomTerrains: () => this.deps.getCustomTerrains?.(this.entryDocument(canvasPath)) ?? [],
           onModeChanged: (mode) => interaction.notifyModeChanged(mode),
           // 工具条上那个「地图层」按钮已删掉（用户反馈"不知道是干什么的"，且与面板里的
           // 「启用/停用当前 Canvas 的地图层」重复）。停用地图层现在的入口是：侧栏地图面板
@@ -659,20 +684,18 @@ export class MapLayerManager {
     }
 
     // 选择信息卡：同一层（未变换的 wrapperEl），失败也不该连带整个地图层失败。
-    // 它只读、不改数据；"清空选择"是唯一动作，而且与 Esc 的第一步走同一条路。
+    // 它**只做进行中的事**（§2.6）：框选拖动中的统计 + 悬停读数；已确定的选择归侧栏。
     if (toolbarHost) {
       try {
         selectionCard = new SelectionCard(toolbarHost, {
           editor,
           getDocument: () => this.entries.get(canvasPath)?.document ?? null,
-          getOverlayStyles: () => this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
-          terrainLabel: (id) => resolveTerrainStyle(id, this.deps.getCustomTerrains?.() ?? []).label,
+          getOverlayStyles: () => this.deps.getOverlayStyles?.(canvasPath) ?? DEFAULT_OVERLAY_STYLES,
+          terrainLabel: (id) => resolveTerrainStyle(id, this.deps.getCustomTerrains?.(this.entryDocument(canvasPath)) ?? []).label,
           // 生物群系同样按**现读的目录**解析：认不出的 ID 回退成 ID 本身（§5.11），
           // 于是信息卡里"这格到底是什么"与画布上的颜色、图例里的那一行是同一份答案
-          biomeLabel: (id) => resolveBiomeStyle(id, this.deps.getCustomBiomes?.() ?? []).label,
-          onClear: () => {
-            editor.clearAllSelection()
-          },
+          biomeLabel: (id) => resolveBiomeStyle(id, this.deps.getCustomBiomes?.(this.entryDocument(canvasPath)) ?? []).label,
+          getHover: () => hoverReadout,
         })
       } catch (error) {
         console.warn('[project-kaki] 选择信息卡创建失败，地图层继续但不带它', error)
@@ -708,7 +731,9 @@ export class MapLayerManager {
     // 同样包一层 try：图例是锦上添花，失败了不该连带整个地图层失败。
     if (toolbarHost) {
       try {
-        entry.legend = new MapLegend(toolbarHost, { getVisible: () => this.deps.getShowLegend?.() ?? false })
+        entry.legend = new MapLegend(toolbarHost, {
+          getVisible: () => this.deps.getShowLegend?.(canvasPath) ?? false,
+        })
         entry.legend.syncVisibility()
         this.refreshLegend(entry)
       } catch (error) {
@@ -735,9 +760,9 @@ export class MapLayerManager {
     this.enabled.delete(canvasPath)
   }
 
-  /** 当前图层设置（每帧现读；缺省即全部显示） */
-  private layersVisibility(): LayerVisibility {
-    return this.deps.getLayers?.() ?? DEFAULT_LAYER_VISIBILITY
+  /** 当前图层设置（每帧现读；缺省即全部显示）—— W4-2：按**这张画布**那张地图解析 */
+  private layersVisibility(canvasPath: string): LayerVisibility {
+    return this.deps.getLayers?.(canvasPath) ?? DEFAULT_LAYER_VISIBILITY
   }
 
   /**
@@ -864,7 +889,11 @@ export class MapLayerManager {
   buildLegendFor(canvasPath: string): LegendEntry[] {
     const entry = this.entries.get(canvasPath)
     if (!entry) return []
-    return buildLegendEntries(entry.document, this.legendDeps(), this.layersVisibility())
+    return buildLegendEntries(
+      entry.document,
+      this.legendDeps(entry.document, entry.canvasPath),
+      this.layersVisibility(entry.canvasPath),
+    )
   }
 
   /**
@@ -878,7 +907,13 @@ export class MapLayerManager {
   private refreshLegend(entry: LayerEntry): void {
     if (!entry.legend) return
     try {
-      entry.legend.refresh(buildLegendEntries(entry.document, this.legendDeps(), this.layersVisibility()))
+      entry.legend.refresh(
+        buildLegendEntries(
+          entry.document,
+          this.legendDeps(entry.document, entry.canvasPath),
+          this.layersVisibility(entry.canvasPath),
+        ),
+      )
     } catch (error) {
       console.warn('[project-kaki] 图例刷新失败', error)
     }
@@ -890,11 +925,14 @@ export class MapLayerManager {
    * 全部从**当前设置**现取：内置地形、自定义地形、未知 ID 三种情况由 `resolveTerrainStyle`
    * 统一抹平，路径则由 `resolvePathType`（目录）统一抹平 —— 图例只负责显示，
    * 于是"图例与画布配色不一致"这种老问题不会因为新功能复活。
+   *
+   * 两个参数都要（W4-1b / W4-2 之后定义与色带都按地图解析）：`document_` 决定用哪套定义，
+   * `canvasPath` 决定用哪张图的色带 —— 两者必须指同一张图，多画布同开时不许串。
    */
-  private legendDeps(): LegendDeps {
-    const custom = this.deps.getCustomTerrains?.() ?? []
-    const pathTypes = this.deps.getPathTypes?.() ?? defaultPathTypeEntries()
-    const regionTypes = this.deps.getRegionTypes?.() ?? defaultRegionTypeEntries()
+  private legendDeps(document_: MapDocument | null, canvasPath: string): LegendDeps {
+    const custom = this.deps.getCustomTerrains?.(document_) ?? []
+    const pathTypes = this.deps.getPathTypes?.(document_) ?? defaultPathTypeEntries()
+    const regionTypes = this.deps.getRegionTypes?.(document_) ?? defaultRegionTypeEntries()
     return {
       resolveTerrain: (id) => {
         const style = resolveTerrainStyle(id, custom)
@@ -916,12 +954,12 @@ export class MapLayerManager {
       }),
       // 生物群系：按 ID 解析目录里那一条（显示名 + 它自己的颜色）。认不出的 ID 原样显示
       resolveBiome: (id) => {
-        const style = resolveBiomeStyle(id, this.deps.getCustomBiomes?.() ?? [])
+        const style = resolveBiomeStyle(id, this.deps.getCustomBiomes?.(document_) ?? [])
         return { label: style.label, color: style.color }
       },
-      // 数据层的色带：与画布**同一个来源**（每帧现读那一个 getter），
-      // 否则会出现"画布上是新色带、图例里还是旧的"这种两套配色的老毛病
-      overlayStyles: this.deps.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES,
+      // 图例里的渐变条 / 越界计数要跟**这张画布那张地图**的色带同源（W4-2），否则会出现
+      // "画布上是新色带、图例里还是旧的"这种两套配色的老毛病（多画布时还会串到别的图）
+      overlayStyles: this.deps.getOverlayStyles?.(canvasPath) ?? DEFAULT_OVERLAY_STYLES,
     }
   }
 

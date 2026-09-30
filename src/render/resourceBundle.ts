@@ -1,11 +1,18 @@
 /**
  * 自定义资源的"定义文件"：导出成一份 JSON，之后可以导入到别的库或分享给别人。
  *
+ * W4-3 起它的定位是**搬运工具**（"把我在这张图上调好的整套样式搬到另一张图"）：
+ * 导的是**当前地图的定义集**，而且**内置的路径 / 区域类型也进文件**（参数是每张图各自一份，
+ * 用户调得最勤的恰恰是内置那几种的线宽 / 填充）—— 详见 `ResourceBundle.pathTypes` 的注释。
+ *
  * 为什么值得单独一个模块：
  * 1. **导入是唯一会让"外部内容"进入用户设置的入口**，也是最容易造成不可逆损失的动作
  *    （搞错了就把用户自己配好的东西覆盖掉）。所以校验必须逐条给出**可读原因**，
  *    而不是"导入失败"四个字；冲突策略必须是**显式选择过的**，并且写在这里：
- *     **同 ID 时保留用户现有的定义，不覆盖**（导入是"补充"，不是"替换"）。
+ *    **同 ID 默认保留用户现有的定义**（导入是"补充"，不是"替换"），
+ *    但用户可以在确认对话框里**逐条勾「覆盖」**把它换成文件里那一条 ——
+ *    那条路是用户显式选的（`PlanBundleOptions.overwrite`），于是
+ *    "悄悄改掉"与"我要求它改"分得很清楚。
  * 2. **格式要能长大**。文件里带 `version`，遇到来自更新版本的文件**明确拒绝**并告诉用户升级插件，
  *    而不是"尽力解析" —— 后者会把新字段静默丢掉，用户以为导入成功了。
  * 3. 纯函数：不做任何 IO。读哪个文件、写到哪个路径由调用方决定（于是可单测）。
@@ -13,6 +20,10 @@
  * 数据校验**复用各目录自己的那一套**（`validateCustomTerrainInput` /
  * `validateCustomMarkerInput` / `validateCustomPathTypeInput`），不在这里再写一遍规则 ——
  * 两套规则必然分叉，而分叉的后果是"设置页能加的，导入却加不进来"。
+ * ⚠️ 但 **ID 例外**：那几个校验器是给"用户新增自定义项"用的，一律补 `custom:` 前缀；
+ * 文件里带着**内置项**（W4-3），照它们的 ID 走会把 `river` 变成 `custom:river`
+ * （认不出冲突，还凭空多一条）—— 所以解析侧用 `canonicalBundleId` 单独定 ID。
+ * 教训：**"用户输入"与"文件内容"是两种输入，不能共用同一条规范化**。
  *
  * ## 段（section）与"缺失 ≠ 清空"
  *
@@ -28,11 +39,11 @@
  * 解析侧**接受 1 与 2**：v1 视为"没有后面几段"，于是老文件仍然能导入（回归项，测试里钉死）。
  *
  * 为什么 `regionTypes` 加进来时**不**把版本升到 3：
- * v2 是本轮开发周期里刚引入、**还没有发布给任何用户**的格式 —— 世上不存在"旧版插件写下的
- * v2 文件"，因此没有需要区分的历史包袱；升到 v3 只会凭空制造一个版本号，
- * 让以后读代码的人以为 v2 曾经对外发布过。
- * ⚠️ 这条判断的**前提**是"v2 未发布"：v2 一旦随正式版本发出去，
- * 之后任何字段变化都必须老实升版本号（否则旧插件读新文件时会静默丢字段）。
+ * 当时 v2 是本轮开发周期里刚引入、**还没有发布给任何用户**的格式 —— 世上不存在"旧版插件写下的
+ * v2 文件"，因此没有需要区分的历史包袱；升到 v3 只会凭空制造一个版本号。
+ *
+ * ⚠️ **那个前提已经到期**：v2 随 **1.1.0**（2026-09-30）发布出去了。**从现在起**任何字段变化都必须
+ * 老实升版本号（否则旧插件读新文件时会静默丢字段）。这段历史留着，是为了解释当时为什么没升。
  *
  * 比当前支持更高的版本仍**明确拒绝**并给出升级提示 —— 新字段我们看不懂，
  * "尽力解析"等于骗用户说导入成功了。
@@ -46,7 +57,9 @@ import {
 import {
   MAX_CUSTOM_PATH_TYPES,
   customPathTypeEntries,
+  describePathTypeParams,
   isBuiltinPathType,
+  normalizePathTypeId,
   normalizePathTypeKind,
   validateCustomPathTypeInput,
   type PathTypeEntry,
@@ -55,7 +68,9 @@ import { describePathDashProblem } from './pathStyleSettings.ts'
 import {
   MAX_CUSTOM_REGION_TYPES,
   customRegionTypeEntries,
+  describeRegionTypeParams,
   isBuiltinRegionType,
+  normalizeRegionTypeId,
   validateCustomRegionTypeInput,
   type RegionTypeEntry,
 } from './regionTypeCatalog.ts'
@@ -88,21 +103,19 @@ export interface ResourceBundle {
   terrains: CustomTerrain[]
   markers: CustomMarker[]
   /**
-   * **只含自定义路径类型**（内置 4 种不进文件）。
+   * **整套路径类型目录**（内置 4 种 + 自定义），W4-3 起内置的**也进文件**。
    *
-   * 为什么内置的不导出：内置类型的 ID 在每个人的库里都存在，导出它们在导入侧
-   * 只会得到一串"已有同 ID，保留现有的"—— 既带不走任何东西，又让用户以为导入失败。
-   * 代价是"内置类型的画笔参数（颜色/线宽）不随文件分享"，这是一条明确的取舍，
-   * 而不是遗漏（要分享整套样式需要另一条冲突规则，属于以后的功能）。
+   * 为什么改口：W4-1 之后"线宽 / 颜色"这些**参数是每张地图各自一份**，而用户调得最勤的
+   * 恰恰是内置那四种的线宽。把它们排除在文件之外，跨地图搬运就只剩下一堆"自定义类型"，
+   * 而那通常是空的 —— 于是这个功能在真实使用里等于没用（"搬过去线宽全变回出厂值"）。
+   *
+   * 代价与防护：内置 ID 在每张图里都存在 ⇒ 导入时**每一条都是同名冲突**，默认**跳过**
+   * （只增不删的老口径不变）；用户要带走参数就在确认对话框里逐项勾「覆盖」。
+   * 这正是当年那句"要分享整套样式需要另一条冲突规则，属于以后的功能"所等待的那条规则。
    */
   pathTypes: PathTypeEntry[]
   /**
-   * **只含自定义区域类型**（内置 6 种不进文件）。
-   *
-   * 与内置路径类型同一条取舍、同一个理由：内置类型的 ID 在每个人的库里都存在
-   * （`realm` / `empire` …由代码定义），导出它们在导入侧只会得到一串"已有同 ID，保留现有的"——
-   * 既带不走任何东西，又让用户以为导入失败。
-   * 代价同样是"内置区域类型的画笔参数（颜色/不透明度/边框）不随文件分享"，这是取舍不是遗漏。
+   * **整套区域类型目录**（内置 6 种 + 自定义），与 `pathTypes` 同一条改动、同一个理由。
    */
   regionTypes: RegionTypeEntry[]
 }
@@ -148,7 +161,12 @@ export interface BuildBundleOptions {
   now?: Date
 }
 
-/** 导出：把当前自定义地形 / 标记 / 路径类型 / 区域类型打包成一份定义文件的内容 */
+/**
+ * 导出：把一份**定义集**（自定义地形 / 标记 + 整套路径与区域类型目录）打包成定义文件的内容。
+ *
+ * W4-3 起调用方传的是**当前地图的定义集**（"资源包是搬运工具"），于是内置类型的参数也在里面 ——
+ * 详见 `ResourceBundle.pathTypes` 的注释（那是这一批最要紧的一处口径变化）。
+ */
 export function buildResourceBundle(input: ResourceBundleInput, options: BuildBundleOptions = {}): ResourceBundle {
   const now = options.now ?? new Date()
   return {
@@ -157,13 +175,13 @@ export function buildResourceBundle(input: ResourceBundleInput, options: BuildBu
     exportedAt: now.toISOString(),
     terrains: input.terrains.map((terrain) => ({ ...terrain })),
     markers: (input.markers ?? []).map((marker) => ({ ...marker })),
-    // 内置类型由代码定义、不随文件走（见 ResourceBundle.pathTypes 的注释）
-    pathTypes: customPathTypeEntries(input.pathTypes ?? []).map((entry) => ({
+    // 整套目录带走（含内置项的参数）：跨地图搬运要的正是"我调好的线宽"
+    pathTypes: (input.pathTypes ?? []).map((entry) => ({
       ...entry,
       params: { ...entry.params, dash: [...entry.params.dash] },
     })),
-    // 同上，内置 6 种区域类型也不进文件
-    regionTypes: customRegionTypeEntries(input.regionTypes ?? []).map((entry) => ({
+    // 同上：整套区域类型目录（含内置 6 种的填充 / 边框参数）
+    regionTypes: (input.regionTypes ?? []).map((entry) => ({
       ...entry,
       params: { ...entry.params, borderDash: [...entry.params.borderDash] },
     })),
@@ -523,18 +541,21 @@ function parsePathTypes(list: unknown[], max: number, skipped: BundleSkip[]): Pa
       skipped.push({ id: id ?? `#${index + 1}`, reason: result.problem })
       return
     }
-    if (seen.has(result.entry.id)) {
-      skipped.push({ id: result.entry.id, reason: '文件里有重复 ID，只保留先出现的那条' })
+    // ID 用 `canonicalBundleId` 而不是校验器的 `entry.id`：后者是给"新增自定义项"用的，
+    // 一律补 `custom:` 前缀 —— 而文件里的内置项必须原样留住（见 `canonicalBundleId`）
+    const entryId = canonicalBundleId(record.id, isBuiltinPathType, normalizePathTypeId) ?? result.entry.id
+    if (seen.has(entryId)) {
+      skipped.push({ id: entryId, reason: '文件里有重复 ID，只保留先出现的那条' })
       return
     }
     if (out.length >= max) {
-      skipped.push({ id: result.entry.id, reason: `超过上限（最多 ${max} 条）` })
+      skipped.push({ id: entryId, reason: `超过上限（最多 ${max} 条）` })
       return
     }
-    seen.add(result.entry.id)
+    seen.add(entryId)
     // 大类原样保留（未知值按 `path` 收敛）：本轮只接线路径，但"文件里写的是什么"
     // 不该被我们悄悄改掉 —— 以后接线区域类型时，这份数据还得是对的。
-    out.push({ ...result.entry, kind: normalizePathTypeKind(record.kind) })
+    out.push({ ...result.entry, id: entryId, kind: normalizePathTypeKind(record.kind) })
   })
   return out
 }
@@ -575,18 +596,45 @@ function parseRegionTypes(list: unknown[], max: number, skipped: BundleSkip[]): 
       skipped.push({ id: id ?? `#${index + 1}`, reason: result.problem })
       return
     }
-    if (seen.has(result.entry.id)) {
-      skipped.push({ id: result.entry.id, reason: '文件里有重复 ID，只保留先出现的那条' })
+    // 与路径类型段逐字同理：内置 ID 原样留住（否则文件里的 `realm` 会变成 `custom:realm`，
+    // 既认不出冲突，又会凭空多出一条自定义区域类型）
+    const entryId = canonicalBundleId(record.id, isBuiltinRegionType, normalizeRegionTypeId) ?? result.entry.id
+    if (seen.has(entryId)) {
+      skipped.push({ id: entryId, reason: '文件里有重复 ID，只保留先出现的那条' })
       return
     }
     if (out.length >= max) {
-      skipped.push({ id: result.entry.id, reason: `超过上限（最多 ${max} 条）` })
+      skipped.push({ id: entryId, reason: `超过上限（最多 ${max} 条）` })
       return
     }
-    seen.add(result.entry.id)
-    out.push(result.entry)
+    seen.add(entryId)
+    out.push({ ...result.entry, id: entryId })
   })
   return out
+}
+
+/**
+ * 文件里的 ID → 规范 ID：**内置 ID 原样保留**，其余按用户输入规则补 `custom:` 前缀。
+ *
+ * 为什么解析侧必须做这件事（W4-3）：文件里现在带着**内置的**路径与区域类型，
+ * 而 `validateCustomPathTypeInput` / `validateCustomRegionTypeInput` 是给"用户新增自定义项"
+ * 用的 —— 它们一律补前缀（那是刻意的：内置名是留给内置的）。直接拿校验结果当 ID，
+ * 文件里的 `river` 就会变成 `custom:river`：**既撞不上这张图里的内置 `river`（冲突认不出来），
+ * 又会凭空多出一条自定义类型** —— 而"跨地图搬参数"这件事全靠 ID 对上号才成立。
+ *
+ * 与设置层 `normalizeRegionTypeEntries` 里的 `canonicalStoredId` 是同一条规则，
+ * 所以"文件里是什么 ID"与"设置里存得下什么 ID"不会分叉。
+ */
+function canonicalBundleId(
+  raw: unknown,
+  isBuiltin: (value: unknown) => boolean,
+  normalize: (raw: unknown) => string | null,
+): string | null {
+  if (typeof raw === 'string') {
+    const text = raw.trim().toLowerCase()
+    if (isBuiltin(text)) return text
+  }
+  return normalize(raw)
 }
 
 /* ------------------------------------------------------------------ 合并 */
@@ -595,6 +643,8 @@ export interface MergeTerrainsResult {
   added: string[]
   /** 与 `added` 一一对应的条目本身（调用方要"加到设置里"时用它，不必再按 ID 找回来） */
   addedItems: CustomTerrain[]
+  /** 被**覆盖**掉的条目 ID（用户在同名冲突里选了"覆盖"） */
+  replaced: string[]
   skipped: BundleSkip[]
 }
 
@@ -602,6 +652,7 @@ export interface MergeMarkersResult {
   markers: CustomMarker[]
   added: string[]
   addedItems: CustomMarker[]
+  replaced: string[]
   skipped: BundleSkip[]
 }
 
@@ -609,6 +660,7 @@ export interface MergePathTypesResult {
   pathTypes: PathTypeEntry[]
   added: string[]
   addedItems: PathTypeEntry[]
+  replaced: string[]
   skipped: BundleSkip[]
 }
 
@@ -616,27 +668,38 @@ export interface MergeRegionTypesResult {
   regionTypes: RegionTypeEntry[]
   added: string[]
   addedItems: RegionTypeEntry[]
+  replaced: string[]
   skipped: BundleSkip[]
 }
 
-/** 合并的通用规则：同 ID 保留现有的、超上限跳过、每条都给可读原因 */
+/** 合并的通用规则：同 ID 默认保留现有的（勾了"覆盖"才替换）、超上限跳过、每条都给可读原因 */
 function mergeById<T extends { id: string }>(
   existing: readonly T[],
   incoming: readonly T[],
   options: {
     max: number
-    /** 同 ID 冲突时的原因（内置类型需要一句话说明"内置的不能替换"） */
+    /** 同 ID 冲突且**没有**勾选覆盖时的原因 */
     conflictReason: (id: string) => string
+    /** 用户勾了"覆盖这张图里的同名项"的那些 ID（W4-3） */
+    overwrite?: (id: string) => boolean
   },
-): { items: T[]; added: T[]; addedIds: string[]; skipped: BundleSkip[] } {
+): { items: T[]; added: T[]; addedIds: string[]; replaced: string[]; skipped: BundleSkip[] } {
   const items = [...existing]
   const known = new Set(existing.map((item) => item.id))
   const added: T[] = []
   const addedIds: string[] = []
+  const replaced: string[] = []
   const skipped: BundleSkip[] = []
 
   for (const item of incoming) {
     if (known.has(item.id)) {
+      if (options.overwrite?.(item.id) === true) {
+        // 覆盖：**在原位**换成文件里那一条（顺序不动 —— 用户列表的次序也是他的东西）
+        const index = items.findIndex((candidate) => candidate.id === item.id)
+        if (index >= 0) items[index] = item
+        replaced.push(item.id)
+        continue
+      }
       skipped.push({ id: item.id, reason: options.conflictReason(item.id) })
       continue
     }
@@ -650,39 +713,53 @@ function mergeById<T extends { id: string }>(
     addedIds.push(item.id)
   }
 
-  return { items, added, addedIds, skipped }
+  return { items, added, addedIds, replaced, skipped }
 }
 
 /**
- * 把导入的地形合并进现有设置。
+ * 把导入的地形合并进现有目录。
  *
- * **同 ID 时保留现有的**（导入是补充，不是替换）：用户自己调好的颜色/图片不该被一份
- * 外来文件悄悄改掉；真想要对方的版本，先删掉自己那条再导入即可 —— 这条规则写在这里，
- * 也写在设置页的提示里，避免"以为导入会覆盖"或"以为导入会合并"的两种误解。
+ * **同 ID 默认保留现有的**（导入是补充，不是替换）：用户自己调好的颜色/图片不该被一份
+ * 外来文件悄悄改掉。**W4-3 起可以在确认对话框里逐项勾"覆盖"** —— 那条路是用户显式选的，
+ * 于是"悄悄改掉"与"我要求它改"分得很清楚。
  */
 export function mergeTerrains(
   existing: readonly CustomTerrain[],
   incoming: readonly CustomTerrain[],
-  options: { maxTerrains?: number } = {},
+  options: { maxTerrains?: number; overwrite?: (id: string) => boolean } = {},
 ): MergeTerrainsResult {
   const merged = mergeById(existing, incoming, {
     max: options.maxTerrains ?? MAX_CUSTOM_TERRAINS,
     conflictReason: () => CONFLICT_KEEP_EXISTING,
+    ...(options.overwrite !== undefined ? { overwrite: options.overwrite } : {}),
   })
-  return { terrains: merged.items, added: merged.addedIds, addedItems: merged.added, skipped: merged.skipped }
+  return {
+    terrains: merged.items,
+    added: merged.addedIds,
+    addedItems: merged.added,
+    replaced: merged.replaced,
+    skipped: merged.skipped,
+  }
 }
 
-/** 与地形同一条规则：同 ID 保留现有的（标记载着用户选好的图标与图片，更不该被改掉） */
+/** 与地形同一条规则：同 ID 默认保留现有的（标记载着用户选好的图标与图片，更不该被改掉） */
 export function mergeMarkers(
   existing: readonly CustomMarker[],
   incoming: readonly CustomMarker[],
-  options: { maxMarkers?: number } = {},
+  options: { maxMarkers?: number; overwrite?: (id: string) => boolean } = {},
 ): MergeMarkersResult {
   const merged = mergeById(existing, incoming, {
     max: options.maxMarkers ?? MAX_CUSTOM_MARKERS,
     conflictReason: () => CONFLICT_KEEP_EXISTING,
+    ...(options.overwrite !== undefined ? { overwrite: options.overwrite } : {}),
   })
-  return { markers: merged.items, added: merged.addedIds, addedItems: merged.added, skipped: merged.skipped }
+  return {
+    markers: merged.items,
+    added: merged.addedIds,
+    addedItems: merged.added,
+    replaced: merged.replaced,
+    skipped: merged.skipped,
+  }
 }
 
 /**
@@ -696,23 +773,32 @@ export function mergeMarkers(
 export function mergePathTypes(
   existing: readonly PathTypeEntry[],
   incoming: readonly PathTypeEntry[],
-  options: { maxPathTypes?: number } = {},
+  options: { maxPathTypes?: number; overwrite?: (id: string) => boolean } = {},
 ): MergePathTypesResult {
   const existingCustom = customPathTypeEntries(existing)
   const base = [...existing]
   const known = new Set(existing.map((entry) => entry.id))
   const added: PathTypeEntry[] = []
   const addedIds: string[] = []
+  const replaced: string[] = []
   const skipped: BundleSkip[] = []
   const max = options.maxPathTypes ?? MAX_CUSTOM_PATH_TYPES
   let customCount = existingCustom.length
 
   for (const entry of incoming) {
     if (known.has(entry.id)) {
+      // W4-3：勾了"覆盖"就**在原位**换成文件里那一条（内置类型的参数也走这条路 ——
+      // 参数是这张图自己的东西，用户显式要求带走就该带走）
+      if (options.overwrite?.(entry.id) === true) {
+        const index = base.findIndex((candidate) => candidate.id === entry.id)
+        if (index >= 0) base[index] = entry
+        replaced.push(entry.id)
+        continue
+      }
       skipped.push({
         id: entry.id,
         reason: isBuiltinPathType(entry.id)
-          ? '内置类型在每个库里都有，不能替换（导入是补充，不会覆盖）'
+          ? '内置类型在每个库里都有；要它换成本文件里的参数，请在下面那一项上勾「覆盖」'
           : CONFLICT_KEEP_EXISTING,
       })
       continue
@@ -723,11 +809,15 @@ export function mergePathTypes(
     }
     known.add(entry.id)
     customCount += 1
+    // ⚠️ 必须**同时**进 `base`：`added` 是"给用户看的新增清单"，`base` 是"这张图最终的目录"。
+    // 只记清单不入目录，`plan.result` 就会少掉每一条新增 —— 而 `plan.result` 正是落盘用的那一份
+    // （对话框说"将新增 1 条"、落盘却一条没进；这个缺陷被冒烟场景 36 抓住过一次）。
     added.push(entry)
     addedIds.push(entry.id)
+    base.push(entry)
   }
 
-  return { pathTypes: [...base, ...added], added: addedIds, addedItems: added, skipped }
+  return { pathTypes: base, added: addedIds, addedItems: added, replaced, skipped }
 }
 
 const CONFLICT_KEEP_EXISTING = '已有同 ID 的定义，保留现有的（导入是补充，不会覆盖）'
@@ -742,23 +832,31 @@ const CONFLICT_KEEP_EXISTING = '已有同 ID 的定义，保留现有的（导�
 export function mergeRegionTypes(
   existing: readonly RegionTypeEntry[],
   incoming: readonly RegionTypeEntry[],
-  options: { maxRegionTypes?: number } = {},
+  options: { maxRegionTypes?: number; overwrite?: (id: string) => boolean } = {},
 ): MergeRegionTypesResult {
   const existingCustom = customRegionTypeEntries(existing)
   const base = [...existing]
   const known = new Set(existing.map((entry) => entry.id))
   const added: RegionTypeEntry[] = []
   const addedIds: string[] = []
+  const replaced: string[] = []
   const skipped: BundleSkip[] = []
   const max = options.maxRegionTypes ?? MAX_CUSTOM_REGION_TYPES
   let customCount = existingCustom.length
 
   for (const entry of incoming) {
     if (known.has(entry.id)) {
+      // 与路径类型逐字同理：勾了"覆盖"就在原位换成文件里那一条
+      if (options.overwrite?.(entry.id) === true) {
+        const index = base.findIndex((candidate) => candidate.id === entry.id)
+        if (index >= 0) base[index] = entry
+        replaced.push(entry.id)
+        continue
+      }
       skipped.push({
         id: entry.id,
         reason: isBuiltinRegionType(entry.id)
-          ? '内置类型在每个库里都有，不能替换（导入是补充，不会覆盖）'
+          ? '内置类型在每个库里都有；要它换成本文件里的参数，请在下面那一项上勾「覆盖」'
           : CONFLICT_KEEP_EXISTING,
       })
       continue
@@ -769,31 +867,73 @@ export function mergeRegionTypes(
     }
     known.add(entry.id)
     customCount += 1
+    // 与路径类型逐字同理：新增的条目要**同时**进"给用户看的清单"和"最终的目录"
     added.push(entry)
     addedIds.push(entry.id)
+    base.push(entry)
   }
 
-  return { regionTypes: [...base, ...added], added: addedIds, addedItems: added, skipped }
-}
-
-/** 合并结果 → 计划里那一段（计划只关心"新增了哪些条目"与"跳过了哪些、为什么"） */
-function pickAdded<T>(merged: { addedItems: T[]; skipped: BundleSkip[] }): { added: T[]; skipped: BundleSkip[] } {
-  return { added: merged.addedItems, skipped: merged.skipped }
+  return { regionTypes: base, added: addedIds, addedItems: added, replaced, skipped }
 }
 
 /* ------------------------------------------------------- 导入计划（纯函数） */
 
+/**
+ * 一条**同名冲突**（文件里那一条的 ID 在这张图里已经有了）。
+ *
+ * 为什么要单独列出来：W4-3 起"同名怎么办"由用户决定 —— 对话框要为每一条画一个
+ * 「跳过 / 覆盖」的选择，所以计划必须把冲突**原样摆出来**（而不是混在 `skipped` 里
+ * 当成一条既成事实）。两侧各给一句人话描述，用户才有依据决定。
+ */
+export interface BundleConflict {
+  id: string
+  section: BundleSection
+  /** 这张图里现在那一条的一句话（"现在是什么"） */
+  current: string
+  /** 文件里那一条的一句话（"勾覆盖之后会变成什么"） */
+  incoming: string
+}
+
+/** 一段计划（新增 / 覆盖 / 跳过） */
+export interface BundleSectionPlan<T> {
+  added: T[]
+  /** 被覆盖的条目 ID（用户在同名冲突里勾了"覆盖"） */
+  replaced: string[]
+  skipped: BundleSkip[]
+}
+
 export interface BundleImportPlan {
   /** 文件里出现过的段（缺失的段在导入时不动用户设置） */
   sections: BundleSection[]
-  terrains: { added: CustomTerrain[]; skipped: BundleSkip[] }
-  markers: { added: CustomMarker[]; skipped: BundleSkip[] }
-  pathTypes: { added: PathTypeEntry[]; skipped: BundleSkip[] }
-  regionTypes: { added: RegionTypeEntry[]; skipped: BundleSkip[] }
+  terrains: BundleSectionPlan<CustomTerrain>
+  markers: BundleSectionPlan<CustomMarker>
+  pathTypes: BundleSectionPlan<PathTypeEntry>
+  regionTypes: BundleSectionPlan<RegionTypeEntry>
   /** 将新增的条目总数 */
   addedCount: number
-  /** 被跳过的条目总数（同 ID 冲突 + 非法 + 超上限） */
+  /** 将被**覆盖**的条目总数（用户勾出来的；没勾就是 0） */
+  replacedCount: number
+  /** 被跳过的条目总数（同 ID 未勾覆盖 + 非法 + 超上限） */
   skippedCount: number
+  /**
+   * **所有**同名冲突（不管用户有没有勾覆盖）—— 对话框照它画选择行。
+   *
+   * 与 `skipped` 的关系：没勾覆盖的那些冲突**同时**出现在这里与 `skipped` 里
+   * （一处给用户选，一处给用户读原因）。
+   */
+  conflicts: BundleConflict[]
+  /**
+   * 应用之后的四类目录 —— **这就是最终状态**。
+   *
+   * 为什么把它放进计划：对话框里说的（新增 M、覆盖 N）与落盘做的必须是**同一次计算**的结果，
+   * 于是"对话框说的与实际做的不一致"这类导入最该避免的缺陷从结构上不可能发生。
+   */
+  result: {
+    terrains: CustomTerrain[]
+    markers: CustomMarker[]
+    pathTypes: PathTypeEntry[]
+    regionTypes: RegionTypeEntry[]
+  }
   /** "条目进来了，但有一处被回退"的记录（与 `skippedCount` 分开计） */
   notes: BundleNote[]
   /** 文件里没有任何一段（理论上不会走到这里：解析侧已经拒绝） */
@@ -803,6 +943,13 @@ export interface BundleImportPlan {
 export interface PlanBundleOptions extends ParseBundleOptions {
   /** 解析阶段收集到的回退说明（来自 `parseResourceBundle` 的 `notes`） */
   notes?: readonly BundleNote[]
+  /**
+   * 用户在同名冲突里勾了"覆盖这张图里的同名项"的那些 ID（W4-3）。
+   *
+   * 传进来重算即可：对话框每次改动都拿新的一组 ID 重新调一次 `planBundleImport`，
+   * 于是"正文、按钮状态、最终落盘"三处永远来自同一份计划（同一个套路用了第三次）。
+   */
+  overwrite?: readonly string[]
 }
 
 export interface BundleImportCurrent {
@@ -842,35 +989,116 @@ export function planBundleImport(
    * "一份 v1 老文件清空用户标记"的东西。所以留着，但别把它当成当前的保护伞。
    */
   const has = (section: BundleSection) => sections.includes(section)
+  const overwriteSet = new Set(options.overwrite ?? [])
+  const overwrite = (id: string) => overwriteSet.has(id)
 
-  const terrains: { added: CustomTerrain[]; skipped: BundleSkip[] } = has('terrains')
-    ? pickAdded(mergeTerrains(current.terrains, bundle.terrains, { maxTerrains: options.maxTerrains }))
-    : { added: [], skipped: [] }
-  const markers: { added: CustomMarker[]; skipped: BundleSkip[] } = has('markers')
-    ? pickAdded(mergeMarkers(current.markers, bundle.markers, { maxMarkers: options.maxMarkers }))
-    : { added: [], skipped: [] }
-  const pathTypes: { added: PathTypeEntry[]; skipped: BundleSkip[] } = has('pathTypes')
-    ? pickAdded(mergePathTypes(current.pathTypes, bundle.pathTypes, { maxPathTypes: options.maxPathTypes }))
-    : { added: [], skipped: [] }
-  const regionTypes: { added: RegionTypeEntry[]; skipped: BundleSkip[] } = has('regionTypes')
-    ? pickAdded(mergeRegionTypes(current.regionTypes, bundle.regionTypes, { maxRegionTypes: options.maxRegionTypes }))
-    : { added: [], skipped: [] }
+  const terrains = has('terrains')
+    ? mergeTerrains(current.terrains, bundle.terrains, {
+        ...(options.maxTerrains !== undefined ? { maxTerrains: options.maxTerrains } : {}),
+        overwrite,
+      })
+    : { terrains: [...current.terrains], addedItems: [] as CustomTerrain[], replaced: [] as string[], skipped: [] as BundleSkip[] }
+  const markers = has('markers')
+    ? mergeMarkers(current.markers, bundle.markers, {
+        ...(options.maxMarkers !== undefined ? { maxMarkers: options.maxMarkers } : {}),
+        overwrite,
+      })
+    : { markers: [...current.markers], addedItems: [] as CustomMarker[], replaced: [] as string[], skipped: [] as BundleSkip[] }
+  const pathTypes = has('pathTypes')
+    ? mergePathTypes(current.pathTypes, bundle.pathTypes, {
+        ...(options.maxPathTypes !== undefined ? { maxPathTypes: options.maxPathTypes } : {}),
+        overwrite,
+      })
+    : { pathTypes: [...current.pathTypes], addedItems: [] as PathTypeEntry[], replaced: [] as string[], skipped: [] as BundleSkip[] }
+  const regionTypes = has('regionTypes')
+    ? mergeRegionTypes(current.regionTypes, bundle.regionTypes, {
+        ...(options.maxRegionTypes !== undefined ? { maxRegionTypes: options.maxRegionTypes } : {}),
+        overwrite,
+      })
+    : { regionTypes: [...current.regionTypes], addedItems: [] as RegionTypeEntry[], replaced: [] as string[], skipped: [] as BundleSkip[] }
+
+  const sectionsPlan = {
+    terrains: { added: terrains.addedItems, replaced: terrains.replaced, skipped: terrains.skipped },
+    markers: { added: markers.addedItems, replaced: markers.replaced, skipped: markers.skipped },
+    pathTypes: { added: pathTypes.addedItems, replaced: pathTypes.replaced, skipped: pathTypes.skipped },
+    regionTypes: { added: regionTypes.addedItems, replaced: regionTypes.replaced, skipped: regionTypes.skipped },
+  }
 
   const addedCount =
-    terrains.added.length + markers.added.length + pathTypes.added.length + regionTypes.added.length
+    terrains.addedItems.length + markers.addedItems.length + pathTypes.addedItems.length + regionTypes.addedItems.length
+  const replacedCount =
+    terrains.replaced.length + markers.replaced.length + pathTypes.replaced.length + regionTypes.replaced.length
   const skippedCount =
     terrains.skipped.length + markers.skipped.length + pathTypes.skipped.length + regionTypes.skipped.length
 
   return {
     sections,
-    terrains: { added: terrains.added, skipped: terrains.skipped },
-    markers: { added: markers.added, skipped: markers.skipped },
-    pathTypes: { added: pathTypes.added, skipped: pathTypes.skipped },
-    regionTypes: { added: regionTypes.added, skipped: regionTypes.skipped },
+    ...sectionsPlan,
     addedCount,
+    replacedCount,
     skippedCount,
+    // 冲突清单**与勾选无关**：没勾的那些也照旧列出来（用户要能回头改主意、也要能看见自己跳过了什么）
+    conflicts: [
+      ...collectConflicts('terrains', current.terrains, bundle.terrains),
+      ...collectConflicts('markers', current.markers, bundle.markers),
+      ...collectConflicts('pathTypes', current.pathTypes, bundle.pathTypes),
+      ...collectConflicts('regionTypes', current.regionTypes, bundle.regionTypes),
+    ],
+    result: {
+      terrains: terrains.terrains,
+      markers: markers.markers,
+      pathTypes: pathTypes.pathTypes,
+      regionTypes: regionTypes.regionTypes,
+    },
     notes: [...(options.notes ?? [])],
     empty: sections.length === 0,
+  }
+}
+
+/**
+ * 列出"文件里那一条的 ID 在这张图里已经有了"的那些条目。
+ *
+ * 与合并逻辑**分开算**：合并要给出"最终状态"，这里要给出"用户看的清单" ——
+ * 合成的结果里那些条目已经变成"新的那一条"了，看不出它原来撞了谁。
+ */
+function collectConflicts<T extends { id: string }>(
+  section: BundleSection,
+  current: readonly T[],
+  incoming: readonly T[],
+): BundleConflict[] {
+  if (incoming.length === 0) return []
+  const byId = new Map(current.map((item) => [item.id, item]))
+  const out: BundleConflict[] = []
+  for (const item of incoming) {
+    const existing = byId.get(item.id)
+    if (existing === undefined) continue
+    out.push({
+      id: item.id,
+      section,
+      current: describeEntry(section, existing),
+      incoming: describeEntry(section, item),
+    })
+  }
+  return out
+}
+
+/** 一条定义的一句话描述（给冲突清单用：用户凭它判断"要不要换成对方的"） */
+function describeEntry(section: BundleSection, entry: unknown): string {
+  const record = entry as Record<string, unknown>
+  const label = typeof record.label === 'string' && record.label.length > 0 ? record.label : '（未命名）'
+  switch (section) {
+    case 'terrains': {
+      const mode = record.mode === 'image' ? `图片 ${String(record.imagePath ?? '')}` : '调色'
+      return `${label} · ${mode} · ${String(record.color ?? '')}`
+    }
+    case 'markers': {
+      const mode = record.mode === 'image' ? `图片 ${String(record.imagePath ?? '')}` : `字形 ${String(record.icon ?? '')}`
+      return `${label} · ${mode}`
+    }
+    case 'pathTypes':
+      return `${label} · ${describePathTypeParams((entry as PathTypeEntry).params)}`
+    case 'regionTypes':
+      return `${label} · ${describeRegionTypeParams((entry as RegionTypeEntry).params)}`
   }
 }
 
@@ -890,10 +1118,13 @@ function describeAdded(label: string, ids: readonly string[]): string | null {
  */
 export function describeImportPlan(plan: BundleImportPlan): string {
   const lines: string[] = []
+  const parts: string[] = []
+  if (plan.addedCount > 0) parts.push(`新增 ${plan.addedCount} 条`)
+  if (plan.replacedCount > 0) parts.push(`覆盖 ${plan.replacedCount} 条`)
   lines.push(
-    plan.addedCount > 0
-      ? `将新增 ${plan.addedCount} 条定义（地形 ${plan.terrains.added.length} · 标记 ${plan.markers.added.length} · 路径类型 ${plan.pathTypes.added.length} · 区域类型 ${plan.regionTypes.added.length}）。`
-      : '没有可新增的定义：这份文件里的条目在你库里都已经有了（或全部不合法）。',
+    parts.length > 0
+      ? `将${parts.join('、')}定义（地形 ${plan.terrains.added.length} · 标记 ${plan.markers.added.length} · 路径类型 ${plan.pathTypes.added.length} · 区域类型 ${plan.regionTypes.added.length}）。`
+      : '没有可导入的定义：这份文件里的条目在你库里都已经有了（或全部不合法）。',
   )
   for (const line of [
     describeAdded('地形', plan.terrains.added.map((item) => item.id)),
@@ -902,6 +1133,15 @@ export function describeImportPlan(plan: BundleImportPlan): string {
     describeAdded('区域类型', plan.regionTypes.added.map((item) => item.id)),
   ]) {
     if (line !== null) lines.push(line)
+  }
+  if (plan.replacedCount > 0) {
+    const replaced = [
+      ...plan.pathTypes.replaced,
+      ...plan.regionTypes.replaced,
+      ...plan.terrains.replaced,
+      ...plan.markers.replaced,
+    ]
+    lines.push(`将覆盖 ${plan.replacedCount} 条（用文件里的定义换掉这张图现有的）：${replaced.join('、')}`)
   }
 
   const skipped = [
@@ -932,7 +1172,11 @@ export function describeImportPlan(plan: BundleImportPlan): string {
     for (const note of plan.notes.slice(0, 12)) lines.push(`　· ${note.id} —— ${note.reason}`)
   }
 
-  lines.push('导入只做补充：同 ID 保留你现有的定义，且不会删除任何东西。')
+  lines.push(
+    plan.conflicts.length > 0
+      ? `同名冲突 ${plan.conflicts.length} 条：默认不覆盖（保留你现有的），要换成文件里的版本，就在下面那一项上勾「覆盖」。导入不会删除任何东西。`
+      : '导入只做补充：不会覆盖你现有的定义，也不会删除任何东西。',
+  )
   return lines.join('\n')
 }
 
@@ -940,6 +1184,7 @@ export function describeImportPlan(plan: BundleImportPlan): string {
 export function describeImportResult(plan: BundleImportPlan): string {
   const counts = `地形 ${plan.terrains.added.length} · 标记 ${plan.markers.added.length} · 路径类型 ${plan.pathTypes.added.length} · 区域类型 ${plan.regionTypes.added.length}`
   const extra: string[] = []
+  if (plan.replacedCount > 0) extra.push(`覆盖 ${plan.replacedCount} 条`)
   if (plan.skippedCount > 0) extra.push(`跳过 ${plan.skippedCount} 条`)
   // 回退也报一下：否则"导入成功了但视觉不一样"就没了线索（详情在对话框里）
   if (plan.notes.length > 0) extra.push(`${plan.notes.length} 处回退见导入对话框`)
