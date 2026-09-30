@@ -791,6 +791,7 @@ W4-1 / W4-2 让参数变成"每张地图各自一份"，于是定义文件这件
 | **文案轮 W6：术语统一 8 条 + 长说明压短** | 687 | 1565 → **1565**（1 处精确标签断言同步改） | 90 模块 / 1575.3 → **1574.0 KiB** |
 | **数据层 UI W2/W3：色带变成一条轴 + 出厂数值类搬设置页** | 675 → **687** | 1556 → **1565**（设置页与侧栏两处改成驱动轴） | 89 → **90 模块 / 1575.3 KiB** |
 | **ISSUE-005：绘制模式拆出「自由绘制」（第四个模式）** | 694 → **695** | 1566 → **1583**（场景 21 扩写 +17） | 91 模块 / 1584.5 → **1592.9 KiB** |
+| **第五个绘制模式「沿格心走」（ISSUE-006）** | 696 → **700**（`hexEdges.test.ts` +4） | 1601 → **1626**（场景 21 +25） | 91 模块 / 1589.1 → **1594.5 KiB** |
 
 > 说明：数字都取自当时的**汇总行**（`ℹ tests N`、冒烟末行），不是估的；
 > 交错的小提交（缺陷修复、文档轮）会带来小幅波动，本表只给可对照的锚点。
@@ -956,7 +957,56 @@ W4-1 / W4-2 让参数变成"每张地图各自一份"，于是定义文件这件
 
 ---
 
-## 八、历史与归档
+## 九、新增第五个绘制模式「沿格心走」（2026-09-30，用户要求）
+
+> 记录与验收在 `docs/ISSUES.md` ISSUE-006。
+
+**用户原话**：「那加一个沿着格子中心走的绘制模式。」
+
+**为什么缺**：四个模式里没有一个"把落点吸到格心、依次穿过去"——`edge` 吸的是格顶点、`edge-step` 走格边、
+`interior` 点哪连哪（不吸附）、`free` 没有锚点。`interior` 的界面名一度叫「沿格心连接」，
+但它只是"折线恰好路过格心"，落点并不吸附，于是"穿过哪几个格子一目了然"这件事没有工具能做。
+
+**改了什么**：
+
+| 层 | 改动 |
+|---|---|
+| 几何 | `src/core/hexEdges.ts`：`GeometryMode` 新增 `center`；新增纯函数 `snapPointToCellCenter(grid, point)` /
+  `isSameCell(grid, a, b)` / `snapPointsToCellCenters(grid, points)`（吸附 + 丢连续同格）。 |
+| 编辑器 | `src/editor/MapEditor.ts`：`snapDraftPoint` 对 `center` 吸格心；`addDraftPoint` 对"落到同一格"的点击不再加点；
+  `draftDisplayPoints` 让预览的橡皮筋端点也吸附；`commitGeometry` 原样提交（不再走沿网格线的 `toEdgePath`）；
+  `smooth` 只在 `interior` 置位（`center` 自然不平滑，理由写进注释）。 |
+| 数据 | `src/data/mapDocument.ts`：`readGeometryMode` 多认一个 `center`，其余仍回退 `interior`（老数据零改动）。 |
+| 界面 | `src/ui/strings.ts` 的 `DRAW_MODE_LABELS` / `DRAW_MODE_HINTS` / `DRAW_MODE_KEYS` 加一项；
+  `src/ui/toolSections.ts` 的 `GEOMETRY_OPTIONS` 三项 → **五项**，顺序把两个「走」的排在一起。 |
+| 渲染 | **一处未改**：`drawDraft` 的判据本来就是 `draft.mode !== 'free'` 才画顶点手柄 ——
+  `center` 走的是"有锚点"那一支。这是复用既有判据的证据（不需要为它加分支）。 |
+
+**验证强度**：单测 696 → **700**（`tests/hexEdges.test.ts` +4：任意落点吸到**所在格**的格心（pointy / flat 各扫一片）、
+吸收幂等、同格去重且只去**连续**重复（绕圈回同格是闭合）、`isSameCell` 按格身份）；
+冒烟场景 21 **+25**（1601 → **1626**）：按钮 4 → 5 且顺序含 `center`、点两个格心 → `mode === 'center'` 且两点各精确落在格心、
+同格连点不产生重复点也不多历史、草稿有锚点且不平滑、预览光标端吸附、不足 2 个格心不提交、区域同样记 `center` 且不补沿边顶点、
+`center` 落盘往返、五种模式的 mode 都能原样读回。构建 91 模块 / 1589.1 → **1594.5 KiB**。
+
+**破坏性验证（2 处，逐处确认变红后还原）**：
+① `snapDraftPoint` 对 `center` 不吸附（退回点击的像素位置）⇒ 冒烟 **3 条红**：
+  `沿格心走的起点吸附到格心（不是点击的像素位置）`、`每一个锚点都精确落在格心（≤1e-6）`、`两个顶点都精确落在格心（≤1e-6）`；
+  （去重那条**没红**：它用 `addDraftPoint` 送两个落在同一格的不同像素，`isSameCell` 按格身份判断，不依赖吸附）；
+② `readGeometryMode` 不认 `center` ⇒ 冒烟 **2 条红**：`重新解析后 center 仍是 center（没有被回退成 interior）`
+  与 `五种模式都在文件里能原样读回（edge / center / edge-step / interior / free）`；
+  实测报 `paths=["interior","edge","interior","free"] regions=["interior","edge","edge-step"]`（`center` 全被回退成 `interior`）。
+
+**没做 / 未验证**：
+
+- **手感没在真实 Obsidian 里看过**："点一格吸一格"的落点反馈、密集点击时的观感、以及长路线（几十格）时的顶点数是否可接受，
+  都要人眼确认一次（`src/dev/diagnostics.ts` 与既有浮窗只报"已定 N 个顶点"，不报"经过几格"）；
+- **没有"沿格心路线"的自动补格**：两点之间是**直连**（点哪两个格心就连哪两个），中间跨过的格子不会自动补成逐格折线 ——
+  这是刻意与 `edge`（自动沿网格线走）区分：`center` 的语义是"我点过的那几个格子"，不是"两点之间最短的格序列"；
+- **没有交互式的"重新吸附"**：`mode` 字段只是回显（与既有四个模式同一口径），把一条老 `interior` 路径"转成沿格心"没有入口；
+- **`MapToolbar` 浮窗**只读 `drawModeLabel` / `drawModeHint`，因此新模式的浮窗文案是自动跟上的（没有单独改代码，也就没有单独的断言）。
+
+---
+## 十、历史与归档
 
 - 本周期之前的实施记录：`archive/PHASE-0-RESULTS.md` / `archive/PHASE-1-NOTES.md` / `archive/PHASE-3-BASE-VIEW.md` /
   `archive/TECHNICAL-DESIGN-v2.md`（均已加「历史文档（已归档）」横幅）；

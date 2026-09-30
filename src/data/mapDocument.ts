@@ -268,14 +268,15 @@ export interface MapPath {
   cap?: PathCapStyle
   join?: PathJoinStyle
   /**
-   * 绘制模式：`interior`（默认，过格心的折线）/ `edge`（沿六边形边）/
+   * 绘制模式：`interior`（默认，点哪连哪的折线）/ `edge`（沿六边形边）/
+   * `center`（沿格心走，落点吸附到格心）/
    * `edge-step`（格步进）/ `free`（自由绘制，按指针轨迹落点、没有锚点）。
    *
    * ⚠️ **几何本身在提交时就已经转换好了**（`pts` 就是沿网格线的顶点序列），
    * 这个字段记录"当初按哪种模式画的"，用于界面回显（与将来的"重新吸附"）；
    * 渲染不需要读它。缺省即 `interior`，因此旧地图完全兼容 ——
    * 老数据里曾经"一种模式干两件事"（过格心折线 + 随手画），一律按 `interior` 读，
-   * **不迁移、不改写**（ISSUE-005）；`free` 只是新增取值。
+   * **不迁移、不改写**（ISSUE-005）；`free` 与 `center` 都只是新增取值。
    */
   mode?: GeometryMode
 }
@@ -721,15 +722,16 @@ function parseMarker(raw: Record<string, unknown>, path: string, issues: MapDocu
 /**
  * 读取绘制模式。
  *
- * 认得的四个取值原样返回；**其余一律回退为 `interior`**（过格心的折线）：
+ * 认得的五个取值原样返回；**其余一律回退为 `interior`**（过格心的折线）：
  * 那既是旧地图的缺省语义，也是新老地图都能渲染的安全默认，
  * 不会因为手工编辑写错一个词就让形状消失。
  *
  * ⚠️ 老数据里的 `interior` 就是 `interior` —— 这里**不做任何迁移**（ISSUE-005 的硬口径：
- * 文件里已有的写法一个字节都不动）。
+ * 文件里已有的写法一个字节都不动）。同理，新增 `center` 只是**多认一个词**：
+ * 旧地图里没有它，也永远不会被改写成它。
  */
 function readGeometryMode(value: unknown): GeometryMode {
-  if (value === 'edge' || value === 'edge-step' || value === 'free') return value
+  if (value === 'edge' || value === 'center' || value === 'edge-step' || value === 'free') return value
   return 'interior'
 }
 

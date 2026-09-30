@@ -4229,7 +4229,7 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
   plugin.onunload()
 }
 
-console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线连接 / 格步进 / 沿格心连接 / 自由绘制）')
+console.log('\n场景 21：路径与区域的五种绘制模式（沿网格走 / 沿格心走 / 逐格前进 / 锚点折线 / 自由绘制）')
 {
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -4292,14 +4292,14 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
   // ⚠️ 面板是**整块重建**式重绘：每次改状态后元素都是新的，所以这里要按需现取，
   // 不能像浮窗时期那样抓一个常量用到底（抓了常量会在"重建后"读到已脱离 DOM 的旧元素）。
   const geometryButtons = () => inPanel(panel, 'fc-panel-geometry')
-  const geometryLabels = [DRAW_MODE_LABELS.edge, DRAW_MODE_LABELS.step, DRAW_MODE_LABELS.interior, DRAW_MODE_LABELS.free]
+  const geometryLabels = [DRAW_MODE_LABELS.edge, DRAW_MODE_LABELS.center, DRAW_MODE_LABELS.step, DRAW_MODE_LABELS.interior, DRAW_MODE_LABELS.free]
   check(
-    '侧栏「工具」有四个绘制模式按钮（沿网格线连接 / 格步进 / 沿格心连接 / 自由绘制）',
-    geometryButtons().length === 4,
+    '侧栏「工具」有五个绘制模式按钮（沿网格走 / 沿格心走 / 逐格前进 / 锚点折线 / 自由绘制）',
+    geometryButtons().length === 5,
     String(geometryButtons().length),
   )
   check(
-    '四个模式的标签齐全且顺序固定',
+    '五个模式的标签齐全且顺序固定（两个「走」的相邻）',
     geometryButtons().map((button) => button.textContent).join('|') === geometryLabels.join('|'),
     geometryButtons().map((button) => button.textContent).join('|'),
   )
@@ -4322,6 +4322,141 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
     geometryButtons().map((button) => `${button.textContent}:${button.classList.contains('is-active')}`).join('|'),
   )
 
+
+  // ---- 沿格心走（第五个模式）：落点吸附格心、相邻两格直连、同格连点去重、不叠平滑 ----
+  // 世界坐标 → 轴坐标 → 格心（与标记放置同一判据）。断言也用它，于是"精确落在格心"可判伪。
+  const gridSpec = () => grid()
+  const centerOfCell = (q, r) => axialToWorld(gridSpec(), q, r)
+  /** 三个格心对应的屏幕坐标（先吸到格心，再换算成 client） */
+  const clicksOfCenter = (anchors) => anchors.map((anchor) => canvas._clientFor(anchor))
+  const centerButton = geometryButtons().find((button) => button.textContent === DRAW_MODE_LABELS.center)
+  check('侧栏「工具」有「沿格心走」按钮', centerButton !== undefined, geometryButtons().map((b) => b.textContent).join(', '))
+  fireEvent(centerButton, 'click')
+  check('点击「沿格心走」切到 center 模式', editor.geometryMode === 'center', editor.geometryMode)
+  flushFrames()
+  check('面板上没有两个按钮同时高亮', geometryButtons().filter((button) => button.classList.contains('is-active')).length === 1)
+
+  editor.setTool('path')
+  editor.setPathType('river')
+  flushFrames()
+  // 沿格心走这一节也要走一次命名框（与其它模式的口径一致：形状提交后弹命名）
+  plugin.setPromptModalFactory((_app, options, onSubmit) => {
+    prompts.push({ options, onSubmit })
+    return { open() {} }
+  })
+  // 回车结束草稿的处理器：这里先取（下面这一整节都要用它，声明在后面会踩到 TDZ）
+  const enterHandler = app.keymap.activeScope.registrations.find((item) => item.key === 'Enter')
+  const centerUndoBefore = editor.getStatus().undo
+  const centerPathCountBefore = layers.getDocument(canvasPath).paths.length
+  // 第 1 格：故意点在这一格里"偏一边"的位置，必须吸到格心而不是落在点击的像素上
+  const centerCell1 = { q: -3, r: 2 }
+  const centerCell2 = { q: 4, r: -3 }
+  const centerCell3 = { q: 4, r: -1 }
+  const centerAnchor1 = centerOfCell(centerCell1.q, centerCell1.r)
+  const centerAnchor2 = centerOfCell(centerCell2.q, centerCell2.r)
+  const centerAnchor3 = centerOfCell(centerCell3.q, centerCell3.r)
+  const c1 = canvas._clientFor({ x: centerAnchor1.x + 7, y: centerAnchor1.y - 5 })
+  const c2 = canvas._clientFor({ x: centerAnchor2.x - 6, y: centerAnchor2.y + 4 })
+  const c3 = canvas._clientFor({ x: centerAnchor3.x + 5, y: centerAnchor3.y + 3 })
+  /**
+   * 点一格。
+   *
+   * ⚠️ 两次点击之间必须等一拍：`MapInteraction` 用 `DOUBLE_CLICK_MS` 判定"双击结束草稿"，
+   * 同一格连点两次如果挨在一起，会被认成"双击"而不是"重复点击"。
+   */
+  const clickCell = async (client) => {
+    await settleEvents()
+    firePointer(host, 'pointerdown', { clientX: client.x, clientY: client.y, target: wrapper })
+    firePointer(host, 'pointerup', { clientX: client.x, clientY: client.y, target: wrapper })
+  }
+  await clickCell(c1)
+  const centerDraftStart = editor.getDraft()
+  check('沿格心走的起点吸附到格心（不是点击的像素位置）', centerDraftStart.points.length === 1 && Math.hypot(centerDraftStart.points[0].x - centerAnchor1.x, centerDraftStart.points[0].y - centerAnchor1.y) < 1e-6, JSON.stringify(centerDraftStart.points))
+  check('沿格心走有锚点（草稿记着自己的模式，不是 free）', centerDraftStart.mode === 'center', String(centerDraftStart.mode))
+  check('沿格心走的草稿不叠平滑（平滑会把线从格心上带走）', centerDraftStart.smooth === false, String(centerDraftStart.smooth))
+  // 同一格连点两次：不产生重复点（零长线段丢掉），也不产生第二条历史。
+  // ⚠️ 这里直接调 `addDraftPoint`（手势层在两次间隔 < `DOUBLE_CLICK_MS` 时把它当"双击结束"，
+  //    不是"重复点击"）—— 走的仍是加点的同一段去重逻辑，只是绕开双击语义。
+  editor.addDraftPoint({ x: centerAnchor1.x + 3, y: centerAnchor1.y - 2 })
+  check('同一格连点两次不产生重复点（零长线段被丢掉）', editor.getDraft().points.length === 1, String(editor.getDraft().points.length))
+  check('被丢掉的重复点击没有多出历史', editor.getStatus().undo === centerUndoBefore, String(editor.getStatus().undo))
+  await clickCell(c2)
+  await clickCell(c3)
+  const centerDraft = editor.getDraft()
+  check('三个不同格心 = 三个锚点', centerDraft.points.length === 3, String(centerDraft.points.length))
+  const centerDraftSnapped = [centerAnchor1, centerAnchor2, centerAnchor3].every((anchor, index) =>
+    Math.hypot(centerDraft.points[index].x - anchor.x, centerDraft.points[index].y - anchor.y) < 1e-6,
+  )
+  check('每一个锚点都精确落在格心（≤1e-6）', centerDraftSnapped, JSON.stringify(centerDraft.points))
+  // 预览：光标那一端也要吸附（否则末段是"格心 → 任意像素"的斜线）
+  const centerHover = centerOfCell(7, -4)
+  const cHover = canvas._clientFor({ x: centerHover.x + 9, y: centerHover.y - 6 })
+  firePointer(host, 'pointermove', { clientX: cHover.x, clientY: cHover.y, target: wrapper })
+  const centerPreview = editor.getDraft()
+  check('沿格心走的预览光标端也吸附到格心', centerPreview.cursor !== null && Math.hypot(centerPreview.cursor.x - centerHover.x, centerPreview.cursor.y - centerHover.y) < 1e-6, JSON.stringify(centerPreview.cursor))
+
+  // 只有一个格心（不足 2 个不同格心）→ 不提交对象
+  editor.cancelDraft()
+  flushFrames()
+  await clickCell(c1)
+  enterHandler.handler({ key: 'Enter' })
+  flushFrames()
+  check('只有一个格心时不提交对象（与其它模式一致）', editor.getStatus().undo === centerUndoBefore && layers.getDocument(canvasPath).paths.length === centerPathCountBefore, String(editor.getStatus().undo))
+
+  // 两个不同格心 → 提交：mode 是 center、两个点精确落在格心、不叠平滑。
+  // ⚠️ 先等过 `DOUBLE_CLICK_MS`：上一步的"单击 + 同位置回车"留下的 lastClick 状态会让
+  //    紧接着的同一格点击被认成双击（那是**手势**语义，不是这次要测的东西）。
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  await clickCell(c1)
+  await clickCell(c2)
+  enterHandler.handler({ key: 'Enter' })
+  flushFrames()
+  // 命名框只在**真的提交出对象**时弹出；这里的守卫让"没提交"与"提交了"不会互相冒充
+  if (prompts.length > 0) prompts[prompts.length - 1].onSubmit(null)
+  flushFrames()
+  const centerPath = layers.getDocument(canvasPath).paths[centerPathCountBefore]
+  check('沿格心走提交的路径 mode === center', centerPath?.mode === 'center', String(centerPath?.mode))
+  check('沿格心走的路径正好两个顶点（同格连点没有补进来）', centerPath.pts.length === 2, String(centerPath.pts.length))
+  check(
+    '两个顶点都精确落在格心（≤1e-6）',
+    centerPath.pts.every((pt, index) => {
+      const anchor = [centerAnchor1, centerAnchor2][index]
+      return Math.hypot(pt[0] - anchor.x, pt[1] - anchor.y) < 1e-6
+    }),
+    JSON.stringify(centerPath.pts),
+  )
+  const consecutiveCellsDiffer = centerPath.pts.every((pt, index) => {
+    if (index === 0) return true
+    const previous = worldToAxial(gridSpec(), { x: centerPath.pts[index - 1][0], y: centerPath.pts[index - 1][1] })
+    const current = worldToAxial(gridSpec(), { x: pt[0], y: pt[1] })
+    return cellKey(previous.q, previous.r) !== cellKey(current.q, current.r)
+  })
+  check('相邻顶点必定落在不同格（没有零长线段）', consecutiveCellsDiffer, JSON.stringify(centerPath.pts))
+  check('沿格心走不叠平滑（河流的 smooth 对它不生效）', centerPath.smooth === undefined, String(centerPath.smooth))
+  check('一次沿格心走 = 一条历史', editor.getStatus().undo === centerUndoBefore + 1, centerUndoBefore + ' → ' + editor.getStatus().undo)
+
+  // 区域也能沿格心走：顶点就是三个格心（不做沿网格线的补点）
+  editor.setTool('region')
+  flushFrames()
+  const centerRegionCountBefore = layers.getDocument(canvasPath).regions.length
+  for (const client of clicksOfCenter([centerAnchor1, centerAnchor2, centerAnchor3])) await clickCell(client)
+  enterHandler.handler({ key: 'Enter' })
+  flushFrames()
+  if (prompts.length > 0) prompts[prompts.length - 1].onSubmit(null)
+  flushFrames()
+  const centerRegion = layers.getDocument(canvasPath).regions[centerRegionCountBefore]
+  check('沿格心走的区域也记 mode === center', centerRegion?.mode === 'center', String(centerRegion?.mode))
+  check('沿格心走的区域顶点就是三个格心（不补沿边顶点）', centerRegion.pts.length === 3, String(centerRegion.pts.length))
+
+  // 落盘往返：center 写进文件、读回来仍是 center（老数据一个字节不改）
+  await store.flush()
+  const centerSaved = app.vault.files.get('Maps/World.map.md') ?? ''
+  check('沿格心走写进了文件', centerSaved.includes('"mode": "center"') || centerSaved.includes('"mode":"center"'), centerSaved.slice(0, 200))
+
+  // 下面那一节测的是沿网格走，所以这里把模式调回 `edge`（不是 `interior`）
+  editor.setGeometryMode('edge')
+  check('切回沿网格走（后续沿网格线那一节从这里开始）', editor.geometryMode === 'edge')
+  flushFrames()
   // ---- 沿网格线模式：区域 ----
   prompts.length = 0
   clickAt({ x: -400, y: 300 })
@@ -4333,7 +4468,8 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
   prompts[prompts.length - 1].onSubmit(null)
   flushFrames()
 
-  const region = layers.getDocument(canvasPath).regions[0]
+  // ⚠️ 前面的沿格心走已经提交了一个区域（index 0）；这里按"最后一个"取，避免索引随新增模式漂移
+  const region = layers.getDocument(canvasPath).regions[layers.getDocument(canvasPath).regions.length - 1]
   check('区域已提交', region !== undefined)
   check('区域记录了沿网格线模式', region.mode === 'edge', String(region.mode))
   check(
@@ -4362,7 +4498,7 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
     `拦截=${hit.stopped} 区域数 ${before} → ${layers.getDocument(canvasPath).regions.length}`,
   )
   editor.undo()
-  check('删除区域可撤销（区域回来且模式还在）', layers.getDocument(canvasPath).regions[0]?.mode === 'edge')
+  check('删除区域可撤销（区域回来且模式还在）', layers.getDocument(canvasPath).regions[layers.getDocument(canvasPath).regions.length - 1]?.mode === 'edge')
 
   // ---- 沿网格线模式：路径（河流不再平滑，否则等于把格边抹掉）----
   editor.setMode('paint')
@@ -4371,13 +4507,12 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
   clickAt({ x: -300, y: -200 })
   clickAt({ x: 0, y: -200 })
   clickAt({ x: 0, y: 100 })
-  const enterHandler = app.keymap.activeScope.registrations.find((item) => item.key === 'Enter')
   enterHandler.handler({ key: 'Enter' })
   flushFrames()
   prompts[prompts.length - 1].onSubmit(null)
   flushFrames()
 
-  const edgePath = layers.getDocument(canvasPath).paths[0]
+  const edgePath = layers.getDocument(canvasPath).paths[layers.getDocument(canvasPath).paths.length - 1]
   check('路径记录了沿网格线模式', edgePath.mode === 'edge', String(edgePath.mode))
   check('沿网格线的路径不平滑（平滑会把格边抹成曲线）', edgePath.smooth === undefined, String(edgePath.smooth))
   check('沿网格线的路径每一段都是格边', allEdges(edgePath.pts), `段长 ${segmentLengths(edgePath.pts).map((n) => n.toFixed(1)).join(', ')}`)
@@ -4407,13 +4542,13 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
   flushFrames()
   prompts[prompts.length - 1].onSubmit(null)
   flushFrames()
-  const freePath = layers.getDocument(canvasPath).paths[1]
+  const freePath = layers.getDocument(canvasPath).paths[layers.getDocument(canvasPath).paths.length - 1]
   check('沿格心连接模式记录在数据里', freePath.mode === 'interior', String(freePath.mode))
   check('沿格心连接模式保留了河流的平滑', freePath.smooth === true, String(freePath.smooth))
   check('沿格心连接模式只有点击的两个顶点', freePath.pts.length === 2, String(freePath.pts.length))
   check('沿格心连接模式产生了一条可撤销历史', editor.getStatus().undo > undoBefore)
 
-  // ---- 自由绘制（ISSUE-005 的第四个模式）：按住拖动采样、抬手一次性提交、没有可拖顶点 ----
+  // ---- 自由绘制（ISSUE-005 加进来的模式）：按住拖动采样、抬手一次性提交、没有可拖顶点 ----
   const freeButton = geometryButtons().find((button) => button.textContent === DRAW_MODE_LABELS.free)
   fireEvent(freeButton, 'click')
   check('点击「自由绘制」切到 free 模式', editor.geometryMode === 'free', editor.geometryMode)
@@ -4482,8 +4617,8 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
     JSON.stringify(reloaded.document.paths.map((path) => path.mode)),
   )
   check(
-    '每个路径的 mode 都是四个合法取值之一',
-    reloaded.document.paths.every((path) => ['edge', 'edge-step', 'interior', 'free'].includes(path.mode)),
+    '每个路径的 mode 都是五个合法取值之一',
+    reloaded.document.paths.every((path) => ['edge', 'center', 'edge-step', 'interior', 'free'].includes(path.mode)),
     JSON.stringify(reloaded.document.paths.map((path) => path.mode)),
   )
 
@@ -4567,6 +4702,24 @@ console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线�
     '多出的顶点只来自闭合回程（很少）',
     steppedRegion.pts.length - traced.length <= 6,
     `闭合回程补了 ${steppedRegion.pts.length - traced.length} 个顶点`,
+  )
+
+  // ---- 落盘往返（整场汇总）：五种模式的 mode 都要原样回来，老数据一个字节不改 ----
+  await store.flush()
+  const allSaved = app.vault.files.get('Maps/World.map.md') ?? ''
+  const allReloaded = await store.load(app.vault.getAbstractFileByPath('Maps/World.map.md'))
+  const reloadedPathModes = allReloaded.document.paths.map((path) => path.mode)
+  const reloadedRegionModes = allReloaded.document.regions.map((region) => region.mode)
+  check('沿格心走写进了文件', allSaved.includes('"mode": "center"') || allSaved.includes('"mode":"center"'), allSaved.slice(0, 200))
+  check(
+    '重新解析后 center 仍是 center（没有被回退成 interior）',
+    reloadedPathModes.includes('center') && reloadedRegionModes.includes('center'),
+    `paths=${JSON.stringify(reloadedPathModes)} regions=${JSON.stringify(reloadedRegionModes)}`,
+  )
+  check(
+    '五种模式都在文件里能原样读回（edge / center / edge-step / interior / free）',
+    ['edge', 'center', 'edge-step', 'interior', 'free'].every((mode) => reloadedPathModes.includes(mode) || reloadedRegionModes.includes(mode)),
+    `paths=${JSON.stringify(reloadedPathModes)} regions=${JSON.stringify(reloadedRegionModes)}`,
   )
 
   plugin.onunload()

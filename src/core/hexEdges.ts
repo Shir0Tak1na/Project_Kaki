@@ -10,20 +10,26 @@
  * 排序邻居，使找出来的路尽量直、且结果确定可复现。
  */
 
-import { hexCorners, axialToWorld, worldToAxial, type GridSpec, type Point } from './hex.ts'
+import { cellKey, hexCorners, axialToWorld, worldToAxial, type GridSpec, type Point } from './hex.ts'
 
 /**
  * 绘制模式：
  * - `interior`：穿过格子内部（过格心的折线；有锚点、顶点可再编辑）
  * - `edge`：沿网格线 —— 落点吸附到顶点，顶点之间**自动**沿网格线走
+ * - `center`：沿格心走 —— 落点吸附到**格心**，相邻两个落点之间直连（穿过哪几个格子一目了然）
  * - `edge-step`：格步进 —— 每次点击只沿网格线**前进一条边**（手动描边，方向由点击位置决定）
  * - `free`：自由绘制 —— 按指针轨迹落点，**没有锚点 / 没有可拖顶点**，抬手一次性提交
  *
  * ⚠️ `interior` 与 `free` 是两件事（ISSUE-005）：前者是"点几个点连成过格心的折线"，
  * 后者是"完全没有锚点地随手画"。历史数据里两者都曾写成 `interior` ——
  * 老数据**照旧按过格心的折线读**（不迁移、不改写），`free` 只是新增的一个取值。
+ *
+ * ⚠️ `interior` 与 `center` 也是两件事，别看名字像：
+ * `interior` 是**点哪连哪**（不吸附，可以落在格子里的任意像素上，也可以斜穿格子），
+ * `center` 是**逐格**（每次点击吸附到该格中心，线因此恰好穿过一串格心）。
+ * 两者都有锚点、顶点都能再编辑，区别只在"落点吸不吸附"。
  */
-export type GeometryMode = 'interior' | 'edge' | 'edge-step' | 'free'
+export type GeometryMode = 'interior' | 'edge' | 'center' | 'edge-step' | 'free'
 
 export interface HexVertex {
   /** 顶点身份键（同一顶点由 3 个六边形共享，必须归一到同一个键） */
@@ -230,6 +236,53 @@ export function toEdgePath(grid: GridSpec, points: readonly Point[], closed = fa
     if (vertexKey(grid, last) === vertexKey(grid, first.point)) deduped.pop()
   }
   return deduped
+}
+
+/**
+ * 「沿格心走」的落点吸附：世界坐标 → 所在格 → 该格中心的**世界坐标**。
+ *
+ * 与标记放置那一套（`markerPlacement.snapToCellCenter(grid, q, r)`）是同一个判据、同一个公式：
+ * 世界坐标 → 轴坐标 → `axialToWorld`。于是"地标落在格心"与"线穿过格心"在画面上是同一组点，
+ * 不会出现两套"格心"。
+ *
+ * ⚠️ 名字**刻意**取得与那边不同（那边收的是格坐标 `(q, r)`，这边收的是**世界坐标**点）：
+ * 两个同名不同签名的函数放在一起，读代码的人迟早会拿错一个。这里多写的"Point"就是那个区分。
+ */
+export function snapPointToCellCenter(grid: GridSpec, point: Point): Point {
+  const cell = worldToAxial(grid, point)
+  return axialToWorld(grid, cell.q, cell.r)
+}
+
+/** 两个世界坐标是否落在**同一格**（比较轴坐标，而不是浮点距离） */
+export function isSameCell(grid: GridSpec, a: Point, b: Point): boolean {
+  const cellA = worldToAxial(grid, a)
+  const cellB = worldToAxial(grid, b)
+  return cellKey(cellA.q, cellA.r) === cellKey(cellB.q, cellB.r)
+}
+
+/**
+ * 「沿格心走」的落点序列：逐个吸附到格心，并丢掉**落在同一格的连续重复点**。
+ *
+ * 为什么去重必须在这一层做（而不是留给渲染）：
+ * 同一格连点两次会得到两个**完全相同**的坐标 ⇒ 一条零长线段。它进历史就是一次
+ * "撤销了看不出变化"的空操作，进文件就是一对冗余坐标，最坏情况是让"点了两次就够两个点"
+ * 这种判断把一条零长路径放进去（长度 0 的线在画布上什么都看不到）。
+ *
+ * 判据用**格身份**（`isSameCell`）而不是浮点相等：吸附后的坐标本身就该是格心，
+ * 但"先算格心再比坐标"会把"两次点击落在同一格"这件事交给浮点误差去裁决。
+ *
+ * 只去**连续**重复（与 `dedupeConsecutive` 同一口径）：绕一圈回到同一格是有意义的闭合。
+ */
+export function snapPointsToCellCenters(grid: GridSpec, points: readonly Point[]): Point[] {
+  const out: Point[] = []
+  let last: Point | null = null
+  for (const point of points) {
+    const center = snapPointToCellCenter(grid, point)
+    if (last !== null && isSameCell(grid, last, center)) continue
+    out.push(center)
+    last = center
+  }
+  return out
 }
 
 /**

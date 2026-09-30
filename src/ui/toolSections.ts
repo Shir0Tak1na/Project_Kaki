@@ -146,11 +146,13 @@ export const BRUSH_OPS: ReadonlyArray<{ value: BrushOp; label: string; hint: str
 /**
  * 路径/区域的绘制模式（仅这两个工具下显示）。
  *
- * 界面顺序 = `GEOMETRY_OPTIONS` 的顺序（沿网格线连接 / 格步进 / 沿格心连接 / 自由绘制），
+ * 界面顺序 = `GEOMETRY_OPTIONS` 的顺序（**沿网格走 · 沿格心走 · 逐格前进 · 锚点折线 · 自由绘制**）
+ * —— 两个「走」的排在一起，用户找"怎么走"时不必在五个按钮里跳。
  * 名称与提示都从 `strings.ts` 取 —— 冒烟也从那里读常量，改文案只需要改一处。
  */
 export const GEOMETRY_OPTIONS: ReadonlyArray<{ mode: GeometryMode; label: string; hint: string }> = [
   { mode: 'edge', label: DRAW_MODE_LABELS.edge, hint: DRAW_MODE_HINTS.edge },
+  { mode: 'center', label: DRAW_MODE_LABELS.center, hint: DRAW_MODE_HINTS.center },
   { mode: 'edge-step', label: DRAW_MODE_LABELS.step, hint: DRAW_MODE_HINTS.step },
   { mode: 'interior', label: DRAW_MODE_LABELS.interior, hint: DRAW_MODE_HINTS.interior },
   { mode: 'free', label: DRAW_MODE_LABELS.free, hint: DRAW_MODE_HINTS.free },

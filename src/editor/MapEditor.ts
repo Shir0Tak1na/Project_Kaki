@@ -8,7 +8,15 @@
 
 import type { Axial, GridSpec, Point } from '../core/hex.ts'
 import { cellKey, parseCellKey, worldToAxial } from '../core/hex.ts'
-import { snapToHexVertex, stepAlongEdges, toEdgePath, walkTailToCursor, type GeometryMode } from '../core/hexEdges.ts'
+import {
+  isSameCell,
+  snapPointToCellCenter,
+  snapToHexVertex,
+  stepAlongEdges,
+  toEdgePath,
+  walkTailToCursor,
+  type GeometryMode,
+} from '../core/hexEdges.ts'
 
 /** 两点之差（用于"上一步方向"） */
 function subtract(a: Point, b: Point): Point {
@@ -1793,7 +1801,7 @@ export class MapEditor {
     if (this.mode !== 'paint') return
     const style = this.currentPathStyle()
     const region = kind === 'region' ? this.currentRegionStyle() : null
-    // 沿网格线模式下，落点先吸附到最近的网格顶点
+    // 落点先按当前模式吸附：沿网格线 / 格步进吸到最近顶点，沿格心走吸到格心，其余原样
     const start = this.snapDraftPoint(world)
     this.draft = {
       kind,
@@ -1807,6 +1815,7 @@ export class MapEditor {
       // 沿网格线模式**不做平滑**：平滑会把格边抹成曲线，正好毁掉"整洁"的目的。
       // 自由绘制**也不平滑**：它本来就是密集的指针轨迹，平滑是给"少量锚点的折线"
       // 做的观感修饰；再叠一道路径展开只会让"所见即所得"变差（见 buildPathFrom）。
+      // 沿格心走**也不平滑**：平滑会把折线在格心处圆过去 —— 那正是这个模式唯一要的东西。
       smooth: kind === 'path' && style.smooth === true && this.geometryMode === 'interior',
       taper: kind === 'path' && style.taper === true,
       // 端点/连接也照抄当前类型：否则"平头端点"的类型在预览里会画成圆头
@@ -1821,6 +1830,18 @@ export class MapEditor {
     if (!this.draft) return
     const grid = this.options.getDocument()?.grid
     const target = this.snapDraftPoint(world)
+    // 沿格心走：同一格连点两次会得到**同一个坐标**（零长线段）。
+    // 丢掉它，而不是留在草稿里等提交时再过滤 —— 留在草稿里会先骗用户"这里多了一个顶点"
+    // （草稿要画顶点手柄），提交时再悄悄少一个，"所见即所得"就断了。
+    if (grid && this.geometryMode === 'center') {
+      const last = this.draft.points[this.draft.points.length - 1]
+      if (last !== undefined && isSameCell(grid, last, target)) {
+        this.draft.cursor = null
+        this.options.onChanged()
+        this.options.onStateChanged?.()
+        return
+      }
+    }
     if (grid && this.geometryMode === 'edge-step') {
       // 格步进模式：只前进一条边，方向由点击位置决定
       const last = this.draft.points[this.draft.points.length - 1]!
@@ -1875,9 +1896,14 @@ export class MapEditor {
   private draftDisplayPoints(draft: MapDraft): { points: Point[]; cursor: Point | null } {
     const grid = this.options.getDocument()?.grid
     // 只有沿网格线 / 格步进两种模式才需要"把光标那一端沿网格线接上去"；
-    // 过格心与自由绘制都是原样显示（自由绘制的点由 pointermove 直接追加）。
+    // 锚点折线与自由绘制都是原样显示（自由绘制的点由 pointermove 直接追加）。
     if (!grid || !draft.cursor || draft.points.length === 0 || draft.mode === 'interior' || draft.mode === 'free') {
       return { points: draft.points, cursor: draft.cursor }
+    }
+    // 沿格心走：橡皮筋那一端也要吸附（否则预览的末段是"格心 → 任意像素"的斜线，
+    // 松手才跳到格心上 —— 违反本项目反复强调的"所见即所得"）。
+    if (draft.mode === 'center') {
+      return { points: draft.points, cursor: snapPointToCellCenter(grid, draft.cursor) }
     }
     const last = draft.points[draft.points.length - 1]!
     if (draft.mode === 'edge-step') {
@@ -1890,12 +1916,19 @@ export class MapEditor {
     return { points: [...draft.points, ...tail], cursor: null }
   }
 
-  /** 沿网格线 / 格步进：吸附到最近顶点；过格心与自由绘制原样返回（自由绘制无锚点） */
+  /**
+   * 按当前绘制模式吸附落点。
+   *
+   * - 沿网格线 / 格步进：吸附到最近的**网格顶点**；
+   * - 沿格心走：吸附到所在格的**格心**（与标记放置同一判据）；
+   * - 锚点折线 / 自由绘制：原样返回（前者要"点哪连哪"，后者没有锚点）。
+   */
   private snapDraftPoint(world: Point): Point {
     const grid = this.options.getDocument()?.grid
     if (this.geometryMode === 'interior' || this.geometryMode === 'free' || !grid) {
       return { x: world.x, y: world.y }
     }
+    if (this.geometryMode === 'center') return snapPointToCellCenter(grid, world)
     return snapToHexVertex(grid, world).point
   }
 
@@ -1908,9 +1941,13 @@ export class MapEditor {
    */
   private commitGeometry(points: Point[], closed: boolean): Point[] {
     const grid = this.options.getDocument()?.grid
-    // 过格心与自由绘制都原样提交：后者的点是**指针轨迹本身**，任何"再来一次几何加工"
-    // 都会让松手的一瞬间形状变一次（自由绘制的全部价值就是那份轨迹）。
-    if (this.geometryMode === 'interior' || this.geometryMode === 'free' || !grid) return points
+    // 锚点折线、沿格心走与自由绘制都原样提交：
+    // - 沿格心走的点在 `snapDraftPoint` 已经吸到格心、同格重复也当场丢掉了，
+    //   这里再走一遍 `toEdgePath`（那是"沿网格线走"的加工）反而会把格心连成的线拽到格点上；
+    // - 自由绘制的点是**指针轨迹本身**，任何"再来一次几何加工"都会让松手的一瞬间形状变一次。
+    if (this.geometryMode === 'interior' || this.geometryMode === 'center' || this.geometryMode === 'free' || !grid) {
+      return points
+    }
     return toEdgePath(grid, points, closed)
   }
 
@@ -1973,9 +2010,11 @@ export class MapEditor {
     }
     if (style.dash) path.dash = [...style.dash]
     if (style.taper === true) path.taper = true
-    // 平滑只给"过格心的折线"（它是为少量锚点做的观感修饰）。
+    // 平滑只给「锚点折线」（它是为少量锚点做的观感修饰）。
     // 沿网格线不平滑：会把格边抹成曲线；自由绘制也不平滑：轨迹本来就很密，
     // 再叠一道路径展开只会让"所见即所得"变差（与 `beginDraft` / `drawDraft` 同一口径）。
+    // ⚠️ 沿格心走**同样不平滑**：平滑会把折线在格心处圆过去（曲线不再穿过那几格的中心），
+    // 正好毁掉这个模式的**全部意义** —— 它存在的理由就是"一眼看出穿过哪几个格子"。
     if (style.smooth === true && this.geometryMode === 'interior') path.smooth = true
     return { kind: 'addPath', path }
   }

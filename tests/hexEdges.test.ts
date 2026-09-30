@@ -11,6 +11,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   dedupeConsecutive,
+  isSameCell,
+  snapPointToCellCenter,
+  snapPointsToCellCenters,
   snapToHexVertex,
   stepAlongEdges,
   toEdgePath,
@@ -19,7 +22,7 @@ import {
   walkAlongEdges,
   walkTailToCursor,
 } from '../src/core/hexEdges.ts'
-import { hexCorners, type GridSpec } from '../src/core/hex.ts'
+import { axialToWorld, hexCorners, type GridSpec } from '../src/core/hex.ts'
 import { polylineLength } from '../src/render/shapeGeometry.ts'
 
 const pointy: GridSpec = { kind: 'hex', orientation: 'pointy', size: 40, origin: [0, 0] }
@@ -252,4 +255,74 @@ test('退化输入不抛异常', () => {
   const single = toEdgePath(pointy, [{ x: 10, y: 10 }], true)
   assert.equal(single.length, 1)
   assert.deepEqual(walkTailToCursor(pointy, hexCorners(pointy, 0, 0)[0]!, hexCorners(pointy, 1, 0)[0]!), walkAlongEdges(pointy, hexCorners(pointy, 0, 0)[0]!, hexCorners(pointy, 1, 0)[0]!).slice(1))
+})
+
+// ------------------------------------------------------- 沿格心走（center）
+
+test('沿格心走：任意落点都吸附到**所在格**的格心（不是最近格心）', () => {
+  for (const grid of [pointy, flat]) {
+    for (let q = -2; q <= 2; q += 1) {
+      for (let r = -2; r <= 2; r += 1) {
+        const center = axialToWorld(grid, q, r)
+        // 格心周围取几个「明显落在这一格内、但不在格心上」的点
+        const offsets = [
+          { x: grid.size * 0.2, y: grid.size * 0.05 },
+          { x: -grid.size * 0.15, y: grid.size * 0.18 },
+          { x: 0, y: 0 },
+        ]
+        for (const offset of offsets) {
+          const snapped = snapPointToCellCenter(grid, { x: center.x + offset.x, y: center.y + offset.y })
+          assert.ok(
+            Math.abs(snapped.x - center.x) < 1e-9 && Math.abs(snapped.y - center.y) < 1e-9,
+            '第 ' + q + ',' + r + ' 格的点应当吸到自己的格心，实际吸到了 (' + snapped.x.toFixed(2) + ', ' + snapped.y.toFixed(2) + ')',
+          )
+        }
+      }
+    }
+  }
+})
+
+test('沿格心走：格心吸附是幂等的（吸过一次再吸不动）', () => {
+  for (const grid of [pointy, flat]) {
+    const once = snapPointToCellCenter(grid, { x: 13, y: -27 })
+    const twice = snapPointToCellCenter(grid, once)
+    assert.ok(Math.abs(once.x - twice.x) < 1e-9 && Math.abs(once.y - twice.y) < 1e-9)
+  }
+})
+
+test('沿格心走：同一格的两次点击被去掉（零长线段不进数据）', () => {
+  const a = axialToWorld(pointy, 1, 1)
+  const b = axialToWorld(pointy, 3, -2)
+  // 两次都点在第 1 格里、只差几个像素 —— 必须只留下一个点
+  const same = snapPointsToCellCenters(pointy, [
+    { x: a.x + 3, y: a.y - 2 },
+    { x: a.x - 4, y: a.y + 1 },
+  ])
+  assert.equal(same.length, 1, '同一格连点两次应当只剩一个点')
+  assert.ok(Math.abs(same[0]!.x - a.x) < 1e-9 && Math.abs(same[0]!.y - a.y) < 1e-9)
+
+  // 换成不同的格：两个点都要留下，且各是各的格心
+  const across = snapPointsToCellCenters(pointy, [{ x: a.x + 1, y: a.y + 1 }, { x: b.x, y: b.y }])
+  assert.equal(across.length, 2)
+  assert.ok(Math.abs(across[1]!.x - b.x) < 1e-9 && Math.abs(across[1]!.y - b.y) < 1e-9)
+
+  // 只去**连续**重复：绕一圈回到同一格是有意义的闭合，不能把它抹掉
+  const loop = snapPointsToCellCenters(pointy, [
+    { x: a.x, y: a.y },
+    { x: b.x, y: b.y },
+    { x: a.x, y: a.y },
+  ])
+  assert.equal(loop.length, 3, '首尾同格是闭合，不是连续重复')
+
+  // 空输入 / 单点：不抛异常
+  assert.deepEqual(snapPointsToCellCenters(pointy, []), [])
+  assert.equal(snapPointsToCellCenters(pointy, [{ x: 1, y: 2 }]).length, 1)
+})
+
+test('沿格心走：isSameCell 按格身份判断', () => {
+  assert.equal(isSameCell(pointy, axialToWorld(pointy, 2, 3), axialToWorld(pointy, 2, 3)), true)
+  assert.equal(isSameCell(pointy, axialToWorld(pointy, 2, 3), axialToWorld(pointy, 3, 3)), false)
+  // 格心就是格心（世界坐标 → 轴坐标 → 同一个格），不会因为浮点误差掉到邻格
+  const center = axialToWorld(pointy, -4, 6)
+  assert.equal(isSameCell(pointy, center, snapPointToCellCenter(pointy, { x: center.x + 1e-6, y: center.y })), true)
 })
