@@ -551,3 +551,29 @@ test('内置区域类型不会被当成未知（不该刷告警）', () => {
     JSON.stringify(parsed.issues),
   )
 })
+
+test('绘制模式：free 是新增取值且能往返，老数据的 interior 一个字节不迁移（ISSUE-005）', () => {
+  const input = {
+    ...createEmptyMapDocument({}),
+    paths: [
+      { id: 'p1', type: 'river', pts: [[0, 0], [10, 20]], width: 4, color: '#53dfdd', mode: 'interior' },
+      { id: 'p2', type: 'river', pts: [[0, 0], [5, 8], [11, 13]], width: 4, color: '#53dfdd', mode: 'free' },
+      { id: 'p3', type: 'river', pts: [[0, 0], [3, 4]], width: 4, color: '#53dfdd', mode: '写错了' },
+      // 升级前的老路径：整个 mode 字段都没有 ⇒ 缺省 = interior（不是 free）
+      { id: 'p4', type: 'river', pts: [[0, 0], [7, 7]], width: 4, color: '#53dfdd' },
+    ],
+    regions: [{ id: 'r1', label: '', pts: [[0, 0], [10, 0], [10, 10]], color: '#44cf6e', opacity: 0.2, mode: 'free' }],
+  }
+  const parsed = parseMapDocument(input)
+  // free 原样读回；interior 还是 interior；缺字段与认不出的值都回退 interior（而不是消失或改写）
+  assert.deepEqual(parsed.document!.paths.map((path) => path.mode), ['interior', 'free', 'interior', 'interior'])
+  assert.equal(parsed.document!.regions[0]!.mode, 'free')
+  const text = serializeMapDocument(parsed.document!)
+  assert.ok(text.includes('"mode":"free"'), text)
+  const again = parseMapDocument(JSON.parse(text)).document!
+  assert.deepEqual(again.paths.map((path) => path.mode), ['interior', 'free', 'interior', 'interior'])
+  assert.equal(again.regions[0]!.mode, 'free')
+  // 解析 → 序列化稳定：不会把老数据里的 interior 悄悄改成 free
+  assert.equal(serializeMapDocument(again), text)
+})
+

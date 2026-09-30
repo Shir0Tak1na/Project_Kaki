@@ -78,6 +78,15 @@ function isMultiPointTool(tool: EditorTool): tool is 'path' | 'region' {
   return tool === 'path' || tool === 'region'
 }
 
+/**
+ * 自由绘制的最小取点间距（屏幕像素）。
+ *
+ * 指针每动 1px 都记一个点，一条长轨迹会存下上千个坐标（文件体积、渲染、命中测试都受累）；
+ * 只收"离上一个采样点至少这么远"的落点，形状几乎不变而点数降一个量级。
+ * 用**屏幕像素**而不是世界单位：间距描述的是"手动了多远"，与缩放无关。
+ */
+const FREE_DRAW_MIN_SPACING_PX = 4
+
 /** 双击判定的时间与位移窗口 */
 const DOUBLE_CLICK_MS = 350
 const DOUBLE_CLICK_SLOP_PX = 8
@@ -147,6 +156,15 @@ export class MapInteraction {
   private selectStartClient: { x: number; y: number } | null = null
   private selectOperation: SelectionOperation = 'replace'
   private selectDragged = false
+  /**
+   * 自由绘制手势（按下开始采样、抬手提交）。
+   *
+   * 与逐点点击的模式不同：它必须 `setPointerCapture` 才能连续收到 `pointermove`，
+   * 而且**抬手才提交**（一次绘制 = 一条历史）—— 不能沿用"双击/回车结束"那套点击语义。
+   */
+  private freePointerId: number | null = null
+  /** 上一次被采纳的采样点（**客户端坐标**，用于算屏幕间距） */
+  private freeLastClient: { x: number; y: number } | null = null
   private disposed = false
 
   constructor(options: MapInteractionOptions) {
@@ -288,9 +306,22 @@ export class MapInteraction {
         return
       }
 
-      // 路径 / 区域：逐点点击，双击结束
+      // 路径 / 区域
       if (isMultiPointTool(editor.tool)) {
         if (!world) return
+        // 自由绘制：按下即开始采样，抬手一次性提交（一次绘制 = 一条历史）。
+        // 它**不做**双击判定 —— 抬手就完事；双击语义是给"逐点点击"那些模式的。
+        if (editor.geometryMode === 'free') {
+          this.freePointerId = event.pointerId
+          this.freeLastClient = { x: event.clientX, y: event.clientY }
+          try {
+            host.setPointerCapture(event.pointerId)
+          } catch {
+            // 某些环境下指针已被回收，忽略即可（后续靠 pointerup 兜底）
+          }
+          editor.beginDraft(editor.tool, world)
+          return
+        }
         const now = Date.now()
         const isDoubleClick =
           this.lastClickAt !== null &&
@@ -367,6 +398,18 @@ export class MapInteraction {
         editor.extendStroke(world)
         return
       }
+
+      // 自由绘制：轨迹上的落点按**屏幕最小间距**取，太近的移动直接丢掉。
+      // 与笔刷同理，绘制中不做 UI 判定：指针扫过工具条时笔迹不该断。
+      if (this.freePointerId === event.pointerId) {
+        event.preventDefault()
+        const last = this.freeLastClient
+        if (last === null || Math.hypot(event.clientX - last.x, event.clientY - last.y) >= FREE_DRAW_MIN_SPACING_PX) {
+          this.freeLastClient = { x: event.clientX, y: event.clientY }
+          editor.extendFreeDraft(world)
+        }
+        return
+      }
       if (isUiTarget(event)) return
 
       // 多点工具：橡皮筋跟随光标
@@ -433,6 +476,24 @@ export class MapInteraction {
         return
       }
 
+      // 自由绘制：抬手 = 一次绘制完成（一条历史）；取消则整段丢掉，绝不留下半截轨迹。
+      if (this.freePointerId !== null && this.freePointerId === event.pointerId) {
+        this.freePointerId = null
+        this.freeLastClient = null
+        try {
+          host.releasePointerCapture?.(event.pointerId)
+        } catch {
+          // 忽略
+        }
+        if (cancelled) {
+          this.options.editor.cancelDraft()
+        } else {
+          const created = this.options.editor.finishDraft()
+          if (created) this.options.onShapeCreated?.(created)
+        }
+        return
+      }
+
       if (this.paintingPointerId !== null && this.paintingPointerId === event.pointerId) {
         this.paintingPointerId = null
         try {
@@ -481,6 +542,12 @@ export class MapInteraction {
         this.paintingPointerId = null
         this.options.editor.endStroke()
       }
+      // 自由绘制在丢焦点时**丢弃**：半截轨迹不该被当成一次绘制提交
+      if (this.freePointerId !== null) {
+        this.freePointerId = null
+        this.freeLastClient = null
+        this.options.editor.cancelDraft()
+      }
       // 框选也要收尾：留着它会让下一次 pointermove 继续改选择
       this.resetSelectGesture()
     }
@@ -494,6 +561,8 @@ export class MapInteraction {
     for (const remove of this.listeners) remove()
     this.listeners = []
     this.paintingPointerId = null
+    this.freePointerId = null
+    this.freeLastClient = null
     this.resetSelectGesture()
     this.popScope()
     this.options.onHover(null)
@@ -502,7 +571,12 @@ export class MapInteraction {
   /** 模式变化：退出选择模式时丢掉进行中的框选；退出绘制时清掉悬停高亮 */
   notifyModeChanged(mode: 'select' | 'paint'): void {
     if (mode !== 'select') this.resetSelectGesture()
-    if (mode === 'select') this.options.onHover(null)
+    if (mode === 'select') {
+      this.options.onHover(null)
+      // 模式在手势中途变了：自由绘制不再可能收尾，指针状态必须清掉
+      this.freePointerId = null
+      this.freeLastClient = null
+    }
     this.options.onModeChanged(mode)
   }
 

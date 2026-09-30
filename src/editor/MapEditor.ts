@@ -278,6 +278,15 @@ export interface MapDraft {
   points: Point[]
   /** 用户点击数（工具栏显示"已定 N 个顶点"用它，而不是 points.length） */
   clickCount: number
+  /**
+   * 这个草稿是按哪种绘制模式画出来的。
+   *
+   * 目前唯一的消费者是 `drawDraft()`：`free`（自由绘制）**不画顶点手柄** ——
+   * 轨迹上的点是采样出来的，画上手柄等于骗用户"这些点可以拖"。
+   * 存模式而不是存一个 `freehand: boolean`：以后再有"按模式决定预览形态"的事，
+   * 这里不用再加一个字段（`PLAN.md` §4 第 7 条）。
+   */
+  mode: GeometryMode
   /** 橡皮筋另一端（光标位置），用于预览 */
   cursor: Point | null
   /** 预览用的样式 */
@@ -1793,8 +1802,11 @@ export class MapEditor {
       cursor: null,
       color: kind === 'path' ? style.color : (region?.color ?? '#44cf6e'),
       width: kind === 'path' ? style.width : (region?.borderWidth ?? 3),
+      mode: this.geometryMode,
       // 预览与最终渲染保持一致（河流：平滑 + 末端变细）。
       // 沿网格线模式**不做平滑**：平滑会把格边抹成曲线，正好毁掉"整洁"的目的。
+      // 自由绘制**也不平滑**：它本来就是密集的指针轨迹，平滑是给"少量锚点的折线"
+      // 做的观感修饰；再叠一道路径展开只会让"所见即所得"变差（见 buildPathFrom）。
       smooth: kind === 'path' && style.smooth === true && this.geometryMode === 'interior',
       taper: kind === 'path' && style.taper === true,
       // 端点/连接也照抄当前类型：否则"平头端点"的类型在预览里会画成圆头
@@ -1836,6 +1848,24 @@ export class MapEditor {
   }
 
   /**
+   * 自由绘制：把指针轨迹上的一个落点追加进草稿。
+   *
+   * 与 `addDraftPoint`（逐点点击）的分工：这里只"记一个采样点" —— 没有吸附、
+   * 没有沿网格线行走，也不把 `clickCount` 当成"点了几个点"（轨迹没有这个语义）。
+   * **最小间距由 `MapInteraction` 按屏幕像素过滤**（`FREE_DRAW_MIN_SPACING_PX`）：
+   * "指针动了多远"用屏幕像素才与缩放无关；编辑器这一层只负责收点。
+   *
+   * 只在草稿确实是自由绘制时收点：模式中途被改掉时草稿已被取消，这里是第二道保险。
+   */
+  extendFreeDraft(world: Point): void {
+    if (!this.draft || this.geometryMode !== 'free') return
+    this.draft.points.push({ x: world.x, y: world.y })
+    this.draft.cursor = null
+    this.options.onChanged()
+    this.options.onStateChanged?.()
+  }
+
+  /**
    * 草稿显示用的点序列。
    *
    * 沿网格线模式下，光标那一端要从最后一个顶点**沿网格线走**过去（而不是一条斜线），
@@ -1844,11 +1874,13 @@ export class MapEditor {
    */
   private draftDisplayPoints(draft: MapDraft): { points: Point[]; cursor: Point | null } {
     const grid = this.options.getDocument()?.grid
-    if (!grid || !draft.cursor || draft.points.length === 0 || this.geometryMode === 'interior') {
+    // 只有沿网格线 / 格步进两种模式才需要"把光标那一端沿网格线接上去"；
+    // 过格心与自由绘制都是原样显示（自由绘制的点由 pointermove 直接追加）。
+    if (!grid || !draft.cursor || draft.points.length === 0 || draft.mode === 'interior' || draft.mode === 'free') {
       return { points: draft.points, cursor: draft.cursor }
     }
     const last = draft.points[draft.points.length - 1]!
-    if (this.geometryMode === 'edge-step') {
+    if (draft.mode === 'edge-step') {
       // 格步进模式：预览也只显示**接下来那一条边**（点哪个方向就往哪走）
       const previous = draft.points.length >= 2 ? subtract(last, draft.points[draft.points.length - 2]!) : null
       const next = stepAlongEdges(grid, last, draft.cursor, previous).point
@@ -1858,10 +1890,12 @@ export class MapEditor {
     return { points: [...draft.points, ...tail], cursor: null }
   }
 
-  /** 沿网格线模式：吸附到最近顶点；否则原样返回 */
+  /** 沿网格线 / 格步进：吸附到最近顶点；过格心与自由绘制原样返回（自由绘制无锚点） */
   private snapDraftPoint(world: Point): Point {
     const grid = this.options.getDocument()?.grid
-    if (this.geometryMode === 'interior' || !grid) return { x: world.x, y: world.y }
+    if (this.geometryMode === 'interior' || this.geometryMode === 'free' || !grid) {
+      return { x: world.x, y: world.y }
+    }
     return snapToHexVertex(grid, world).point
   }
 
@@ -1874,7 +1908,9 @@ export class MapEditor {
    */
   private commitGeometry(points: Point[], closed: boolean): Point[] {
     const grid = this.options.getDocument()?.grid
-    if (this.geometryMode === 'interior' || !grid) return points
+    // 过格心与自由绘制都原样提交：后者的点是**指针轨迹本身**，任何"再来一次几何加工"
+    // 都会让松手的一瞬间形状变一次（自由绘制的全部价值就是那份轨迹）。
+    if (this.geometryMode === 'interior' || this.geometryMode === 'free' || !grid) return points
     return toEdgePath(grid, points, closed)
   }
 
@@ -1937,7 +1973,9 @@ export class MapEditor {
     }
     if (style.dash) path.dash = [...style.dash]
     if (style.taper === true) path.taper = true
-    // 沿网格线模式不做平滑：平滑会把格边抹成曲线，正好毁掉"整洁"的目的
+    // 平滑只给"过格心的折线"（它是为少量锚点做的观感修饰）。
+    // 沿网格线不平滑：会把格边抹成曲线；自由绘制也不平滑：轨迹本来就很密，
+    // 再叠一道路径展开只会让"所见即所得"变差（与 `beginDraft` / `drawDraft` 同一口径）。
     if (style.smooth === true && this.geometryMode === 'interior') path.smooth = true
     return { kind: 'addPath', path }
   }

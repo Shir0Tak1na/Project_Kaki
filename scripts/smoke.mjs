@@ -32,7 +32,7 @@ import { summarizeMapDocument } from '../src/data/mapDocument.ts'
 import { axialToWorld, cellKey, worldToAxial } from '../src/core/hex.ts'
 import { snapToCellCenter } from '../src/render/markerPlacement.ts'
 // C4：被逐字断言钉住的界面文案从**单一来源**读（改文案只改 src/ui/strings.ts，不再牵动本文件）
-import { DRAW_MODE_LABELS, OVERLAY_CONTROL_LABELS, unknownTypeLabel } from '../src/ui/strings.ts'
+import { DRAW_MODE_LABELS, drawModeHint, OVERLAY_CONTROL_LABELS, unknownTypeLabel } from '../src/ui/strings.ts'
 import { assertBundleIsFresh } from './lib/bundleFreshness.mjs'
 import { scanSources } from './lib/sourceSanity.mjs'
 
@@ -4203,7 +4203,7 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
   plugin.onunload()
 }
 
-console.log('\n场景 21：路径与区域的三种绘制模式（沿网格线连接 / 格步进 / 沿格心连接）')
+console.log('\n场景 21：路径与区域的四种绘制模式（沿网格线连接 / 格步进 / 沿格心连接 / 自由绘制）')
 {
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -4226,6 +4226,9 @@ console.log('\n场景 21：路径与区域的三种绘制模式（沿网格线�
   const editor = layers.getEditor(canvasPath)
   const host = app.workspace.getLeavesOfType('canvas')[0].view.containerEl
   const wrapper = canvas.wrapperEl
+  const layerCanvas = canvas.canvasEl.children[0].children[0]
+  attachFaithfulRect(layerCanvas, canvas)
+  const ctx = layerCanvas._ctx
   const toolbarEl = collectByClass(wrapper, 'fc-toolbar')[0]
   const clickAt = (world) => {
     const client = canvas._clientFor(world)
@@ -4263,11 +4266,25 @@ console.log('\n场景 21：路径与区域的三种绘制模式（沿网格线�
   // ⚠️ 面板是**整块重建**式重绘：每次改状态后元素都是新的，所以这里要按需现取，
   // 不能像浮窗时期那样抓一个常量用到底（抓了常量会在"重建后"读到已脱离 DOM 的旧元素）。
   const geometryButtons = () => inPanel(panel, 'fc-panel-geometry')
-  check('侧栏「工具」有「沿网格线连接 / 格步进 / 沿格心连接」三个按钮', geometryButtons().length === 3, String(geometryButtons().length))
+  const geometryLabels = [DRAW_MODE_LABELS.edge, DRAW_MODE_LABELS.step, DRAW_MODE_LABELS.interior, DRAW_MODE_LABELS.free]
   check(
-    '三个模式的标签齐全',
-    [DRAW_MODE_LABELS.edge, DRAW_MODE_LABELS.step, DRAW_MODE_LABELS.interior].every((label) => geometryButtons().some((button) => button.textContent === label)),
-    geometryButtons().map((button) => button.textContent).join(', '),
+    '侧栏「工具」有四个绘制模式按钮（沿网格线连接 / 格步进 / 沿格心连接 / 自由绘制）',
+    geometryButtons().length === 4,
+    String(geometryButtons().length),
+  )
+  check(
+    '四个模式的标签齐全且顺序固定',
+    geometryButtons().map((button) => button.textContent).join('|') === geometryLabels.join('|'),
+    geometryButtons().map((button) => button.textContent).join('|'),
+  )
+  // hint 的单一来源是 src/ui/strings.ts：按钮 title 必须与常量逐字相同，且 ≤20 字（用户要求）。
+  check(
+    '每个模式按钮都有 ≤20 字的提示（hint 与浮窗同源）',
+    geometryButtons().every((button) => {
+      const hint = drawModeHint(button.dataset.fcGeometry)
+      return hint.length > 0 && hint.length <= 20 && button.title === hint
+    }),
+    geometryButtons().map((button) => `${button.dataset.fcGeometry}:${button.title}`).join(' | '),
   )
   check('默认是沿格心连接模式', editor.geometryMode === 'interior', editor.geometryMode)
   fireEvent(geometryButtons()[0], 'click')
@@ -4370,6 +4387,56 @@ console.log('\n场景 21：路径与区域的三种绘制模式（沿网格线�
   check('沿格心连接模式只有点击的两个顶点', freePath.pts.length === 2, String(freePath.pts.length))
   check('沿格心连接模式产生了一条可撤销历史', editor.getStatus().undo > undoBefore)
 
+  // ---- 自由绘制（ISSUE-005 的第四个模式）：按住拖动采样、抬手一次性提交、没有可拖顶点 ----
+  const freeButton = geometryButtons().find((button) => button.textContent === DRAW_MODE_LABELS.free)
+  fireEvent(freeButton, 'click')
+  check('点击「自由绘制」切到 free 模式', editor.geometryMode === 'free', editor.geometryMode)
+
+  editor.setTool('path')
+  editor.setPathType('river')
+  flushFrames()
+  const freeUndoBefore = editor.getStatus().undo
+  const freeStart = canvas._clientFor({ x: 800, y: -800 })
+  const freePointer = { pointerId: 21, target: wrapper }
+  firePointer(host, 'pointerdown', { ...freePointer, clientX: freeStart.x, clientY: freeStart.y })
+  const freeStartDraft = editor.getDraft()
+  check('自由绘制的草稿记着它自己的模式（渲染据此不画顶点手柄）', freeStartDraft.mode === 'free', String(freeStartDraft.mode))
+  check('自由绘制的起点不吸附（自由绘制没有锚点）', freeStartDraft.points.length === 1, String(freeStartDraft.points.length))
+  check('自由绘制的草稿不平滑（轨迹本身就是采样）', freeStartDraft.smooth === false, String(freeStartDraft.smooth))
+
+  // 只挪 1px 的移动不该被采纳（最小间距的作用）；连挪 5 次 20px 才该逐个落点
+  firePointer(host, 'pointermove', { ...freePointer, clientX: freeStart.x + 1, clientY: freeStart.y })
+  check('比最小间距更近的移动不取点', editor.getDraft().points.length === 1, String(editor.getDraft().points.length))
+  const freeMoves = [1, 2, 3, 4, 5].map((n) => ({ clientX: freeStart.x + 20 * n, clientY: freeStart.y + 6 * n }))
+  for (const move of freeMoves) firePointer(host, 'pointermove', { ...freePointer, ...move })
+  const freeDraft = editor.getDraft()
+  check(
+    '自由绘制按指针轨迹累积采样点（超过最小间距的每一步都收）',
+    freeDraft.points.length === 1 + freeMoves.length,
+    String(freeDraft.points.length),
+  )
+  // 渲染层判据：草稿在画（有 stroke），但**一个顶点手柄都没有**（arc 数 = 0）
+  ctx.resetCalls()
+  flushFrames()
+  check('自由绘制的草稿真的画出来了（不是「没画所以没手柄」）', ctx.calls.stroke >= 1, 'stroke=' + ctx.calls.stroke)
+  check('自由绘制的草稿不画可拖顶点手柄', ctx.calls.arc === 0, 'arc=' + ctx.calls.arc)
+
+  firePointer(host, 'pointerup', { ...freePointer, ...freeMoves[freeMoves.length - 1] })
+  flushFrames()
+  prompts[prompts.length - 1].onSubmit(null)
+  flushFrames()
+  const handPaths = layers.getDocument(canvasPath).paths
+  const handPath = handPaths[handPaths.length - 1]
+  check('自由绘制抬手即提交，数据里 mode === free', handPath?.mode === 'free', String(handPath?.mode))
+  check(
+    '自由绘制的路径保留轨迹上的每一个采样点（没有被吸附或补点）',
+    handPath.pts.length === 1 + freeMoves.length,
+    String(handPath.pts.length),
+  )
+  check('自由绘制不叠平滑（河流的 smooth 对它不生效）', handPath.smooth === undefined, String(handPath.smooth))
+  check('一次自由绘制 = 一条历史', editor.getStatus().undo === freeUndoBefore + 1, freeUndoBefore + ' → ' + editor.getStatus().undo)
+  check('提交后草稿已清空', editor.isDrafting() === false)
+
   // ---- 落盘往返：模式要写进文件并读回来 ----
   await store.flush()
   const saved = app.vault.files.get('Maps/World.map.md') ?? ''
@@ -4380,7 +4447,19 @@ console.log('\n场景 21：路径与区域的三种绘制模式（沿网格线�
     reloaded.document.paths.some((path) => path.mode === 'edge') && reloaded.document.regions.some((region) => region.mode === 'edge'),
     JSON.stringify(reloaded.document.paths.map((path) => path.mode)),
   )
-  check('旧数据缺 mode 字段时默认按沿格心连接处理', reloaded.document.paths.every((path) => path.mode === 'edge' || path.mode === 'interior'))
+  check('自由绘制模式也写进了文件', saved.includes('"mode": "free"') || saved.includes('"mode":"free"'), saved.slice(0, 240))
+  check('重新解析后 free 仍是 free', reloaded.document.paths.some((path) => path.mode === 'free'), JSON.stringify(reloaded.document.paths.map((path) => path.mode)))
+  // 老数据一个字节都不动：mode 是 'interior' 的路径读回来仍是 'interior'，没有被迁移成 free
+  check(
+    '老数据里的 interior 没有被迁移成 free',
+    reloaded.document.paths.some((path) => path.mode === 'interior'),
+    JSON.stringify(reloaded.document.paths.map((path) => path.mode)),
+  )
+  check(
+    '每个路径的 mode 都是四个合法取值之一',
+    reloaded.document.paths.every((path) => ['edge', 'edge-step', 'interior', 'free'].includes(path.mode)),
+    JSON.stringify(reloaded.document.paths.map((path) => path.mode)),
+  )
 
   // ---- 格步进模式：一次只画一条边 ----
   editor.setMode('paint')

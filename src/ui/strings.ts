@@ -11,12 +11,47 @@
  * 描述性长句**不收**：它们本来就该随文案轮改，且很少被逐字断言。
  */
 
-/** 绘制模式的三个人话名（`GeometryMode` → 界面文字；侧栏按钮与浮窗提示共用） */
+import type { GeometryMode } from '../core/hexEdges.ts'
+
+/** 绘制模式的四个人话名（`GeometryMode` → 界面文字；侧栏按钮与浮窗提示共用） */
 export const DRAW_MODE_LABELS = {
   edge: '沿网格线连接',
   step: '格步进',
   interior: '沿格心连接',
+  free: '自由绘制',
 } as const
+
+/**
+ * 每个绘制模式的一句话提示（**≤20 字**；侧栏按钮的 `title` 与浮窗提示行共用）。
+ *
+ * 为什么要写成短句而不是长说明：这四个按钮并排一行，长说明只能挂在 hover 上，
+ * 而用户判断"该点哪一个"往往发生在**不 hover** 的时候（§5.77 的同一类问题）。
+ * 短句读得完，长解释留在本文件与 `USER-MANUAL.md` 里。
+ */
+export const DRAW_MODE_HINTS = {
+  edge: '落点吸附网格顶点，段段沿网格线',
+  step: '每次点击沿网格线前进一条边',
+  interior: '过格心的折线，顶点可再编辑',
+  free: '按住左键随手画，没有可拖顶点',
+} as const
+
+/** `GeometryMode` → `DRAW_MODE_*` 的键（界面上 `edge-step` 叫「step」） */
+const DRAW_MODE_KEYS: Record<GeometryMode, keyof typeof DRAW_MODE_LABELS> = {
+  edge: 'edge',
+  'edge-step': 'step',
+  interior: 'interior',
+  free: 'free',
+}
+
+/** 绘制模式的界面名（浮窗 / 侧栏 / 任何要显示"现在是什么模式"的地方都走这里） */
+export function drawModeLabel(mode: GeometryMode): string {
+  return DRAW_MODE_LABELS[DRAW_MODE_KEYS[mode]]
+}
+
+/** 绘制模式的一句话提示（同上：单一来源，别在别处再写一份） */
+export function drawModeHint(mode: GeometryMode): string {
+  return DRAW_MODE_HINTS[DRAW_MODE_KEYS[mode]]
+}
 
 /**
  * 本机没有这条定义时的显示名（图例 / 下拉 / Base 行 / 面板共用一份）。

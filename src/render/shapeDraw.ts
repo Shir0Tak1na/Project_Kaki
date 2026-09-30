@@ -483,15 +483,19 @@ export function drawDraft(ctx: CanvasRenderingContext2D, layer: RenderPlanLayer,
   }
   ctx.setLineDash([])
 
-  // 顶点手柄：让"点了几个点"一目了然
-  const handleRadius = Math.max(3, 5 * Math.min(layer.deviceScale, 2))
-  for (const point of raster) {
-    ctx.beginPath()
-    ctx.arc(point.x, point.y, handleRadius, 0, Math.PI * 2)
-    ctx.fillStyle = '#ffffff'
-    ctx.fill()
-    ctx.strokeStyle = draft.color
-    ctx.lineWidth = Math.max(1, handleRadius * 0.5)
-    ctx.stroke()
+  // 顶点手柄：让"点了几个点"一目了然。
+  // ⚠️ 自由绘制**不画**：它的点是轨迹采样，没有锚点，画上手柄等于骗用户"这些点可以拖"。
+  //    判据是 `draft.mode`（草稿自己记着按哪种模式画的），不是"现在是不是草稿"。
+  if (draft.mode !== 'free') {
+    const handleRadius = Math.max(3, 5 * Math.min(layer.deviceScale, 2))
+    for (const point of raster) {
+      ctx.beginPath()
+      ctx.arc(point.x, point.y, handleRadius, 0, Math.PI * 2)
+      ctx.fillStyle = '#ffffff'
+      ctx.fill()
+      ctx.strokeStyle = draft.color
+      ctx.lineWidth = Math.max(1, handleRadius * 0.5)
+      ctx.stroke()
+    }
   }
 }

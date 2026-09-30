@@ -14,11 +14,16 @@ import { hexCorners, axialToWorld, worldToAxial, type GridSpec, type Point } fro
 
 /**
  * 绘制模式：
- * - `interior`：穿过格子内部（自由折线）
+ * - `interior`：穿过格子内部（过格心的折线；有锚点、顶点可再编辑）
  * - `edge`：沿网格线 —— 落点吸附到顶点，顶点之间**自动**沿网格线走
  * - `edge-step`：格步进 —— 每次点击只沿网格线**前进一条边**（手动描边，方向由点击位置决定）
+ * - `free`：自由绘制 —— 按指针轨迹落点，**没有锚点 / 没有可拖顶点**，抬手一次性提交
+ *
+ * ⚠️ `interior` 与 `free` 是两件事（ISSUE-005）：前者是"点几个点连成过格心的折线"，
+ * 后者是"完全没有锚点地随手画"。历史数据里两者都曾写成 `interior` ——
+ * 老数据**照旧按过格心的折线读**（不迁移、不改写），`free` 只是新增的一个取值。
  */
-export type GeometryMode = 'interior' | 'edge' | 'edge-step'
+export type GeometryMode = 'interior' | 'edge' | 'edge-step' | 'free'
 
 export interface HexVertex {
   /** 顶点身份键（同一顶点由 3 个六边形共享，必须归一到同一个键） */

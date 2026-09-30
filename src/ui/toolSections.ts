@@ -52,7 +52,7 @@ import {
 import { biomeCatalogSignature, listResolvedBiomeStyles, type CustomBiome } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS, type FieldId } from '../render/overlayFields.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
-import { DRAW_MODE_LABELS, unknownTypeLabel } from './strings.ts'
+import { DRAW_MODE_HINTS, DRAW_MODE_LABELS, unknownTypeLabel } from './strings.ts'
 
 /** 没有启用的地图层时，三节共同的那句话 */
 export const NO_LAYER_HINT = '当前没有启用的地图层：打开一张地图并启用地图层之后，这里才有可改的东西。'
@@ -143,23 +143,17 @@ export const BRUSH_OPS: ReadonlyArray<{ value: BrushOp; label: string; hint: str
   { value: '÷', label: '÷', hint: '除以一个系数：没有值的格跳过；除以 0 不生效' },
 ]
 
-/** 路径/区域的绘制模式（仅这两个工具下显示） */
+/**
+ * 路径/区域的绘制模式（仅这两个工具下显示）。
+ *
+ * 界面顺序 = `GEOMETRY_OPTIONS` 的顺序（沿网格线连接 / 格步进 / 沿格心连接 / 自由绘制），
+ * 名称与提示都从 `strings.ts` 取 —— 冒烟也从那里读常量，改文案只需要改一处。
+ */
 export const GEOMETRY_OPTIONS: ReadonlyArray<{ mode: GeometryMode; label: string; hint: string }> = [
-  {
-    mode: 'edge',
-    label: DRAW_MODE_LABELS.edge,
-    hint: '落点吸附到网格顶点，顶点之间自动沿网格线连接（画面整齐；线条比直线略长）',
-  },
-  {
-    mode: 'edge-step',
-    label: DRAW_MODE_LABELS.step,
-    hint: '一次只走一条格边：点哪个方向就往哪前进（逐条描边，拐弯就往那边点）',
-  },
-  {
-    mode: 'interior',
-    label: DRAW_MODE_LABELS.interior,
-    hint: '穿过格子中心连线：自由折线（河流平滑），可以斜穿格子',
-  },
+  { mode: 'edge', label: DRAW_MODE_LABELS.edge, hint: DRAW_MODE_HINTS.edge },
+  { mode: 'edge-step', label: DRAW_MODE_LABELS.step, hint: DRAW_MODE_HINTS.step },
+  { mode: 'interior', label: DRAW_MODE_LABELS.interior, hint: DRAW_MODE_HINTS.interior },
+  { mode: 'free', label: DRAW_MODE_LABELS.free, hint: DRAW_MODE_HINTS.free },
 ]
 
 /**

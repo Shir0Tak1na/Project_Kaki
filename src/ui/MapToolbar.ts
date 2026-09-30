@@ -26,7 +26,7 @@ import { listResolvedTerrainStyles, type CustomTerrain } from '../render/terrain
 import { resolveBiomeStyle } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS } from '../render/overlayFields.ts'
 import { TOOL_LABELS } from './toolSections.ts'
-import { DRAW_MODE_LABELS, unknownTypeLabel } from './strings.ts'
+import { drawModeHint, drawModeLabel, unknownTypeLabel } from './strings.ts'
 
 export interface MapToolbarOptions {
   editor: MapEditorLike
@@ -205,20 +205,17 @@ export class MapToolbar {
     if (status.tool === 'marker') return '左键点击放置标记（图标在侧栏「工具」）· 选择模式下可点开笔记 / 拖动 / 右键删除'
     if (status.tool === 'label') return '左键点击放置文字标注 · 选择模式下可拖动移动 / 右键删除'
     const shape = status.tool === 'path' ? '路径' : '区域'
-    // 提示里带上当前绘制模式与它的画法差异 —— 三种模式的点击含义不同，
-    // 不写出来用户只能靠试。类型与绘制模式都在侧栏「工具」里。
-    const modeLabel =
-      status.geometryMode === 'edge'
-        ? DRAW_MODE_LABELS.edge
-        : status.geometryMode === 'edge-step'
-          ? DRAW_MODE_LABELS.step
-          : DRAW_MODE_LABELS.interior
-    const modeHint =
-      status.geometryMode === 'edge-step'
-        ? '每次点击沿网格线前进一条边'
-        : status.geometryMode === 'edge'
-          ? '中间自动沿网格线连接'
-          : '自由折线（河流平滑）'
+    // 提示里带上当前绘制模式与它的画法差异 —— 四种模式的点击含义不同，
+    // 不写出来用户只能靠试。名称与提示都从 strings.ts 取（单一来源）。
+    const modeLabel = drawModeLabel(status.geometryMode)
+    const modeHint = drawModeHint(status.geometryMode)
+    // 自由绘制没有"已定 N 个顶点"这回事（轨迹点是采样），也不能说"双击结束"——
+    // 它的结束方式是**松开左键**，写错会让用户以为要双击。
+    if (status.geometryMode === 'free') {
+      return status.draftPoints > 0
+        ? `${shape}（${modeLabel}）：按住左键拖动随手画 · 松开即完成 · Esc 取消`
+        : `${shape}（${modeLabel}）：${modeHint} · 按住左键拖动，松开完成 · 类型/绘制模式在侧栏「工具」`
+    }
     return status.draftPoints > 0
       ? `${shape}（${modeLabel}）：已定 ${status.draftPoints} 个顶点 · 双击/回车/右键结束 · Esc 取消`
       : `${shape}（${modeLabel}）：${modeHint} · 类型/绘制模式在侧栏「工具」· 双击或回车结束`
