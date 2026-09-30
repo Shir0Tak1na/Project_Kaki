@@ -121,7 +121,7 @@ test('规范化：不透明度夹在 0–1、只认布尔开关、少于两条�
     'temperature,depth,biome',
     '只认登记表里的字段，不认识的键不许进设置',
   )
-  assert.throws(() => overlayField('nope' as never), /未知的数据层字段/)
+  assert.throws(() => overlayField('nope' as never), /未知的数值图层字段/)
 })
 
 test('数据层的字段不许声明取值区间（色带两端不是数据的边界）', () => {

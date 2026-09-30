@@ -47,7 +47,7 @@ export interface MapDefinitionSet {
  *
  * 用途有两个：① **新建地图**时的出厂快照；② **老图（v1）**读进来时的迁移初值。
  * 入参用结构类型而不是 `CartographerSettings`：`data/` 不该 import `ui/`
- * （那个方向会让"数据层能被单测直接覆盖"这条失效）。
+ * （那个方向会让"数值图层能被单测直接覆盖"这条失效）。
  */
 export function definitionSetFromLibrary(input: {
   customTerrains?: unknown

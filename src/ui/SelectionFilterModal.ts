@@ -229,7 +229,7 @@ export class SelectionFilterModal extends Modal {
     )
     makeAction(
       'apply-inside',
-      '只在当前选择里保留命中的格（依赖当前选择，所以是动作）',
+      '只在当前选择里保留命中的格',
       (preview) => `在当前选择内筛（${preview.current} → ${preview.after.inside} 格）`,
       () => this.options.filterInside(this.group),
     )

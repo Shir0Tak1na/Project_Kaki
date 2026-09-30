@@ -92,7 +92,7 @@ export type FieldPrimitive =
  * 连续场的**采样网格**（存的是值，不是颜色）。
  *
  * 为什么不在这里就把颜色算好：颜色映射是 `colorRamp` 的事，而且位图光栅化时
- * 逐点查一次色带比"先造几万个颜色对象、再画"省得多。值留在这里，谁画谁上色。
+ * 逐点查一次配色比"先造几万个颜色对象、再画"省得多。值留在这里，谁画谁上色。
  */
 export interface FieldGrid {
   originX: number
@@ -132,7 +132,7 @@ export interface FieldPlanInput {
   /**
    * `hex` 模式：**越界格**总是画出数值（即使 `showValues` 关着）。
    *
-   * 这是数据层的口径（颜色只能表达"比上限还高"，表达不了"高多少"），
+   * 这是数值图层的口径（颜色只能表达"比上限还高"，表达不了"高多少"），
    * 但"谁该写数值"属于**显示策略**，所以由调用方传进来，而不是在这里写死。
    */
   labelOutOfRange?: boolean
@@ -158,7 +158,7 @@ export interface FieldPlanInput {
   sampleStep?: number
   /** `field` 模式：插值影响半径（世界单位）；缺省 `step × 3` */
   sampleRadius?: number
-  /** `field` 模式：等值线间距；缺省用色带锚点的数值 */
+  /** `field` 模式：等值线间距；缺省用配色锚点的数值 */
   contourInterval?: number | null
   /** `field` 模式：等值线最多画几条（防呆） */
   maxContours?: number
@@ -174,7 +174,7 @@ export interface FieldPlanInput {
    * 已经算好的采样网格（**缓存用**）。
    *
    * 给了它就不重新采样（IDW 是连续场里唯一贵的那一步，见 `overlayPlan.ts` 的缓存）。
-   * 图元仍然每次现算 —— 改色带只该换颜色，不该触发重新插值。
+   * 图元仍然每次现算 —— 改配色只该换颜色，不该触发重新插值。
    */
   precomputedField?: FieldGrid
 }
@@ -544,9 +544,9 @@ export function hashFieldSamples(samples: readonly FieldSample[]): string {
 /**
  * 决定画哪些等值线。
  *
- * - 给了正的 `interval` → 在色带量程内按"间隔的整数倍"取值（0、±10、±20…），
+ * - 给了正的 `interval` → 在配色量程内按"间隔的整数倍"取值（0、±10、±20…），
  *   这与用户对"等高线/等温线"的直觉一致（等值线本来就落在整齐的数值上）；
- * - 没给 → 直接用色带的锚点（"5 个体感温度分类"那 5 条线就是现成的）；
+ * - 没给 → 直接用配色的锚点（"5 个体感温度分类"那 5 条线就是现成的）；
  * - 超过上限时**按等距抽稀**（保留两端），而不是一刀切掉后半段。
  */
 export function contourLevels(
@@ -874,9 +874,9 @@ function labelColorsUnder(
 /**
  * 生成绘制计划。
  *
- * `hex` 模式：每格一个多边形（颜色来自色带，越界格用纯色）+ 数值文字
+ * `hex` 模式：每格一个多边形（颜色来自配色，越界格用纯色）+ 数值文字
  * （`showValues` 时所有格都写；`labelOutOfRange` 时越界格**总是**写）。
- * `field` 模式：连续填色片（`fieldFillCells`）+ 每个等值层级一条折线；颜色取该数值在色带里的颜色。
+ * `field` 模式：连续填色片（`fieldFillCells`）+ 每个等值层级一条折线；颜色取该数值在配色里的颜色。
  * 没有数据的格 / 采样点**不产出任何图元** —— "缺数据"与"极低温"是两件事。
  */
 export function buildFieldPlan(input: FieldPlanInput): FieldPlan {
@@ -1015,7 +1015,7 @@ export function buildFieldPlan(input: FieldPlanInput): FieldPlan {
       color: style.color,
       opacity,
     })
-    // 越界格**总是**写数值：颜色只能表达"比上限还高"，表达不了"高多少"（数据层的口径）。
+    // 越界格**总是**写数值：颜色只能表达"比上限还高"，表达不了"高多少"（数值图层的口径）。
     // 兜底格例外：它是"这张图的基线"，不是量出来的数据，所以即使越界也不写字（满屏 15 会误导，§B.3）。
     const shouldLabel =
       sample.fallback !== true &&

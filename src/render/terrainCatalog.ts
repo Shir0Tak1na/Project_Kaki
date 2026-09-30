@@ -18,6 +18,7 @@
  * 删除设置里的定义**不会**删掉你地图上的格子（它们退化为回退视觉，数据原样保留）。
  */
 
+import { unknownTypeLabel } from '../ui/strings.ts'
 import { TERRAIN_TYPES, type TerrainType } from '../data/mapDocument.ts'
 import { normalizeColor } from './stylePalette.ts'
 import {
@@ -358,7 +359,7 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
   }
   return {
     id,
-    label: `未知（${id}）`,
+    label: unknownTypeLabel(id),
     base: FALLBACK_TERRAIN_BASE,
     outline: FALLBACK_TERRAIN_OUTLINE,
     glyph: FALLBACK_TERRAIN_GLYPH,

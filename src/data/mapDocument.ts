@@ -145,7 +145,7 @@ export type RegionType = string
 /**
  * 内置区域类型（6 种），顺序 = 工具条下拉与图例的顺序。
  *
- * 与 `PATH_TYPES` 一样放在数据层：解析层要据此判断"这个 ID 认不认识"，
+ * 与 `PATH_TYPES` 一样放在数值图层：解析层要据此判断"这个 ID 认不认识"，
  * 而显示名与颜色在 `shapeStyle.REGION_TYPE_STYLES`（与 `PATH_STYLES` 的分工一致）。
  */
 export const BUILTIN_REGION_TYPES = [
@@ -162,7 +162,7 @@ export type BuiltinRegionType = (typeof BUILTIN_REGION_TYPES)[number]
 /**
  * 路径端点样式（存进文件的画法参数之一）。
  *
- * 为什么这组词表定义在**数据层**：它要被写进 `.map.md`（`paths[].cap`），
+ * 为什么这组词表定义在**数值图层**：它要被写进 `.map.md`（`paths[].cap`），
  * 而"文件里能存什么"由本模块说了算（与 `GeometryMode` 放在 core 里同一个道理）。
  */
 export type PathCapStyle = 'butt' | 'round' | 'square'
@@ -203,8 +203,8 @@ export interface TerrainCell {
    * 与 `t` 的关系：一格可以只有温度、没有地形（见 `t` 的说明）。
    * 缺省 = **这一格没有温度数据**，不是 0 ℃ —— 0 是一个合法的温度值。
    *
-   * **没有取值范围**：任何有限数都是合法数据。色带的上下限只决定"带内怎么插值"，
-   * 带外的值用 `under` / `over` 的纯色画出来（并写出数值）—— 边界属于色带，不属于数据。
+   * **没有取值范围**：任何有限数都是合法数据。配色的上下限只决定"带内怎么插值"，
+   * 带外的值用 `under` / `over` 的纯色画出来（并写出数值）—— 边界属于配色，不属于数据。
    */
   temp?: number
   /**
@@ -268,9 +268,9 @@ export interface MapPath {
   cap?: PathCapStyle
   join?: PathJoinStyle
   /**
-   * 几何模式：`interior`（默认，穿过格子内部）或 `edge`（沿六边形边）。
+   * 绘制模式：`interior`（默认，穿过格子内部）或 `edge`（沿六边形边）。
    *
-   * ⚠️ **几何本身在提交时就已经转换好了**（`pts` 就是沿格边的顶点序列），
+   * ⚠️ **几何本身在提交时就已经转换好了**（`pts` 就是沿网格线的顶点序列），
    * 这个字段记录"当初按哪种模式画的"，用于界面回显（与将来的"重新吸附"）；
    * 渲染不需要读它。缺省即 `interior`，因此旧地图完全兼容。
    */
@@ -518,8 +518,8 @@ const KNOWN_CELL_KEYS = new Set(['t', 'f', 'c', 'temp', 'depth', 'biome', 'extra
 
 // 这里曾经有 `TEMP_RANGE` / `DEPTH_RANGE`（-100~100 / -12000~12000）—— **已删除**（2026-09-28）。
 // 它们只被侧栏检查器拿去**拒绝**超范围的输入，而那是设计上不存在的限制：
-// 任何有限数都是合法数据，"超出范围"只发生在颜色这一层（色带的 `under` / `over` 纯色 + 数值文字）。
-// 边界归色带（用户可调），不归数据模型 —— 留着它就会有人再按它去校验一次。
+// 任何有限数都是合法数据，"超出范围"只发生在颜色这一层（配色的 `under` / `over` 纯色 + 数值文字）。
+// 边界归配色（用户可调），不归数据模型 —— 留着它就会有人再按它去校验一次。
 
 function parseTerrain(value: unknown, issues: MapDocumentIssue[]): Record<string, TerrainCell> {
   const out: Record<string, TerrainCell> = {}
@@ -716,7 +716,7 @@ function parseMarker(raw: Record<string, unknown>, path: string, issues: MapDocu
 }
 
 /**
- * 读取几何模式。
+ * 读取绘制模式。
  *
  * 未知取值一律回退为 `interior`（自由模式）：这是旧地图与新地图都能渲染的安全默认，
  * 也不会因为手工编辑写错一个词就让形状消失。

@@ -31,6 +31,7 @@ import {
   type PathJoinStyle,
   type PathType,
 } from '../data/mapDocument.ts'
+import { unknownTypeLabel } from '../ui/strings.ts'
 import { DEFAULT_PATH_CAP, DEFAULT_PATH_JOIN, PATH_STYLES, type PathStyle } from './shapeStyle.ts'
 import { normalizeColor, type PathColorMap } from './stylePalette.ts'
 import {
@@ -95,9 +96,9 @@ export interface PathTypeParams {
   taper: boolean
   /** 用平滑曲线而不是折线 */
   smooth: boolean
-  /** 端点样式 */
+  /** 线头形状 */
   cap: PathCapStyle
-  /** 连接样式 */
+  /** 拐角形状 */
   join: PathJoinStyle
 }
 
@@ -173,14 +174,14 @@ export function normalizePathTypeKind(raw: unknown): PathTypeKind {
 
 /* --------------------------------------------------------------- 参数 */
 
-/** 端点样式的中文名（设置页与提示共用；**不在这里再抄一份词表**，键就是数据层的联合） */
+/** 线头形状的中文名（设置页与提示共用；**不在这里再抄一份词表**，键就是数值图层的联合） */
 export const PATH_CAP_LABELS: Record<PathCapStyle, string> = {
   butt: '平头',
   round: '圆头',
   square: '方头',
 }
 
-/** 连接样式的中文名 */
+/** 拐角形状的中文名 */
 export const PATH_JOIN_LABELS: Record<PathJoinStyle, string> = {
   miter: '尖角',
   round: '圆角',
@@ -448,7 +449,7 @@ export function resolvePathType(id: PathType, entries: readonly PathTypeEntry[] 
   if (entry !== null) return { ...entry, builtin: false, unknown: false }
   return {
     id,
-    label: `未知（${id}）`,
+    label: unknownTypeLabel(id),
     kind: DEFAULT_PATH_TYPE_KIND,
     params: FALLBACK_PATH_TYPE_PARAMS,
     builtin: false,
@@ -493,8 +494,8 @@ export function describePathTypeParams(params: PathTypeParams): string {
   const parts = [`线宽 ${params.width}`, params.dash.length > 0 ? `虚线 ${params.dash.join('-')}` : '实线']
   if (params.taper) parts.push('末端变细')
   if (params.smooth) parts.push('平滑')
-  if (params.cap !== DEFAULT_PATH_CAP) parts.push(`端点 ${PATH_CAP_LABELS[params.cap]}`)
-  if (params.join !== DEFAULT_PATH_JOIN) parts.push(`连接 ${PATH_JOIN_LABELS[params.join]}`)
+  if (params.cap !== DEFAULT_PATH_CAP) parts.push(`线头形状 ${PATH_CAP_LABELS[params.cap]}`)
+  if (params.join !== DEFAULT_PATH_JOIN) parts.push(`拐角形状 ${PATH_JOIN_LABELS[params.join]}`)
   return parts.join(' · ')
 }
 

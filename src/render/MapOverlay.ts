@@ -111,7 +111,7 @@ export interface OverlayStats {
    */
   lastDrawOrder: LayerKey[]
   /**
-   * 本帧数据层（温度 / 深度…）一共画出了多少格，以及其中多少格走了"越界纯色"。
+   * 本帧数值图层（温度 / 深度…）一共画出了多少格，以及其中多少格走了"越界纯色"。
    *
    * 与 `lastGridCells` 同一个理由：**"叠加层没画出来"必须有一个可读的数字**，
    * 否则用户报"我开了温度层但什么都没变"时，只能靠肉眼看截图猜。
@@ -119,15 +119,15 @@ export interface OverlayStats {
   lastOverlayDrawn: number
   lastOverlayOutOfRange: number
   /**
-   * 本帧数据层的**显示方式**（`null` = 这一帧没有画数据层）。
+   * 本帧数值图层的**显示方式**（`null` = 这一帧没有画数值图层）。
    *
    * 为什么要有它：逐格与连续场在屏幕上"都像有颜色"，出问题时不能只靠肉眼判断用了哪一套；
-   * 多个数据层同时可见时取**绘制次序靠后**的那一个（确定的取值，不是随机）。
+   * 多个数值图层同时可见时取**绘制次序靠后**的那一个（确定的取值，不是随机）。
    */
   lastOverlayMode: 'cell' | 'field' | null
-  /** 本帧数据层写出的数值文字个数 */
+  /** 本帧数值图层写出的数值文字个数 */
   lastOverlayLabels: number
-  /** 本帧数据层画出的等值线折线条数（逐格模式恒为 0） */
+  /** 本帧数值图层画出的等值线折线条数（逐格模式恒为 0） */
   lastOverlayContours: number
   /**
    * 连续场采样缓存的累计计数（按字段求和）。
@@ -260,9 +260,9 @@ export interface MapOverlayOptions {
    */
   getLayers?: () => LayerVisibility
   /**
-   * 数据层（温度 / 深度…）的渲染参数（色带 / 不透明度 / 是否画数值）。
+   * 数值图层（温度 / 深度…）的渲染参数（配色 / 不透明度 / 是否画数值）。
    *
-   * 与 `getLayers` 同一条口径：**每帧现读**，所以"设置里改了色带"下一帧就是新颜色，
+   * 与 `getLayers` 同一条口径：**每帧现读**，所以"设置里改了配色"下一帧就是新颜色，
    * 不需要任何广播或失效通知（少一个"忘了通知"的失效点）。
    */
   getOverlayStyles?: () => OverlayStyles
@@ -727,7 +727,7 @@ export class MapOverlay {
     return this.options.getCustomTerrains?.() ?? []
   }
 
-  /** 当前数据层样式（色带 / 不透明度），与 `layers()` 同一条口径：每帧现读 */
+  /** 当前数值图层样式（配色 / 不透明度），与 `layers()` 同一条口径：每帧现读 */
   private overlayStyles(): OverlayStyles {
     return this.options.getOverlayStyles?.() ?? DEFAULT_OVERLAY_STYLES
   }
@@ -1068,7 +1068,7 @@ export class MapOverlay {
           const center = worldToRaster(layer, cell.x, cell.y)
           const drawn = drawTerrainCell(ctx, atlas, cell.type, center.x, center.y, targetRadius)
           if (drawn && cell.color) {
-            // 覆盖色：叠一层半透明填充，保留字形可见
+            // 单格叠加色：叠一层半透明填充，保留字形可见
             const corners = hexCorners(
               { kind: 'hex', orientation: document_.grid.orientation, size: targetRadius, origin: [center.x, center.y] },
               0,
@@ -1125,7 +1125,7 @@ export class MapOverlay {
       }
       drawn.push(spec.id)
       builtinPasses[spec.id]?.()
-      // 数据层：把"画哪个字段 + 用哪套样式"递进钩子（样式每帧现读，改设置下一帧就生效）
+      // 数值图层：把"画哪个字段 + 用哪套样式"递进钩子（样式每帧现读，改设置下一帧就生效）
       const outcome = spec.draw?.({
         ctx,
         toRaster: (x, y) => worldToRaster(layer, x, y),

@@ -1714,3 +1714,202 @@
   font-size: var(--font-ui-smaller);
   box-shadow: none;
 }
+
+/* ------------------------------------------------------------------ 数据层色带的轴（W2） */
+
+/* 一条横向色带：两端是"端色 → 极色"的端帽，中间是锚点；**不画刻度**（用户 m01702 第 3 条） */
+.fc-ramp {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 10px;
+}
+
+.fc-ramp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.fc-ramp-title {
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+}
+
+.fc-ramp-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.fc-ramp-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fc-ramp-cap {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.fc-ramp-cap-under {
+  border-top-left-radius: 9px;
+  border-bottom-left-radius: 9px;
+}
+
+.fc-ramp-cap-over {
+  border-top-right-radius: 9px;
+  border-bottom-right-radius: 9px;
+}
+
+.fc-ramp-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 18px;
+  min-width: 60px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+}
+
+.fc-ramp-handle {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--background-primary);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--background-modifier-border);
+  cursor: grab;
+}
+
+.fc-ramp-handle:active {
+  cursor: grabbing;
+}
+
+.fc-ramp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fc-ramp-count,
+.fc-ramp-note {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.fc-ramp-problem {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+}
+
+/* 只显示**选中的那一个**锚点（或端帽）的精确输入 —— 不摊开一列行，面板才不会被撑长 */
+.fc-ramp-inspector {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+}
+
+.fc-ramp-who {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.fc-ramp-input {
+  width: 6.5em;
+  min-width: 0;
+}
+
+.fc-ramp-color {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+}
+
+/* ------------------------------------------------------------------ W7：排版 · 层次 · 窄栏
+   目标是「好看」的那一半：一组一个节奏、层次靠字重与颜色（不靠加大字号）、
+   长中文标签在窄栏里换行而不是撑出横向滚动条。人眼那一半（真实 Obsidian 里的观感）
+   永远要人看，这里只把**机器能判**的部分钉住（见 tests/narrowColumn.test.ts）。 */
+
+/* 一组一个节奏：组间 12px、组内 4px；最后一组不吃多余外边距 */
+.fc-panel .fc-panel-group {
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.fc-panel .fc-panel-group:last-child {
+  margin-bottom: 4px;
+}
+
+/* 标题：小号 + 加粗 + 次要色（层次靠字重与颜色，字号一大窄栏就换行） */
+.fc-panel .fc-panel-group-title {
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  margin: 0 0 2px;
+}
+
+/* 长中文标签 / 说明：宁可换行，也不要横向滚动条 */
+.fc-panel .fc-panel-group-title,
+.fc-panel .fc-selection-kind,
+.fc-panel .fc-selection-detail,
+.fc-panel .fc-ramp-hint,
+.fc-panel .fc-ramp-who,
+.fc-panel .fc-settings-note {
+  overflow-wrap: anywhere;
+}
+
+/* 控件行：标签可缩、控件不缩（数字输入框被压成一条线就点不了了） */
+.fc-panel .setting-item {
+  min-width: 0;
+  gap: 8px;
+}
+
+.fc-panel .setting-item-info {
+  min-width: 0;
+}
+
+.fc-panel .setting-item-control {
+  flex: 0 0 auto;
+}
+
+/* 轴的检视行在窄栏里换行成两行，而不是把取色器挤出面板 */
+.fc-ramp-inspector {
+  row-gap: 6px;
+}
+
+.fc-ramp-track {
+  min-width: 40px;
+}
+
+/* 极窄（侧栏拖到最窄 / 分屏）：端帽与锚点收小，指路那行让位给控件 */
+@media (max-width: 340px) {
+  .fc-ramp-cap {
+    width: 16px;
+  }
+
+  .fc-ramp-handle {
+    width: 12px;
+    height: 12px;
+  }
+
+  .fc-ramp-hint {
+    display: none;
+  }
+
+  .fc-panel .fc-panel-group-title {
+    letter-spacing: 0;
+  }
+}

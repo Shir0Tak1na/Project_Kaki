@@ -150,18 +150,18 @@ test('未知类型不丢：解析出非空回退样式，并标明 unknown', () 
   const resolved = resolvePathType('custom:gone', entries)
   assert.equal(resolved.unknown, true)
   assert.equal(resolved.builtin, false)
-  assert.equal(resolved.label, '未知（custom:gone）')
+  assert.equal(resolved.label, '未定义类型（custom:gone）')
   assert.deepEqual(resolved.params, FALLBACK_PATH_TYPE_PARAMS)
   // 关键：回退样式必须"看得见"，不能是透明或空
   assert.ok(resolved.params.width > 0)
   assert.ok(resolved.params.color.length > 0)
-  assert.equal(pathTypeLabelOf('spaceship', entries), '未知（spaceship）')
+  assert.equal(pathTypeLabelOf('spaceship', entries), '未定义类型（spaceship）')
 })
 
 test('未知类型的地图数据条目照样能拿到样式（绘制层永不空手）', () => {
   const weird = 'x'.repeat(64)
   const style = resolvedPathStyle(weird, [])
-  assert.equal(style.label, `未知（${weird}）`)
+  assert.equal(style.label, `未定义类型（${weird}）`)
   assert.equal(style.color, FALLBACK_PATH_TYPE_PARAMS.color)
 })
 

@@ -1,5 +1,5 @@
 /**
- * 数据层的**绘制计划**：把"一格一个数值"变成**图元清单** —— 纯函数模块，不 import obsidian。
+ * 数值图层的**绘制计划**：把"一格一个数值"变成**图元清单** —— 纯函数模块，不 import obsidian。
  *
  * 为什么这一层必须单独存在（工单 C / D 的共同要求）：**几何只能有一份**。
  * 画布（`overlayDraw.ts`）与导出 / Base 缩略图（`base/mapPreview.ts`）都调 `buildOverlayPlan()`
@@ -41,7 +41,7 @@ import {
   type OverlayStyle,
 } from './overlayFields.ts'
 
-/** 一条数据层这一帧到底画了什么（可断言的数字，而不是"看起来有颜色"） */
+/** 一条数值图层这一帧到底画了什么（可断言的数字，而不是"看起来有颜色"） */
 export interface OverlayPlanStats {
   mode: 'cell' | 'field'
   /** 图元总数（含数值文字与等值线） */
@@ -189,7 +189,7 @@ function buildCategoryPlan(
   }
 }
 
-/** 数一数这些值里有多少个落在色带之外（与画布同一个 `colorForValue`，绝不另写比较） */
+/** 数一数这些值里有多少个落在配色之外（与画布同一个 `colorForValue`，绝不另写比较） */
 function countOutOfRange(values: Iterable<number>, ramp: OverlayStyle['ramp']): number {
   let count = 0
   for (const value of values) {
@@ -207,7 +207,7 @@ function fieldValues(field: FieldGrid): number[] {
 }
 
 /**
- * 生成一条数据层这一帧的图元清单与统计。
+ * 生成一条数值图层这一帧的图元清单与统计。
  *
  * 各输入的作用：`bounds` 只裁逐格模式的格；`labels: false` 去掉**逐格数值**（导出用）；
  * `cache` 让连续场整份计划（采样 + 逐点上色 + 等值线）只算一次。
@@ -228,7 +228,7 @@ export function buildOverlayPlan(input: OverlayPlanInput): OverlayPlanResult {
   const withLabels = input.labels !== false
 
   // 连续场：整份计划按"数据指纹 + 显示参数"缓存（逐点上色是几千到几万次，每帧重来太浪费）。
-  // 键不含视口 → 平移不失效；键含色带与不透明度 → 改了颜色下一帧就是新颜色。
+  // 键不含视口 → 平移不失效；键含配色与不透明度 → 改了颜色下一帧就是新颜色。
   if (mode === 'field' && input.cache !== undefined) {
     const samples = collectOverlaySamples(document, spec)
     const key = overlayFieldCacheKey(spec, document, samples, style)
@@ -321,7 +321,7 @@ function statsOf(
  * - 逐点上色是几千到几万次 `colorForValue`（带 Oklab 插值），每帧重来是纯浪费；
  * - 缓存里最贵的部分（IDW 采样 + 像素）与最便宜的部分（等值线）**没法拆开缓存**，
  *   而重新插值一次也就毫秒级 —— 拆开只会多一层状态，不值；
- * - 于是"改了色带颜色"会整体重算一次（用户手改设置，次数可忽略），下一帧就是新颜色。
+ * - 于是"改了配色颜色"会整体重算一次（用户手改设置，次数可忽略），下一帧就是新颜色。
  *
  * 键里的数据指纹见 `hashFieldSamples`（**值**参与哈希 —— 否则"改了一格的值画面不变"）。
  * 键**不含视口**：平移不会让缓存失效（比"按可见矩形缓存"更省）。
@@ -342,7 +342,7 @@ export function createOverlayFieldCache(): OverlayFieldCache {
 /**
  * 连续场的缓存键：字段 + 数据指纹 + 采样参数 + **一切会改变图元的显示参数**。
  *
- * 显示参数（色带 / 不透明度 / 等值线间距 / 显示方式）必须进键：它们直接改图元，
+ * 显示参数（配色 / 不透明度 / 等值线间距 / 显示方式）必须进键：它们直接改图元，
  * 漏掉任何一个就会表现成"在设置里改了颜色，画布要等下一次数据变化才更新"
  * （比"改了不重算"更隐蔽 —— 因为它看起来像"偶尔慢半拍"）。
  */

@@ -67,11 +67,11 @@ export interface BasesViewDeps {
    */
   getCustomMarkers?: (document: MapDocument | null) => readonly CustomMarker[]
   /**
-   * 数据层（温度 / 深度）的样式（色带 / 不透明度 / 显示方式）与图层开关。
+   * 数值图层（温度 / 深度）的样式（配色 / 不透明度 / 显示方式）与图层开关。
    *
    * 缩略图与画布、导出必须是"当前设置 + 当前地图"的同一份合成结果：
-   * 关掉温度层后缩略图里也不该有它，改了色带也不该还是旧色（传函数 = 每次现读）。
-   * 参数是**这份视图自己那张地图的路径**（W4-2 起色带与图层按地图分份）——
+   * 关掉温度层后缩略图里也不该有它，改了配色也不该还是旧色（传函数 = 每次现读）。
+   * 参数是**这份视图自己那张地图的路径**（W4-2 起配色与图层按地图分份）——
    * Base 视图没有 canvas，"这是哪张图"只有它自己知道。
    */
   getOverlayStyles?: (mapPath: string | null) => OverlayStyles
@@ -271,7 +271,7 @@ export class MapBasesView extends BasesView {
         // 缩略图与导出**共用同一份实现**：标记按字形画、区域带自己的不透明度与边框
         customMarkers: this.deps.getCustomMarkers?.(this.document) ?? [],
         iconSvgFor: lucideIconFragment,
-        // 数据层同理：样式与开关都现读、且按**这张图**解析（关掉的层不会出现在缩略图里）
+        // 数值图层同理：样式与开关都现读、且按**这张图**解析（关掉的层不会出现在缩略图里）
         ...(this.deps.getOverlayStyles ? { overlayStyles: this.deps.getOverlayStyles(this.mapPath) } : {}),
         ...(this.deps.getLayers ? { layers: this.deps.getLayers(this.mapPath) } : {}),
       })

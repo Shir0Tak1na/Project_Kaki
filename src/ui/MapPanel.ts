@@ -18,6 +18,7 @@
  * - **只在可见时重绘**，并且同一帧内的多次请求合并成一次（`requestAnimationFrame`）。
  */
 
+import { unknownTypeLabel } from './strings.ts'
 import { ItemView, setIcon, type WorkspaceLeaf } from 'obsidian'
 import {
   formatSelectionFieldValue,
@@ -115,7 +116,7 @@ export interface MapPanelDeps {
   /**
    * 改当前选中项的某个字段。**传原始文本**，解析与范围检查都在外面（编辑器那一层）做：
    * 面板不认识"虚线"该怎么解析，也不该认识 —— 否则同一套规则会出现两份。
-   * 空串 = 清除该字段（`null`，例如"清除覆盖色"）。
+   * 空串 = 清除该字段（`null`，例如"清除单格叠加色"）。
    */
   onSetSelectionField: (field: string, rawValue: string) => void
   /** 给点对象（标记 / 名称）设坐标；面板已经把两个输入框解析成数字 */
@@ -207,7 +208,7 @@ export interface MapPanelDeps {
   /** 切换图例显示（写设置 + 广播） */
   onToggleLegend: () => void
   /**
-   * ---- 数据层参数（§F.1 第三组）----
+   * ---- 数值图层参数（§F.1 第三组）----
    *
    * 这一组的控件与**设置页**是**同一份渲染**（`settingsSections.ts`）：
    * 用户的诉求是"不想每次都去设置界面，尽可能利用侧边栏"，而两处各写一遍必然分叉。
@@ -541,8 +542,8 @@ export class MapPanelView extends ItemView {
         : `batch:${batch.count}:${batch.missing}:${batch.summary}:${batch.details.map((row) => `${row.label}=${row.value}`).join('|')}:${batch.fields.map((field) => `${field.key}/${field.mixed ? 1 : 0}/${field.missing}`).join(',')}`
     /**
      * 「显示」那一组（§F.1 三组）也要进签名：
-     * - 数据层的样式（色带锚点 / 分类配色 / 不透明度 / 显示方式 / 单位）**就是控件里的值**，
-     *   不进签名就会出现"在设置页改了色带，面板里还是旧控件"（§5.9 的老毛病）；
+     * - 数值图层的样式（配色锚点 / 分类配色 / 不透明度 / 显示方式 / 单位）**就是控件里的值**，
+     *   不进签名就会出现"在设置页改了配色，面板里还是旧控件"（§5.9 的老毛病）；
      * - 分类字段还多一样：**地图上出现过哪些群系**决定列哪几行，所以把清单也压进签名。
      */
     const overlays = this.deps.getOverlayStyles()
@@ -622,7 +623,7 @@ export class MapPanelView extends ItemView {
      *
      * ① **数据显示面板**（常驻、置顶、整块高度不上下缩动）
      * ② **编辑**（工具 / 笔刷 / 选择方式 + 「编辑」动作组；筛选归编辑）
-     * ③ **视图**（底图 / 地物两小组折进一节；数据层的「画法」跟着它那一层走）
+     * ③ **视图**（底图 / 地物两小组折进一节；数值图层的「画法」跟着它那一层走）
      * ④ 地图层 / 地图定义 / 文件与导出 / 开发工具（动作组，走 `GROUP_ORDER`）
      */
     this.renderSelection(root, selection, batch, readings, objectBatch)
@@ -745,7 +746,7 @@ export class MapPanelView extends ItemView {
       // 当前值不在候选里（本机没有这个定义）：补一条「未知（ID）」，否则下拉会显示成第一项，
       // 用户以为类型被改掉了。**保留原值**（§5.11：不认识的东西属于用户的数据）。
       if (current.length > 0 && !options.some((option) => option.value === current)) {
-        options.unshift({ value: current, label: `未知（${current}）` })
+        options.unshift({ value: current, label: unknownTypeLabel(current) })
       }
       for (const option of options) {
         const optionEl = select.createEl('option', { text: option.label })
@@ -816,7 +817,7 @@ export class MapPanelView extends ItemView {
     }
 
     // 字段按表里的 `group` 分两组：**外观**（这个对象自己长什么样）与
-  // **数据层**（格上的数值，覆盖层拿去上色 —— 混进外观组会让提示变成假话）
+  // **数值图层**（格上的数值，覆盖层拿去上色 —— 混进外观组会让提示变成假话）
   const fieldGroups = [
     {
       title: '外观',
@@ -825,9 +826,9 @@ export class MapPanelView extends ItemView {
       fields: info.fields.filter((field) => (field.group ?? 'appearance') === 'appearance'),
     },
     {
-      title: '数据层',
+      title: '数值图层',
       role: 'data',
-      hint: '数据层：覆盖层按这些数值上色。留空 = 这一格没有数据（与写 0 是两回事：0 ℃ / 海平面都是合法值）',
+      hint: '数值图层：覆盖层按这些数值上色。留空 = 这一格没有数据（与写 0 是两回事：0 ℃ / 海平面都是合法值）',
       fields: info.fields.filter((field) => field.group === 'data'),
     },
   ]
@@ -1206,7 +1207,7 @@ export class MapPanelView extends ItemView {
     })
     group.createEl('div', {
       cls: 'fc-panel-hint',
-      text: '每一行管"看不看"；带「画法」的层可以展开调它怎么画（色带 / 配色 / 不透明度 / 显示方式）。',
+      text: '每一行管"看不看"；带「画法」的层可以展开调它怎么画（配色 / 不透明度 / 显示方式）。',
     })
     this.renderLayerGroup(group, visibility, 'base', '底图')
     this.renderLayerGroup(group, visibility, 'feature', '地物')
@@ -1218,8 +1219,8 @@ export class MapPanelView extends ItemView {
    * 这些按钮刻意用**独立的 class**（`fc-layer-toggle`）而不是复用 `fc-panel-button`：
    * 两者语义不同（一个执行动作、一个切换状态），样式与测试选择器都该分得开。
    *
-   * 数据层的**「画法」跟着它那一层走**（用户本轮口径）：温度 / 深度 / 生物群系三行
-   * 各带一个展开项，点开就是这一层的色带 / 配色 / 不透明度 / 显示方式 ——
+   * 数值图层的**「画法」跟着它那一层走**（用户本轮口径）：温度 / 深度 / 生物群系三行
+   * 各带一个展开项，点开就是这一层的配色 / 配色 / 不透明度 / 显示方式 ——
    * 于是不再有"开关在上面、画法在下面另一组"这种要来回滚的拆法。
    */
   private renderLayerGroup(
@@ -1231,7 +1232,7 @@ export class MapPanelView extends ItemView {
     const list = parent.createEl('div', { cls: 'fc-panel-layers' })
     list.dataset.fcDisplayGroup = group
     list.createEl('div', { cls: 'fc-panel-group-title', text: title })
-    // `LAYER_TABLE` 是 `as const` 的字面量联合（`overlay` 只写在那三条数据层的行上），
+    // `LAYER_TABLE` 是 `as const` 的字面量联合（`overlay` 只写在那三条数值图层的行上），
     // 按接口读它才能安全地问"这一层有没有 overlay"。注意这里要的是**行序 = 界面顺序**，
     // 与 `LAYERS_BY_DRAW_ORDER`（画布上的叠加次序）不是同一个顺序。
     const specs: readonly LayerSpec[] = LAYER_TABLE
@@ -1277,12 +1278,12 @@ export class MapPanelView extends ItemView {
   }
 
   /**
-   * 一层底下那个「画法」展开项（用户本轮口径：数据层的参数跟着它那一层走）。
+   * 一层底下那个「画法」展开项（用户本轮口径：数值图层的参数跟着它那一层走）。
    *
    * 展开状态**不用 `<details>`**：这一节本身已经是一个折叠组，而"展开"只要记住一个 role ——
    * 直接存在 `openGroups` 里（与折叠组同一个集合，同样跨整块重建保留）。
    * 展开时整行会独占一行（`styles.css` 的 `.fc-layer-row[data-fc-draw-open]`）：
-   * 色带锚点那种"输入框 + 取色器"的控件在半格宽里排不下。
+   * 配色那条轴（含两端端帽与检视行）在半格宽里排不下。
    *
    * 控件本体仍然走 `renderOverlayFieldSection` —— 与设置页**共用同一份渲染**（§5.12）。
    */
@@ -1296,7 +1297,7 @@ export class MapPanelView extends ItemView {
     const toggle = row.createEl('button', { cls: 'fc-layer-draw-toggle' })
     toggle.dataset.fcDrawToggle = fieldId
     toggle.textContent = open ? '画法 ▾' : '画法 ▸'
-    toggle.title = `${spec.label}这一层怎么画：色带（或分类配色）、不透明度、显示方式、展示单位`
+    toggle.title = `${spec.label}这一层怎么上色：配色锚点与两端越界色（其余画法在设置页）`
     toggle.addEventListener('click', () => {
       if (open) this.openGroups.delete(role)
       else this.openGroups.add(role)
@@ -1357,7 +1358,7 @@ export class MapPanelView extends ItemView {
         placeholder.value = ''
       } else if (options.every((option) => option.value !== info.typeValue)) {
         // 当前值不在候选里（本机没有这个定义）：补一条「未知（ID）」，用户因此改得掉它
-        options.unshift({ value: info.typeValue, label: `未知（${info.typeValue}）` })
+        options.unshift({ value: info.typeValue, label: unknownTypeLabel(info.typeValue) })
       }
       for (const option of options) {
         const optionEl = select.createEl('option', { text: option.label })
@@ -1414,7 +1415,7 @@ export class MapPanelView extends ItemView {
     }
   }
 
-  /** 数据层控件那一节要的读写入口（**面板版**：改完请求面板重绘） */
+  /** 数值图层控件那一节要的读写入口（**面板版**：改完请求面板重绘） */
   private overlaySectionHost(): OverlaySectionHost {
     return {
       getOverlayStyles: () => this.deps.getOverlayStyles(),
@@ -1436,6 +1437,8 @@ export class MapPanelView extends ItemView {
       getCategoryUsage: (spec) => this.deps.getCategoryUsage(spec),
       // 「画法」那一行已经写着是哪一层的（就在它的层名正下方），再写一个标题就是重复的
       heading: false,
+      // 侧栏只画配色的轴；出厂数值类（不透明度 / 显示方式 / 单位 / 等值线 / 写数值）在设置页（m01430 第二项）
+      rampOnly: true,
       requestRerender: () => {
         this.lastSignature = null
         this.requestRender()

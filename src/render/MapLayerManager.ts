@@ -143,9 +143,9 @@ export interface MapLayerManagerDeps {
    */
   getLayers?: (canvasPath: string) => LayerVisibility
   /**
-   * 数据层（温度 / 深度…）的渲染参数（色带 / 不透明度）。
+   * 数值图层（温度 / 深度…）的渲染参数（配色 / 不透明度）。
    *
-   * 与 `getLayers` 同样是"每帧现读"的函数：色带是可随时调的旋钮，
+   * 与 `getLayers` 同样是"每帧现读"的函数：配色是可随时调的旋钮，
    * 传值会让"改完设置画布不变"变成一类要靠重开画布才能绕过的怪现象。按画布解析，同 `getLayers`。
    */
   getOverlayStyles?: (canvasPath: string) => OverlayStyles
@@ -485,10 +485,10 @@ export class MapLayerManager {
       getLabelScale: () => this.deps.getLabelScale?.() ?? 1,
       // 图层可见性（含 grid 与 labels）：六个层唯一的入口，每帧现读；W4-2 起按**这张画布**那张地图解析
       getLayers: () => this.deps.getLayers?.(canvasPath) ?? DEFAULT_LAYER_VISIBILITY,
-      // 数据层的色带 / 不透明度：同样每帧现读（改设置下一帧就是新颜色），按画布解析
+      // 数值图层的配色 / 不透明度：同样每帧现读（改设置下一帧就是新颜色），按画布解析
       getOverlayStyles: () => this.deps.getOverlayStyles?.(canvasPath) ?? DEFAULT_OVERLAY_STYLES,
       // **分类字段**的"值 → 颜色"：现读分类目录（内置 34 条 + 用户自定义）。
-      // 与色带同一条口径：改一条颜色，下一帧就是新颜色（没有第二份缓存要失效）。
+      // 与配色同一条口径：改一条颜色，下一帧就是新颜色（没有第二份缓存要失效）。
       getCategoryColors: (fieldId) =>
         fieldId === 'biome'
           ? biomeColorMap(this.deps.getCustomBiomes?.(this.entryDocument(canvasPath)) ?? [])
@@ -926,8 +926,8 @@ export class MapLayerManager {
    * 统一抹平，路径则由 `resolvePathType`（目录）统一抹平 —— 图例只负责显示，
    * 于是"图例与画布配色不一致"这种老问题不会因为新功能复活。
    *
-   * 两个参数都要（W4-1b / W4-2 之后定义与色带都按地图解析）：`document_` 决定用哪套定义，
-   * `canvasPath` 决定用哪张图的色带 —— 两者必须指同一张图，多画布同开时不许串。
+   * 两个参数都要（W4-1b / W4-2 之后定义与配色都按地图解析）：`document_` 决定用哪套定义，
+   * `canvasPath` 决定用哪张图的配色 —— 两者必须指同一张图，多画布同开时不许串。
    */
   private legendDeps(document_: MapDocument | null, canvasPath: string): LegendDeps {
     const custom = this.deps.getCustomTerrains?.(document_) ?? []
@@ -957,8 +957,8 @@ export class MapLayerManager {
         const style = resolveBiomeStyle(id, this.deps.getCustomBiomes?.(document_) ?? [])
         return { label: style.label, color: style.color }
       },
-      // 图例里的渐变条 / 越界计数要跟**这张画布那张地图**的色带同源（W4-2），否则会出现
-      // "画布上是新色带、图例里还是旧的"这种两套配色的老毛病（多画布时还会串到别的图）
+      // 图例里的渐变条 / 越界计数要跟**这张画布那张地图**的配色同源（W4-2），否则会出现
+      // "画布上是新配色、图例里还是旧的"这种两套配色的老毛病（多画布时还会串到别的图）
       overlayStyles: this.deps.getOverlayStyles?.(canvasPath) ?? DEFAULT_OVERLAY_STYLES,
     }
   }

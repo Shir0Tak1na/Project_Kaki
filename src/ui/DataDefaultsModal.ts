@@ -1,5 +1,5 @@
 /**
- * 「设置数据层默认值…」对话框。
+ * 「设置数值图层默认值…」对话框。
  *
  * 为什么需要它（用户原话 2026-09-28）："如果有地方没有温度和深度的话就没有渲染，
  * 我认为每个格子初始应该自带一个值，**这个定义值就放在定义里面**。"
@@ -54,7 +54,7 @@ export class DataDefaultsModal extends Modal {
 
   override onOpen(): void {
     const { contentEl } = this
-    contentEl.createEl('h3', { text: '设置数据层默认值' })
+    contentEl.createEl('h3', { text: '设置数值图层默认值' })
     contentEl.createEl('div', {
       cls: 'fc-settings-note',
       text:

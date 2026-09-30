@@ -11,14 +11,14 @@
  *
  * §F.2 定的分工是：**浮窗降级为「状态 + 撤销/重做」**（见 `MapToolbar`），
  * **工具与参数进侧栏**（本文）。于是侧栏变成"要改什么就在这里改"（与图层开关、
- * 数据层参数同一处），浮窗只回答"我现在是什么状态"。
+ * 数值图层参数同一处），浮窗只回答"我现在是什么状态"。
  *
  * ## 一条纪律：每个控件只出现一次
  *
  * §F.2 原稿把「地形选择 · 笔刷大小」同时列进了「工具」那一行，而「笔刷」那一行又写了「半径」——
  * 照抄会让同一个开关挂两处（`ENGINEERING-NOTES.md` §5.12）。这里按"它属于谁"归位：
  * - 地形选择与半径属于**笔刷**（它们就是"刷什么 / 刷多大"），只在「笔刷」一节出现；
- * - 路径/区域类型、图标、几何模式属于**工具**，只在「工具」一节出现；
+ * - 路径/区域类型、图标、绘制模式属于**工具**，只在「工具」一节出现；
  * - 选择方式（框选 / 笔迹 / 筛选 / 连通扩展）属于**选择方式**，只在那一节出现。
  *
  * ## 与浮窗的差别（有意为之）
@@ -52,6 +52,7 @@ import {
 import { biomeCatalogSignature, listResolvedBiomeStyles, type CustomBiome } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS, type FieldId } from '../render/overlayFields.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
+import { DRAW_MODE_LABELS, unknownTypeLabel } from './strings.ts'
 
 /** 没有启用的地图层时，三节共同的那句话 */
 export const NO_LAYER_HINT = '当前没有启用的地图层：打开一张地图并启用地图层之后，这里才有可改的东西。'
@@ -127,7 +128,7 @@ export const TOOL_LABELS: Record<EditorTool, { label: string; hint: string }> = 
 /** 工具在界面上的顺序（画笔在前 = 最常用） */
 const TOOL_ORDER: readonly EditorTool[] = ['brush', 'marker', 'label', 'path', 'region']
 
-/** 笔刷那一节的"层"选项：地形 + 每个数据层字段（**从字段表派生**，加字段自动多一项） */
+/** 笔刷那一节的"层"选项：地形 + 每个数值图层字段（**从字段表派生**，加字段自动多一项） */
 export const BRUSH_FIELD_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: '', label: '地形' },
   ...OVERLAY_FIELDS.map((spec) => ({ value: spec.id, label: spec.label })),
@@ -142,22 +143,22 @@ export const BRUSH_OPS: ReadonlyArray<{ value: BrushOp; label: string; hint: str
   { value: '÷', label: '÷', hint: '除以一个系数：没有值的格跳过；除以 0 不生效' },
 ]
 
-/** 路径/区域的几何模式（仅这两个工具下显示） */
+/** 路径/区域的绘制模式（仅这两个工具下显示） */
 export const GEOMETRY_OPTIONS: ReadonlyArray<{ mode: GeometryMode; label: string; hint: string }> = [
   {
     mode: 'edge',
-    label: '沿格边',
-    hint: '勾勒六边形边框：落点吸附到网格顶点，顶点之间自动沿格边走（画面更整齐；线条会比直线略长）',
+    label: DRAW_MODE_LABELS.edge,
+    hint: '落点吸附到网格顶点，顶点之间自动沿网格线连接（画面整齐；线条比直线略长）',
   },
   {
     mode: 'edge-step',
-    label: '逐边',
-    hint: '一次只画一条边：点哪个方向就沿格边往哪前进一条边（逐条描边，拐弯就往那个方向点）',
+    label: DRAW_MODE_LABELS.step,
+    hint: '一次只走一条格边：点哪个方向就往哪前进（逐条描边，拐弯就往那边点）',
   },
   {
     mode: 'interior',
-    label: '穿内部',
-    hint: '直接通过六边形内部：自由折线（河流仍是平滑曲线），可以斜穿格子',
+    label: DRAW_MODE_LABELS.interior,
+    hint: '穿过格子中心连线：自由折线（河流平滑），可以斜穿格子',
   },
 ]
 
@@ -241,7 +242,7 @@ function unusableReason(status: EditorStatus): string {
 // ------------------------------------------------------------------ 工具
 
 /**
- * 「工具」一节：工具切换 + 当前工具的参数（路径/区域类型、图标、几何模式）。
+ * 「工具」一节：工具切换 + 当前工具的参数（路径/区域类型、图标、绘制模式）。
  *
  * 地形选择**不在这里**：它属于笔刷（见文件头那条"每个控件只出现一次"）。
  */
@@ -339,7 +340,7 @@ function renderPathType(group: HTMLElement, host: ToolControlsHost, status: Edit
   // 当前值不在目录里（别的库写的 / 定义刚被删）：补一条「未知（ID）」并**保留原值** ——
   // 否则下拉会显示成第一项，用户以为类型被改掉了（§5.11）
   if (!known.includes(status.pathType)) {
-    select.createEl('option', { text: `未知（${status.pathType}）` }).value = status.pathType
+    select.createEl('option', { text: `${unknownTypeLabel(status.pathType)}` }).value = status.pathType
   }
   for (const entry of listPathTypeEntries(entries)) {
     select.createEl('option', { text: entry.label }).value = entry.id
@@ -365,7 +366,7 @@ function renderRegionType(group: HTMLElement, host: ToolControlsHost, status: Ed
   select.dataset.fcRegionType = '1'
   const known = entries.map((entry) => entry.id)
   if (!known.includes(status.regionType)) {
-    select.createEl('option', { text: `未知（${status.regionType}）` }).value = status.regionType
+    select.createEl('option', { text: `${unknownTypeLabel(status.regionType)}` }).value = status.regionType
   }
   for (const entry of entries) {
     select.createEl('option', { text: entry.label }).value = entry.id
@@ -378,7 +379,7 @@ function renderRegionType(group: HTMLElement, host: ToolControlsHost, status: Ed
   hintLine(group, `${resolved.label}：${describeRegionTypeParams(resolved.params)}`)
 }
 
-/** 几何模式（只对路径/区域这两个"多点绘制"的工具显示） */
+/** 绘制模式（只对路径/区域这两个"多点绘制"的工具显示） */
 function renderGeometry(group: HTMLElement, host: ToolControlsHost, status: EditorStatus): void {
   const row = group.createEl('div', { cls: 'fc-panel-tool-row' })
   for (const option of GEOMETRY_OPTIONS) {
@@ -395,7 +396,7 @@ function renderGeometry(group: HTMLElement, host: ToolControlsHost, status: Edit
 // ------------------------------------------------------------------ 笔刷
 
 /**
- * 「笔刷」一节：层（地形 / 数据层字段）+ 该层的参数 + 半径。
+ * 「笔刷」一节：层（地形 / 数值图层字段）+ 该层的参数 + 半径。
  *
  * §E 的三条硬口径原样保留（它们只跟状态有关，与控件长在哪里无关）：
  * **数值框初始为空**（不预填）、**没确认时笔刷不生效**（这里把原因写在旁边，

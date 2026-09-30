@@ -4,7 +4,7 @@
  * ## 它不再是什么
  *
  * 它原来是"什么都能干"的控制条：模式、工具切换、地形调色板、路径/区域类型、笔刷大小、
- * 数据层笔刷（层 / 算法 / 数值 / 群系）、选择方式、筛选、撤销/重做、名称与图例开关，
+ * 数值图层笔刷（层 / 算法 / 数值 / 群系）、选择方式、筛选、撤销/重做、名称与图例开关，
  * 全挤在同一个框里。用户实测报的两条缺陷根因都是这个"一个框扮演好几个角色"：
  * - **ISSUE-002「找不到生物群系笔刷」**：控件确实做了，但长在画布浮窗里，用户找不到；
  * - **ISSUE-004「筛选和绘制在同一个框里，反直觉」**：同一个框按模式换内容却不换身份。
@@ -26,6 +26,7 @@ import { listResolvedTerrainStyles, type CustomTerrain } from '../render/terrain
 import { resolveBiomeStyle } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS } from '../render/overlayFields.ts'
 import { TOOL_LABELS } from './toolSections.ts'
+import { DRAW_MODE_LABELS, unknownTypeLabel } from './strings.ts'
 
 export interface MapToolbarOptions {
   editor: MapEditorLike
@@ -63,7 +64,7 @@ export class MapToolbar {
   /**
    * 副行：绘制模式下的**参数或"为什么不能画"**。
    *
-   * 文案保持既有口径不变（`编辑：温度笔刷 · ＝12` / `编辑：数据层笔刷 · 请先填一个数值`），
+   * 文案保持既有口径不变（`编辑：温度笔刷 · ＝12` / `编辑：数值图层笔刷 · 请先填一个数值`），
    * 因为 §E 那三条硬口径与它们的断言都挂在这一行上。
    *
    * 没有额外信息时整行隐藏：选择模式下方式与格数已在标题里，非笔刷工具也没有参数可报 ——
@@ -140,11 +141,11 @@ export class MapToolbar {
    * 标题行：这个框"现在属于谁"（ISSUE-004）。
    *
    * 三种说法，与副行严格分工（**不重复说同一件事**）：
-   * - 绘制模式 → `绘制 · 地形笔刷` / `绘制 · 数据层笔刷` / `绘制 · 路径`；
+   * - 绘制模式 → `绘制 · 地形笔刷` / `绘制 · 数值图层笔刷` / `绘制 · 路径`；
    * - 选择模式且有选择 → `选择 · 矩形框选 · 12 格`；
    * - 选择模式且没有选择 → `空闲`。
    *
-   * 数据层笔刷刻意只写到「数据层笔刷」这一层：**具体是哪一层在副行里说**
+   * 数值图层笔刷刻意只写到「数值图层笔刷」这一层：**具体是哪一层在副行里说**
    * （`编辑：温度笔刷 · ＝12`）—— 否则标题与副行会把同一个词写两遍。
    */
   private titleLine(status: EditorStatus, painting: boolean): string {
@@ -154,7 +155,7 @@ export class MapToolbar {
       return `选择 · ${status.selectionMode === 'rect' ? '矩形框选' : '笔迹框选'} · ${count} 格`
     }
     if (status.tool === 'brush') {
-      return status.brushField === null ? '绘制 · 地形笔刷' : '绘制 · 数据层笔刷'
+      return status.brushField === null ? '绘制 · 地形笔刷' : '绘制 · 数值图层笔刷'
     }
     return `绘制 · ${TOOL_LABELS[status.tool].label}`
   }
@@ -204,18 +205,23 @@ export class MapToolbar {
     if (status.tool === 'marker') return '左键点击放置标记（图标在侧栏「工具」）· 选择模式下可点开笔记 / 拖动 / 右键删除'
     if (status.tool === 'label') return '左键点击放置文字标注 · 选择模式下可拖动移动 / 右键删除'
     const shape = status.tool === 'path' ? '路径' : '区域'
-    // 提示里带上当前几何模式与它的画法差异 —— 三种模式的点击含义不同，
-    // 不写出来用户只能靠试。类型与几何模式都在侧栏「工具」里。
-    const modeLabel = status.geometryMode === 'edge' ? '沿格边' : status.geometryMode === 'edge-step' ? '逐边' : '穿内部'
+    // 提示里带上当前绘制模式与它的画法差异 —— 三种模式的点击含义不同，
+    // 不写出来用户只能靠试。类型与绘制模式都在侧栏「工具」里。
+    const modeLabel =
+      status.geometryMode === 'edge'
+        ? DRAW_MODE_LABELS.edge
+        : status.geometryMode === 'edge-step'
+          ? DRAW_MODE_LABELS.step
+          : DRAW_MODE_LABELS.interior
     const modeHint =
       status.geometryMode === 'edge-step'
-        ? '每次点击沿格边前进一条边（点哪个方向就往哪走）'
+        ? '每次点击沿网格线前进一条边'
         : status.geometryMode === 'edge'
-          ? '中间自动沿格边走'
+          ? '中间自动沿网格线连接'
           : '自由折线（河流平滑）'
     return status.draftPoints > 0
       ? `${shape}（${modeLabel}）：已定 ${status.draftPoints} 个顶点 · 双击/回车/右键结束 · Esc 取消`
-      : `${shape}（${modeLabel}）：${modeHint} · 类型/几何模式在侧栏「工具」· 双击或回车结束`
+      : `${shape}（${modeLabel}）：${modeHint} · 类型/绘制模式在侧栏「工具」· 双击或回车结束`
   }
 
   /** 按编辑器当前状态刷新文案与可用性（工具条只剩状态与两个动作，所以很短） */
@@ -236,7 +242,7 @@ export class MapToolbar {
     // ⚠️ 顺序：必须在上面的 detail 之后覆盖 —— 这行原因比"当前参数"更重要。
     // 侧栏「笔刷」一节下方也写了同一句（控件在那里，原因就该在那里看得见）。
     if (painting && status.tool === 'brush' && status.brushField !== null && !status.brushReady.ok) {
-      this.statusEl.textContent = `编辑：数据层笔刷 · ${status.brushReady.reason}`
+      this.statusEl.textContent = `编辑：数值图层笔刷 · ${status.brushReady.reason}`
       this.statusEl.style.display = ''
     }
 

@@ -38,7 +38,7 @@ export interface RenderPlanCell {
   type: string
   /** 位标志（旋转/镜像/变体） */
   flags: number
-  /** 覆盖色（覆盖地形默认底色） */
+  /** 单格叠加色（覆盖地形默认底色） */
   color?: string
 }
 
@@ -172,7 +172,7 @@ export function buildRenderPlan(options: BuildRenderPlanOptions): MapRenderPlan 
   //
   // 判断只有这一个口子，层名取自 `LAYER_TABLE`（键写错是编译错误，不是静默永不生效）。
   // 但"每层产出什么"仍是各自的取数逻辑（格 / 折线 / 多边形形状不同），这块没法表驱动 ——
-  // 于是新增数据层时：`LAYER_TABLE` 加一行（开关与名字），在这里加一段取数（计划里多一个数组）。
+  // 于是新增数值图层时：`LAYER_TABLE` 加一行（开关与名字），在这里加一段取数（计划里多一个数组）。
   const layers = options.layers
   const visible = (key: LayerKey): boolean => layers === undefined || isLayerVisible(layers, key)
 

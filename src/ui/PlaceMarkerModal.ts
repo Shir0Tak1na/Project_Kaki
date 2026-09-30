@@ -5,6 +5,7 @@
  * 而复用同一个类会让两者都变得难读。表单结构很小，各写各的更清楚。
  */
 
+import { unknownTypeLabel } from './strings.ts'
 import { Modal, Setting, type App } from 'obsidian'
 import { type MarkerIcon, type MarkerId } from '../data/mapDocument.ts'
 import { listResolvedMarkerStyles, type CustomMarker } from '../render/markerCatalog.ts'
@@ -94,7 +95,7 @@ export class PlaceMarkerModal extends Modal {
           // 当前选中的图标要保证在下拉里存在，否则 setValue 会静默落回第一项 ——
           // 用户会看到"图标自己换了"，而实际是他选的那个自定义标记刚被删掉。
           if (!styles.some((style) => style.id === this.icon)) {
-            dropdown.addOption(this.icon, `未知（${this.icon}）`)
+            dropdown.addOption(this.icon, unknownTypeLabel(this.icon))
           }
           dropdown.setValue(this.icon)
           dropdown.onChange((value) => {

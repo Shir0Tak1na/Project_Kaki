@@ -36,16 +36,16 @@ import type { MapRenderPlan } from './renderPlan.ts'
  * 于是"叠加层没画出来"能被断言抓到，而不是靠肉眼看截图（同 `lastGridCells` 的口径）。
  */
 export interface LayerDrawOutcome {
-  /** 本帧画出的图元个数（数据层是"色块数"） */
+  /** 本帧画出的图元个数（数值图层是"色块数"） */
   drawn: number
-  /** 其中走了"越界纯色"的个数（只有色带类图层有这个概念） */
+  /** 其中走了"越界纯色"的个数（只有配色类图层有这个概念） */
   outOfRange?: number
-  /** 画出的数值文字个数（数据层） */
+  /** 画出的数值文字个数（数值图层） */
   labels?: number
   /** 画出的等值线折线条数（连续场才有；逐格模式是 0） */
   contours?: number
   /**
-   * 这一层本帧用的显示方式（数据层才有）。
+   * 这一层本帧用的显示方式（数值图层才有）。
    *
    * 名字与 `drawOverlayLayer` 的返回值**必须一致**：统计字段是"真实渲染确实按设置走"的证据，
    * 名字对不上时它的表现是"永远是 null"（那种静默错位最难查）。
@@ -71,10 +71,10 @@ export interface LayerDrawContext {
   /** 全量图层开关（钩子想联动别的层时现读，不要缓存） */
   layers: LayerVisibility
   /**
-   * 这一层要画的数据字段与它的渲染样式（色带 / 透明度 / 是否画数值）。
+   * 这一层要画的数据字段与它的渲染样式（配色 / 透明度 / 是否画数值）。
    *
    * 只有**声明了 `overlay` 的行**才有值；由绘制层每帧从设置里现读，
-   * 所以"在设置里改了色带 → 下一帧就是新颜色"，不需要任何广播。
+   * 所以"在设置里改了配色 → 下一帧就是新颜色"，不需要任何广播。
    */
   overlay?: { spec: OverlayFieldSpec; style: OverlayStyle }
   /**
@@ -95,7 +95,7 @@ export interface LayerDrawContext {
    * **分类字段**的"分类 ID → 颜色"（现读目录：内置 + 自定义）。
    *
    * 与 `overlay` 同一条路：由绘制层每帧现读设置、递进钩子；钩子（`drawOverlayLayer`）
-   * 原样转给 `buildOverlayPlan`。数值字段用不到它（它们有色带）。
+   * 原样转给 `buildOverlayPlan`。数值字段用不到它（它们有配色）。
    */
   categoryColors?: ReadonlyMap<string, string>
 }
@@ -111,7 +111,7 @@ interface LayerSpecShape {
   /**
    * 侧栏「显示」里它属于哪一组（施工文件 §F.1 那条"每个开关只出现在一处"的切法）。
    *
-   * - `base` = **底图**：地形、六边形网格，以及三条数据层的覆盖染色（温度 / 深度 / 生物群系）——
+   * - `base` = **底图**：地形、六边形网格，以及三条数值图层的覆盖染色（温度 / 深度 / 生物群系）——
    *   它们都是"地图的底色"，回答"这片地方长什么样"；
    * - `feature` = **地物**：区域、路径、标记、名称 —— 它们都是"画在底图上的东西"，
    *   回答"这片地方上有什么"。
@@ -120,7 +120,7 @@ interface LayerSpecShape {
    * 而且"这一层属于哪一组"与"它叫什么、出厂开不开"放在一起，不会分叉。
    */
   readonly displayGroup: 'base' | 'feature'
-  /** 这一层画的是哪个**数据字段**（数据层才有；见 `overlayFields.ts`） */
+  /** 这一层画的是哪个**数据字段**（数值图层才有；见 `overlayFields.ts`） */
   readonly overlay?: FieldId
   readonly draw?: (context: LayerDrawContext) => LayerDrawOutcome | void
 }
@@ -143,11 +143,10 @@ export const LAYER_TABLE = [
   {
     id: 'temperature',
     label: '温度',
-    hint: '格上温度的色带染色（叠加在地形之上、网格之下）',
+    hint: '格上温度的配色染色（叠加在地形之上、网格之下）',
     describe:
-      '温度覆盖层：把格上的温度值按色带染色，越界的格用纯蓝 / 纯红。' +
-      '默认隐藏；色带、越界色、不透明度在设置页的「数据层」一组里。' +
-      '它只决定"看不看"，地图文件里的温度不受影响。',
+      '把格上温度按配色染色；越出上下限的格按"离端值多远"渐变到极色。' +
+      '开关只决定看不看，地图文件里的温度不受影响。',
     defaultVisible: false,
     isDataLayer: true,
     displayGroup: 'base',
@@ -159,15 +158,14 @@ export const LAYER_TABLE = [
   {
     id: 'depth',
     label: '深度',
-    hint: '格上深度 / 海拔的色带染色（与温度同一种数据层，叠在地形之上）',
+    hint: '格上深度 / 海拔的配色染色（与温度同一种数值图层，叠在地形之上）',
     describe:
-      '深度覆盖层：0 = 海平面、正 = 向下、负 = 向上，按色带染色（出厂是高处浅米 → 海平面浅蓝 → 深海深蓝）。' +
-      '默认隐藏；色带、越界色、不透明度与展示单位（米 / 千米 / 相对值）在设置页的「数据层」一组里。' +
-      '它只决定"看不看"，地图文件里的深度值不受影响。',
+      '0 = 海平面，正 = 向下，负 = 向上；按配色染色（出厂 低 → 高 = 黑 → 白）。' +
+      '开关只决定看不看，地图文件里的深度值不受影响。',
     defaultVisible: false,
     isDataLayer: true,
     displayGroup: 'base',
-    // 紧挨温度之下、仍在网格与矢量对象之下（两条数据层不该互相遮挡，也不能糊住路径与名称）
+    // 紧挨温度之下、仍在网格与矢量对象之下（两条数值图层不该互相遮挡，也不能糊住路径与名称）
     order: 14,
     overlay: 'depth',
     draw: drawOverlayLayer,
@@ -175,15 +173,14 @@ export const LAYER_TABLE = [
   {
     id: 'biome',
     label: '生物群系',
-    hint: '格上生物群系的分类配色（与温度 / 深度同一种数据层，叠在地形之上）',
+    hint: '格上生物群系的分类配色（与温度 / 深度同一种数值图层，叠在地形之上）',
     describe:
-      '生物群系覆盖层：每一格按它的生物群系**各自的颜色**上色（颜色属于分类表里的那一条，' +
-      '不是"由大类推"）。默认隐藏；逐条配色可在设置页的「数据层」里覆盖。' +
-      '它只决定"看不看"，地图文件里的 biome 值不受影响。',
+      '每一格按它自己那条生物群系的颜色上色（分类配色可在设置页覆盖）。' +
+      '开关只决定看不看，地图文件里的 biome 值不受影响。',
     defaultVisible: false,
     isDataLayer: true,
     displayGroup: 'base',
-    // 与温度 / 深度同一条带（12 / 14 / 16）：三条数据层叠在地形之上、网格与矢量对象之下。
+    // 与温度 / 深度同一条带（12 / 14 / 16）：三条数值图层叠在地形之上、网格与矢量对象之下。
     // 放在最后是因为它最"花"（分类配色），被路径与名称压住才不会喧宾夺主。
     order: 16,
     overlay: 'biome',

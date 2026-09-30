@@ -54,7 +54,7 @@ export const QUICK_START_SETTINGS: readonly QuickStartItem[] = [
   },
   {
     title: '改单个对象 → 去侧栏',
-    hint: '在画布上点一个对象，右侧面板会给出它的类型 / 位置 / 外观。下面这些设置只管新画出来的对象。',
+    hint: '在画布上点一个对象，右侧面板给它类型 / 位置 / 外观。这些设置只管新画的对象。',
   },
   {
     title: '新增 / 删除 / 改 ID 定义 → 去「地图定义…」',

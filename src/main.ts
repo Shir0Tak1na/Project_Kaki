@@ -387,7 +387,7 @@ export default class ProjectKakiPlugin extends Plugin {
       // 图层 / 图例的**写入口**不在这里：画布上的按钮已经删掉，改开关走侧栏面板与命令
       // （`MapPanelDeps.onToggleLayer` / `onToggleLegend`）—— 于是"一个开关只有一个家"。
       getLayers: (canvasPath) => this.layersFor(this.mapPathForCanvas(canvasPath)),
-      // 数据层样式（色带 / 不透明度）：同样每帧现读 —— 改色带下一帧就是新颜色
+      // 数值图层样式（配色 / 不透明度）：同样每帧现读 —— 改配色下一帧就是新颜色
       getOverlayStyles: (canvasPath) => this.overlaysFor(this.mapPathForCanvas(canvasPath)),
       getShowLegend: (canvasPath) => this.showLegendFor(this.mapPathForCanvas(canvasPath)),
     })
@@ -498,7 +498,7 @@ export default class ProjectKakiPlugin extends Plugin {
         // 每格默认值：也是"地图级的事实"（没量过值的格用哪个数兜底）→ 归 `map` 组、写进地图文件。
         // 它**只影响渲染**：文件里的格一个字节都不改，所以改完立刻全图生效（§B）。
         id: 'set-data-defaults',
-        name: '设置数据层默认值…',
+        name: '设置数值图层默认值…',
         icon: 'thermometer',
         group: 'map',
         available: hasLayer,
@@ -845,7 +845,7 @@ export default class ProjectKakiPlugin extends Plugin {
         this.layers?.getInspectorEditor()?.clearAllSelection()
         this.refreshPanel()
       },
-      // ---- 「显示」三组（§F.1）：图例开关 + 数据层参数（与设置页共用同一份控件渲染）----
+      // ---- 「显示」三组（§F.1）：图例开关 + 数值图层参数（与设置页共用同一份控件渲染）----
       getShowLegend: () => this.showLegendFor(this.activeViewMapPath()),
       onToggleLegend: () => {
         void this.setShowLegend(!this.showLegendFor(this.activeViewMapPath()))
@@ -953,7 +953,7 @@ export default class ProjectKakiPlugin extends Plugin {
           ? []
           : selectionStatRows(
               summary,
-              // W4-2：色带按**活动画布那张地图**解析（与画布、图例同一份）
+              // W4-2：配色按**活动画布那张地图**解析（与画布、图例同一份）
               this.overlaysFor(this.activeViewMapPath()),
               document_.elevation ?? null,
               (id) => resolveBiomeStyle(id, this.definitionsOf(document_).biomes).label,
@@ -1209,7 +1209,7 @@ export default class ProjectKakiPlugin extends Plugin {
           getPathTypes: (document) => this.definitionsOf(document).pathTypes,
           // 区域同理：表里、画布上、图例里对同一个区域类型必须说同一个名字
           getRegionTypes: (document) => this.definitionsOf(document).regionTypes,
-          // 数据层与图层开关：缩略图里也要与画布一致（关掉的层不出现、色带改了就跟着变）。
+          // 数值图层与图层开关：缩略图里也要与画布一致（关掉的层不出现、配色改了就跟着变）。
           // W4-2：按**这份视图自己那张地图**解析（Base 视图没有画布，标识就是它加载的地图路径）
           getOverlayStyles: (mapPath) => this.overlaysFor(mapPath),
           getLayers: (mapPath) => this.layersFor(mapPath),
@@ -1358,7 +1358,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const exportPath = uniqueExportPath(basePath, extension, (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null)
     // 现读一次设置：导出必须是"当前地图 + **当前地图那份定义**"的合成结果。
     // 图标形状只能由 Obsidian 的 `getIcon` 拿到，所以**注入**给纯模块（见 `lucideFragment.ts`）。
-    // 数据层颜色面走了哪条路（内联栅格 / 超上限退回矢量）由 `onOverlayExport` 带回来，
+    // 数值图层颜色面走了哪条路（内联栅格 / 超上限退回矢量）由 `onOverlayExport` 带回来，
     // 附在导出提示里 —— 否则"报错的是矢量兜底"这件事用户永远看不见（DATA-LAYER-PLAN §0 D1 a3）。
     let overlayNotes: readonly OverlayExportNote[] = []
     // 定义**按被导出的那份文档**解析（v2 方案 B）：导出别人的图时，颜色/线宽跟的是文件里那一套
@@ -1366,9 +1366,9 @@ export default class ProjectKakiPlugin extends Plugin {
     const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, definitions.terrains, resolved.bounds, {
       customMarkers: definitions.markers,
       iconSvgFor: lucideIconFragment,
-      // 数据层（温度 / 深度）与图层开关**按被导出的那张地图解析**：与画布同一条口径
-      // （关掉温度层，导出里就不该有它；色带 / 显示方式也要跟画布一致）。
-      // W4-2：导出"别人给的图"时不该把**本机对当前那张图**的色带套上去
+      // 数值图层（温度 / 深度）与图层开关**按被导出的那张地图解析**：与画布同一条口径
+      // （关掉温度层，导出里就不该有它；配色 / 显示方式也要跟画布一致）。
+      // W4-2：导出"别人给的图"时不该把**本机对当前那张图**的配色套上去
       overlayStyles: this.overlaysFor(mapPath),
       layers: this.layersFor(mapPath),
       onOverlayExport: (notes) => {
@@ -1619,7 +1619,7 @@ export default class ProjectKakiPlugin extends Plugin {
    * **当前活动画布**绑定的地图路径（`null` = 没有地图 ⇒ 视图偏好落在库级那一份"模板"上）。
    *
    * 与 `definitionTarget` 里那一句同一条口径（活动画布 → 它绑定的地图文件），
-   * 只是这里**不要求启用地图层**：图层开关、色带、图例是"我现在想看到什么"，
+   * 只是这里**不要求启用地图层**：图层开关、配色、图例是"我现在想看到什么"，
    * 只要有一张地图在眼前就该记住它。标识用**库内相对路径**（同一张图可被多个 canvas 引用，
    * 按 canvas 分份会给同一张图两份设置）。
    */
@@ -1647,7 +1647,7 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
-   * 色带 / 不透明度那一份**按地图解析**（缺 = 用库级模板）。
+   * 配色 / 不透明度那一份**按地图解析**（缺 = 用库级模板）。
    *
    * 必须便宜：绘制层是**每帧现读**它（`MapOverlay` / `MapLayerManager` 的 deps），
    * 所以这里只查一次表、不做规范化 —— 规范化在 `normalizeSettings` 与写入侧各做一次。
@@ -1670,10 +1670,10 @@ export default class ProjectKakiPlugin extends Plugin {
    * 视图偏好的**唯一写入口**：写进某张地图那一份，同时**镜像**回库级那一份。
    *
    * 为什么镜像（与"定义随图"里那条一字不差）：库级那一份是**"新建地图的模板"**，
-   * 不跟上就会出现"刚调好的色带，新建一张图又打回出厂"。
+   * 不跟上就会出现"刚调好的配色，新建一张图又打回出厂"。
    * 没有地图（`null`）时改的就是模板本身 —— 那种情况下模板是唯一存在的家。
    *
-   * 只改内存、不落盘、不广播：调用方各自决定广播什么（图层要广播，色带靠"每帧现读"）。
+   * 只改内存、不落盘、不广播：调用方各自决定广播什么（图层要广播，配色靠"每帧现读"）。
    * 这样也保住了既有口径 —— **改内存是同步的**，于是侧栏里同步点一下开关，
    * 下一帧就看到结果（不必等落盘）。
    */
@@ -2547,7 +2547,7 @@ export default class ProjectKakiPlugin extends Plugin {
   /* --------------------------------------------------------- 每格默认值（§B） */
 
   /**
-   * 「设置数据层默认值…」对话框里要渲染的行 / 命令面板描述里要用的条目 —— **从字段表派生**。
+   * 「设置数值图层默认值…」对话框里要渲染的行 / 命令面板描述里要用的条目 —— **从字段表派生**。
    *
    * 派生而不是写死"温度 + 深度"：以后加一个数值字段，弹窗与描述都自动多一项（纪律 §4.7）。
    * 分类字段（例如 §D 的生物群系）会被 `numericDefaultRows()` 里的 `numeric` 筛掉。
@@ -2560,7 +2560,7 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
-   * 打开「设置数据层默认值…」对话框，把结果写进**地图文件**的 `dataDefaults` 段（可撤销）。
+   * 打开「设置数值图层默认值…」对话框，把结果写进**地图文件**的 `dataDefaults` 段（可撤销）。
    *
    * 与「设置海拔标定…」同一套路（三条边界也一样）：走编辑器的 `setDataDefaults` →
    * 一次提交 = 一条历史；回调里**重新取一次编辑器**（对话框是异步的）；
@@ -2570,7 +2570,7 @@ export default class ProjectKakiPlugin extends Plugin {
     const editor = this.layers?.getActiveEditor() ?? null
     const document_ = this.layers?.getActiveDocument() ?? null
     if (!editor || !document_) {
-      new Notice('需要先启用一张 Canvas 的地图层，才能设置它的数据层默认值。', NOTICE_MAX_MS)
+      new Notice('需要先启用一张 Canvas 的地图层，才能设置它的数值图层默认值。', NOTICE_MAX_MS)
       return
     }
     const current = document_.dataDefaults ?? null
@@ -2585,7 +2585,7 @@ export default class ProjectKakiPlugin extends Plugin {
         if (!target) return
         if (target.setDataDefaults(defaults)) {
           new Notice(
-            defaults === null ? '已清除数据层默认值（没量过值的格回到空白）' : '已设置数据层默认值（Ctrl/Cmd+Z 可撤销）',
+            defaults === null ? '已清除数值图层默认值（没量过值的格回到空白）' : '已设置数值图层默认值（Ctrl/Cmd+Z 可撤销）',
             4000,
           )
         }
@@ -2876,14 +2876,14 @@ export default class ProjectKakiPlugin extends Plugin {
   }
 
   /**
-   * 写回数据层（温度 / 深度…）的渲染参数：色带 / 越界色 / 不透明度 / 是否画数值。
+   * 写回数值图层（温度 / 深度…）的渲染参数：配色 / 越界色 / 不透明度 / 是否画数值。
    *
    * 与 `setLayerVisible` 同一套路：**先改内存 → 再落盘**，刷新画布靠"每帧现读"，
    * 所以这里**不需要**广播（`getOverlayStyles` 下一帧就会拿到新值）。
    * 面板/设置页自己负责重绘（它们各自知道要保住滚动位置）。
    */
   async setOverlayStyle(field: FieldId, patch: Partial<OverlayStyle>): Promise<void> {
-    // W4-2：色带 / 越界色 / 不透明度 / 显示方式按**地图**记，同时镜像回库级模板。
+    // W4-2：配色 / 越界色 / 不透明度 / 显示方式按**地图**记，同时镜像回库级模板。
     // 规范化（只存改过的那些 / 空表不留键）仍由 `normalizeOverlayStyles` 一处保证
     const mapPath = this.activeViewMapPath()
     const current = this.overlaysFor(mapPath)
@@ -2892,12 +2892,12 @@ export default class ProjectKakiPlugin extends Plugin {
       [field]: { ...current[field], ...patch },
     })
     this.commitViewSettings(mapPath, { overlays: next })
-    // 色带变了 → 图例里的渐变条与越界计数也要跟着变（图例只在"设置变了"时刷新，不跟每帧走）
+    // 配色变了 → 图例里的渐变条与越界计数也要跟着变（图例只在"设置变了"时刷新，不跟每帧走）
     this.layers?.setLayers()
     await this.persistSettings()
   }
 
-  /** 把某一层的色带恢复出厂（只动色带，不动透明度与"画数值"开关） */
+  /** 把某一层的配色恢复出厂（只动配色，不动透明度与"画数值"开关） */
   async resetOverlayRamp(field: FieldId): Promise<void> {
     const fallback = overlayField(field).defaultStyle()
     await this.setOverlayStyle(field, { ramp: fallback.ramp })

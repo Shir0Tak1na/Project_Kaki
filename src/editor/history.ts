@@ -172,7 +172,7 @@ export type MapOp =
  * 侧栏检查器里这些编辑是同一件事（改对象自己的一个参数），一套 op 就是一条撤销路径。
  * 加一个新字段（以后可能是"温度带"）不需要碰历史层。
  *
- * `to === null` = **删掉该字段**（例如"清除覆盖色"），而不是写一个 null 进去 ——
+ * `to === null` = **删掉该字段**（例如"清除单格叠加色"），而不是写一个 null 进去 ——
  * 文件里少一个键和多一个 `null` 是两种不同的东西（解析层对前者的处理是"没有这个覆盖"）。
  */
 export interface SetObjectFieldOp {
@@ -188,7 +188,7 @@ export interface SetObjectFieldOp {
 export type ObjectFieldValue = string | number | number[] | null
 
 /**
- * 原地改**格上**的一个字段（地块的类型 `t` / 覆盖色 `c`）。
+ * 原地改**格上**的一个字段（地块的类型 `t` / 单格叠加色 `c`）。
  *
  * 为什么不能复用 `setObjectField`：地块不是"带 id 的对象数组"，而是 `terrain` 映射里的一项，
  * 键是 `cellKey(q, r)`。单独一个 op 比"给 setObjectField 加一个 key 分支"更好读，
@@ -574,7 +574,7 @@ export type CellNextOf = (q: number, r: number) => TerrainCell | null
 /**
  * `opsFromPrevious` 的**逐格版本**：新状态按格现算，而不是所有格共用一个。
  *
- * 为什么必须有这一版：**格上除了地形还有别的东西**（覆盖色、位标志、以及这一版
+ * 为什么必须有这一版：**格上除了地形还有别的东西**（单格叠加色、位标志、以及这一版
  * 不认识的键 —— 未来的温度 / 深度就挂在这里）。共用一个新建的 `{ t }` 等于"整格替换"，
  * 会把同一格上的其它键一起抹掉，而"有没有变化"的判断只看 `t/f/c` 时更糟：
  * **用同一种地形重刷一遍 → 判定成没变化 → 连 op 都不产生 → Ctrl+Z 也救不回来**。

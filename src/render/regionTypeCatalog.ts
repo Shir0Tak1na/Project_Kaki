@@ -31,6 +31,7 @@ import {
   DEFAULT_REGION_TYPE_ID,
   REGION_TYPE_STYLES,
 } from './shapeStyle.ts'
+import { unknownTypeLabel } from '../ui/strings.ts'
 import { canonicalColor, normalizeColor } from './stylePalette.ts'
 import { describePathDashProblem, normalizePathDash } from './pathStyleSettings.ts'
 
@@ -392,7 +393,7 @@ export function resolveRegionType(id: RegionType, entries: readonly RegionTypeEn
   if (entry !== null) return { ...entry, builtin: false, unknown: false }
   return {
     id,
-    label: `未知（${id}）`,
+    label: unknownTypeLabel(id),
     params: FALLBACK_REGION_TYPE_PARAMS,
     builtin: false,
     unknown: true,

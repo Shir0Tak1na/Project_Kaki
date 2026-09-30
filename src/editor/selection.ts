@@ -73,13 +73,13 @@ export interface SelectionFieldSpec {
   /**
    * 用哪种控件编辑。
    *
-   * - `color` / `number` / `dash`：既有的三种（覆盖色、数值、虚线）；
+   * - `color` / `number` / `dash`：既有的三种（单格叠加色、数值、虚线）；
    * - `text`：**文本**（生物群系 ID 这类分类值）。刻意**不做成下拉**：
    *   本机没有那个定义时（别的库写的 ID）也必须能原样保留与改掉，
    *   而下拉只能列出"本机存在的选项"（同一理由见 `SELECTION_KINDS.cell.actions` 那段）。
    */
   control: 'color' | 'number' | 'dash' | 'text'
-  /** 数字控件的范围（世界单位或 0–1），仅 `control: 'number'` 有意义。**数据层不给范围**（见下面注释） */
+  /** 数字控件的范围（世界单位或 0–1），仅 `control: 'number'` 有意义。**数值图层不给范围**（见下面注释） */
   min?: number
   max?: number
   /**
@@ -214,7 +214,7 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
     typeSource: 'marker',
     position: 'point',
     storage: 'collection',
-    fields: [{ field: 'c', label: '覆盖色', control: 'color' }],
+    fields: [{ field: 'c', label: '单格叠加色', control: 'color' }],
   },
   label: {
     label: '名称',
@@ -328,15 +328,15 @@ export const SELECTION_KINDS: Record<SelectionKind, SelectionKindSpec> = {
     position: 'cell',
     storage: 'grid',
     fields: [
-      { field: 'c', label: '覆盖色', control: 'color' },
+      { field: 'c', label: '单格叠加色', control: 'color' },
       // 温度 / 深度：「一格多值」的两个数值字段（覆盖层要用）。
       //
       // ⚠️ **这两个字段刻意不声明 `min` / `max`**（2026-09-28 用户实机纠正）：
       // 以前这里挂了 -100~100 / -12000~12000，于是输入框会**拒绝**超出它们的值 ——
       // 那不是数据模型的约束，而是我顺手加的"物理合理范围"，与设计不符。
       // 现在：**任何有限数都是合法数据**，唯一被拒的是 NaN / Infinity（它们不是数据）；
-      // "超出范围"只发生在**颜色**这一层 —— 色带的 stops 之外用 `under` / `over` 的纯色画，
-      // 并在格上写出数值（见 `overlayDraw.ts`）。范围的边界属于色带（用户可调），不属于数据。
+      // "超出范围"只发生在**颜色**这一层 —— 配色的 stops 之外用 `under` / `over` 的纯色画，
+      // 并在格上写出数值（见 `overlayDraw.ts`）。范围的边界属于配色（用户可调），不属于数据。
       //
       // 留空 = 删掉该键 = 这一格没有数据 —— 与写一个 0 是两件事（0 ℃ / 海平面都是合法值）。
       { field: 'temp', label: '温度（℃）', control: 'number', group: 'data' },

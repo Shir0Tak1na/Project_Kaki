@@ -267,7 +267,7 @@ describe('区域类型：三级回退', () => {
   it('未知类型：永不返回空，标签是「未知（ID）」、参数是看得见的回退', () => {
     const resolved = resolveRegionType('alien-zone', [])
     assert.equal(resolved.unknown, true)
-    assert.equal(resolved.label, '未知（alien-zone）')
+    assert.equal(resolved.label, '未定义类型（alien-zone）')
     assert.deepEqual(resolved.params, FALLBACK_REGION_TYPE_PARAMS)
     assert.ok(resolved.params.opacity > 0, '回退样式必须看得见')
   })

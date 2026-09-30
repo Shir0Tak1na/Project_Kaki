@@ -218,7 +218,7 @@ test('解析：findCustomTerrain 命中与未命中', () => {
 test('地形显示名：内置用中文名，自定义用显示名，未知用 ID 拼出的提示', () => {
   assert.equal(terrainLabelOf('forest', []), '森林')
   assert.equal(terrainLabelOf('custom:swamp2', [swamp()]), '沼泽地')
-  assert.ok(terrainLabelOf('custom:gone', []).includes('未知'))
+  assert.ok(terrainLabelOf('custom:gone', []).includes('未定义类型'))
 })
 
 test('目录签名：内容不变则相同，任一字段变化都会变（工具条与图集据此决定要不要重建）', () => {

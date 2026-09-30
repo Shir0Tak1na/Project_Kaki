@@ -1,8 +1,8 @@
 /**
- * 数据层（覆盖层）的**字段描述表** —— 温度是第一份模板，深度与生物群系后面按同一形状加。
+ * 数值图层（覆盖层）的**字段描述表** —— 温度是第一份模板，深度与生物群系后面按同一形状加。
  *
  * 为什么要有这张表：温度、深度、湿度……在代码里的差别只有三件事 ——
- * **从格上读哪个键**、**叫什么名字（含单位）**、**出厂色带长什么样**。
+ * **从格上读哪个键**、**叫什么名字（含单位）**、**出厂配色长什么样**。
  * 把这三件事写成一行配置，渲染 / 设置页 / 图例就都能遍历它；
  * 否则每加一个字段都要在三四处分头加分支（工单 B 之前的图层开关就是这么烂掉的）。
  *
@@ -10,7 +10,7 @@
  *
  * 1. **纯数据 + 纯函数，不 import obsidian**：于是"哪个键算温度""坏值算不算数据"都能单测；
  * 2. **值属于地图文件，样式属于插件设置**：这张表只说"去哪儿读值"，
- *    色带 / 透明度 / 是否画数值都在 `OverlayStyle` 里（由设置持有，见 `settingsModel.ts`）；
+ *    配色 / 透明度 / 是否画数值都在 `OverlayStyle` 里（由设置持有，见 `settingsModel.ts`）；
  * 3. **可见性不在这里**：看不看由图层描述表（`LAYER_TABLE` 里 `layerId` 那一行）说了算 ——
  *    本节只描述"这一层画的是什么值"。同一件事存两份必然出现互相矛盾的状态（§5.12）。
  */
@@ -25,7 +25,7 @@ import type { LayerKey } from './layerVisibility.ts'
 /** 数据字段的 ID：它同时是设置键、图例 kind（`temperature` 对应图层 id 也是它） */
 export type FieldId = 'temperature' | 'depth' | 'biome'
 
-/** 数据层的渲染参数（插件设置，**不是**地图文件里的东西） */
+/** 数值图层的渲染参数（插件设置，**不是**地图文件里的东西） */
 export interface OverlayStyle {
   /**
    * 色块的不透明度（0–1）。
@@ -41,12 +41,12 @@ export interface OverlayStyle {
    * 颜色只能表达"比上限还高"，表达不了"高多少"，而越界恰恰最需要读数（见 `overlayDraw.ts`）。
    */
   showValues: boolean
-  /** 值 → 颜色的分段色带（含越界两端的纯色） */
+  /** 值 → 颜色的分段配色（含越界两端的纯色） */
   ramp: RampSpec
   /**
    * **展示单位**（只有声明了 `units` 的字段才有意义，例如深度的 m / km / 相对值）。
    *
-   * 它是"我怎么读这个值"，所以住在插件设置里、与色带并列，**不写进地图文件**
+   * 它是"我怎么读这个值"，所以住在插件设置里、与配色并列，**不写进地图文件**
    * （地图文件只存一个权威值 + 地图级标定段，见 `elevationUnits.ts` 与设计草案 §2.2）。
    * 温度这类不需要换算的字段永远没有这一项。
    */
@@ -59,7 +59,7 @@ export interface OverlayStyle {
    */
   mode: OverlayMode
   /**
-   * 连续场：**等值线间距**（与字段同单位）；`null` = 不按间距取，直接用色带锚点
+   * 连续场：**等值线间距**（与字段同单位）；`null` = 不按间距取，直接用配色锚点
    * （"5 个体感温度分类"那 5 条线就是现成的，见 `fieldPlan.contourLevels`）。
    *
    * 逐格模式下这一项无意义（界面上也不显示），但仍然存着 —— 切回来时用户上次填的值还在。
@@ -88,7 +88,7 @@ export interface OverlayStyle {
   categoryColors?: Record<string, string>
 }
 
-/** 数据层的两种显示方式（下拉选项的顺序就是这里的顺序） */
+/** 数值图层的两种显示方式（下拉选项的顺序就是这里的顺序） */
 export type OverlayMode = 'cell' | 'field'
 
 export const OVERLAY_MODES: readonly { value: OverlayMode; label: string }[] = [
@@ -221,7 +221,7 @@ export function isCategoryField(spec: OverlayFieldSpec): spec is CategoryOverlay
  *
  * `null` / 字符串 / NaN / Infinity 一律当作**没有这个值**：
  * 解析层已经把非法值原样收进 `extra` 并告警（§5.40），渲染层看到的就是"没有数据"。
- * 这里返回 `undefined` 而不是 0 或色带端点 —— 缺数据被画成"极低温"是彻底的说谎。
+ * 这里返回 `undefined` 而不是 0 或配色端点 —— 缺数据被画成"极低温"是彻底的说谎。
  */
 function readFinite(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
@@ -289,7 +289,7 @@ const DEPTH_FIELD: NumericOverlayFieldSpec = {
 }
 
 /**
- * **生物群系**：数据层的第三个字段，也是**字段表的第一次真正扩展** —— 它是一个**分类字段**。
+ * **生物群系**：数值图层的第三个字段，也是**字段表的第一次真正扩展** —— 它是一个**分类字段**。
  *
  * 与温度 / 深度的差别不是"少一个单位"，而是**整个渲染路径不同**：
  * 分类值之间没有"高低"，所以既不插值、也不画等值线、也不写数值文字 ——
@@ -326,8 +326,8 @@ const BIOME_FIELD: CategoryOverlayFieldSpec = {
   defaultStyle: () => ({
     opacity: 0.5,
     showValues: false,
-    // 分类字段不用色带；这一项只为让 `OverlayStyle` 的形状统一，界面上**不显示**它的控件
-    // （设置页按 `isNumericField` 筛掉色带 / 越界色 / 单位 / 显示方式那几个控件）。
+    // 分类字段不用配色；这一项只为让 `OverlayStyle` 的形状统一，界面上**不显示**它的控件
+    // （设置页按 `isNumericField` 筛掉配色 / 越界色 / 单位 / 显示方式那几个控件）。
     ramp: defaultTemperatureRamp(),
     mode: 'cell',
     contourInterval: null,
@@ -423,7 +423,7 @@ const FIELD_BY_ID = new Map<string, OverlayFieldSpec>(OVERLAY_FIELDS.map((spec) 
 /** 按 ID 取字段描述。ID 来自同一张表的联合类型，取不到只可能是代码写错，所以直接抛 */
 export function overlayField(id: FieldId): OverlayFieldSpec {
   const spec = FIELD_BY_ID.get(id)
-  if (!spec) throw new Error(`未知的数据层字段：${id}`)
+  if (!spec) throw new Error(`未知的数值图层字段：${id}`)
   return spec
 }
 
@@ -463,11 +463,11 @@ export function normalizeOverlayStyles(raw: unknown): OverlayStyles {
     const style: OverlayStyle = {
       opacity: normalizeOpacity(record.opacity, fallback.opacity),
       showValues: typeof record.showValues === 'boolean' ? record.showValues : fallback.showValues,
-      // 色带交给 colorRamp 自己的规范化：它知道"少于两条锚点就整体回退"这类规则
+      // 配色交给 colorRamp 自己的规范化：它知道"少于两条锚点就整体回退"这类规则
       ramp: normalizeRampSpec(record.ramp, fallback.ramp),
       // 显示方式：**只认登记表里那两个值**，其余（含老设置里的缺失）一律回退到出厂（逐格）
       mode: record.mode === 'field' || record.mode === 'cell' ? record.mode : fallback.mode,
-      // 等值线间距：正的有限数才算；0 / 负数 / 非数字一律当"用色带锚点"（null），
+      // 等值线间距：正的有限数才算；0 / 负数 / 非数字一律当"用配色锚点"（null），
       // 而不是悄悄取一个间隔 —— "0 间距"会让 levels 直接算成一个无限循环的意图
       contourInterval:
         typeof record.contourInterval === 'number' && Number.isFinite(record.contourInterval) && record.contourInterval > 0

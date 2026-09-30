@@ -776,7 +776,7 @@ export class DefinitionManagerModal extends Modal {
 
     containerEl.createEl('div', {
       cls: 'fc-settings-note',
-      text: '颜色、线宽、虚线、端点与连接都在这里改（内置的也能改）。它们只影响新画的路径 —— 已画好的把样式存在地图文件里。',
+      text: '颜色、线宽、虚线、线头形状与拐角形状都在这里改（内置的也能改）。只影响新画的路径。',
     })
 
     this.createSectionTitle(containerEl, `自定义（${custom.length}）`, 'custom')

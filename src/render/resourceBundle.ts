@@ -329,7 +329,7 @@ export function parseResourceBundle(text: string, options: ParseBundleOptions = 
     return {
       ok: false,
       reason:
-        '文件内容应当是一个对象（形如 { "version": 2, "terrains": [], "markers": [], "pathTypes": [], "regionTypes": [] }）。',
+        '文件格式不对：不像是本插件导出的定义文件。',
     }
   }
 

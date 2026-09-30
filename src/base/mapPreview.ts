@@ -66,7 +66,7 @@ export interface MapPreviewOptions {
    */
   iconSvgFor?: (iconName: string) => string | null
   /**
-   * 数据层（温度 / 深度）的样式表（色带 / 不透明度 / 显示方式）。缺省 = 出厂样式。
+   * 数值图层（温度 / 深度）的样式表（配色 / 不透明度 / 显示方式）。缺省 = 出厂样式。
    *
    * 与 `customTerrains` 同一口径：导出必须是"当前设置 + 当前地图"的合成结果。
    */
@@ -80,7 +80,7 @@ export interface MapPreviewOptions {
    */
   overlayRasterMaxChars?: number
   /**
-   * 图层可见性。缺省 = 出厂值（**数据层默认隐藏**）。
+   * 图层可见性。缺省 = 出厂值（**数值图层默认隐藏**）。
    *
    * 于是"关掉温度层"在导出里同样生效（工单 D 的验收之一）——
    * 与画布共用同一份开关，不存在"画布上关掉了、导出里还有"。
@@ -103,7 +103,7 @@ function clamp(value: number, min: number, max: number): number {
 /**
  * 文本进 SVG 前的转义（`&` 必须最先换，否则会把后面生成的实体再转一次）。
  *
- * 收在一处：数据层的数值文字与地图的名称文字走同一个函数 ——
+ * 收在一处：数值图层的数值文字与地图的名称文字走同一个函数 ——
  * 两处各写一遍，迟早出现"名称转义了、数值没转义"这种只在特殊字符上才发作的缺陷。
  */
 function escapeSvgText(text: string): string {
@@ -236,7 +236,7 @@ function regionPointsToSvg(region: MapRegion, bounds: { minX: number; minY: numb
  */
 export const OVERLAY_RASTER_MAX_CHARS = 128 * 1024
 
-/** 数据层颜色面在这一次导出里走了哪条路（"导出报告"要用，也是断言的对象） */
+/** 数值图层颜色面在这一次导出里走了哪条路（"导出报告"要用，也是断言的对象） */
 export type OverlayExportPath = 'raster' | 'vector' | 'cell'
 
 export interface OverlayExportNote {
@@ -254,7 +254,7 @@ export interface OverlayExportNote {
 
 export interface MapPreviewBuild {
   svg: string
-  /** 每个可见数据层走了哪条路（按 `OVERLAY_FIELDS` 的顺序） */
+  /** 每个可见数值图层走了哪条路（按 `OVERLAY_FIELDS` 的顺序） */
   overlays: OverlayExportNote[]
 }
 
@@ -272,7 +272,7 @@ export function describeOverlayExport(notes: readonly OverlayExportNote[]): stri
       parts.push(`${note.label}：退回矢量（内联会超过 ${Math.round(OVERLAY_RASTER_MAX_CHARS / 1024)} KiB 上限）`)
     }
   }
-  return parts.length === 0 ? '' : `数据层导出：${parts.join('；')}`
+  return parts.length === 0 ? '' : `数值图层导出：${parts.join('；')}`
 }
 
 export function buildMapPreviewSvg(document: MapDocument | null, rows: readonly MapRow[], options: MapPreviewOptions): string {
@@ -298,7 +298,7 @@ export function buildMapPreviewSvgWithReport(
   // 世界 → SVG 的投影**算一次**：区域的边框宽度与虚线要按它换算（点坐标仍走 pointToSvgPoint）
   const projection = svgProjection(bounds, width, height, padding)
   const content: string[] = []
-  /** 每个可见数据层走了哪条路（导出报告用；也是"退回矢量"这条分支能被测到的唯一出口） */
+  /** 每个可见数值图层走了哪条路（导出报告用；也是"退回矢量"这条分支能被测到的唯一出口） */
   const overlays: OverlayExportNote[] = []
   content.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Map preview">`)
 
@@ -314,7 +314,7 @@ export function buildMapPreviewSvgWithReport(
       content.push(`<polygon points="${points}" fill="${terrainFill(cell.t, customTerrains)}" stroke="rgba(17,24,39,0.28)" stroke-width="0.6" />`)
     }
 
-    // ---- 数据层（温度 / 深度）：紧跟地形、在矢量对象之下（与画布的叠加次序同一条）----
+    // ---- 数值图层（温度 / 深度）：紧跟地形、在矢量对象之下（与画布的叠加次序同一条）----
     //
     // ⚠️ 几何**只能**来自 `buildOverlayPlan` → `fieldPlan`（画布那边也一样）。
     // 在这里重写一份逐格循环或插值，就会立刻出现"导出的图与画布不一样"，而且是长期缺陷。
@@ -545,12 +545,12 @@ export function buildMapExportSvg(
   extras: {
     customMarkers?: readonly CustomMarker[]
     iconSvgFor?: (iconName: string) => string | null
-    /** 数据层样式（色带 / 不透明度 / 显示方式）；缺省 = 出厂 */
+    /** 数值图层样式（配色 / 不透明度 / 显示方式）；缺省 = 出厂 */
     overlayStyles?: OverlayStyles
-    /** 图层可见性；缺省 = 出厂（数据层默认隐藏 → 导出里不出现叠加层） */
+    /** 图层可见性；缺省 = 出厂（数值图层默认隐藏 → 导出里不出现叠加层） */
     layers?: LayerVisibility
     /**
-     * 拿到"每个数据层走了哪条路"（内联栅格 / 退回矢量）。
+     * 拿到"每个数值图层走了哪条路"（内联栅格 / 退回矢量）。
      *
      * 做成**回调**而不是改返回值：本函数的位置参数与返回类型是既有调用点与断言依赖的，
      * 而"导出报告"只有 `main.ts` 一处要用 —— 为一个消费者改签名，代价与风险都不对等。

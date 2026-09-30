@@ -1,5 +1,5 @@
 /**
- * 色带：把"一格一个数值"变成颜色 —— **纯函数模块，不 import obsidian**。
+ * 配色：把"一格一个数值"变成颜色 —— **纯函数模块，不 import obsidian**。
  *
  * 服务的功能是温度 / 深度这类的覆盖层（见 `.trae/documents/温度带与深度分层-设计草案.md` §4.2）。
  * 现在先把地基做好：它不碰 DOM、不碰设置，所以能直接单测；接上界面是后面的事。
@@ -9,10 +9,10 @@
  * 1. **插值空间可选，默认 Oklab**。用户明确要求 Lab / Oklab：RGB 直接线性插值在
  *    蓝 → 绿 → 红这种长弧上会经过发灰的中间色，而 Oklab 是感知均匀空间。
  *    要再加 'hsl' 之类，只需在 `mixColors` 里多一个分支（转换 + 色相走短弧）。
- * 2. **越界不是错误，而且不止一档**：超出色带两端的是合法数据（-60 ℃ 就是一个温度），
+ * 2. **越界不是错误，而且不止一档**：超出配色两端的是合法数据（-60 ℃ 就是一个温度），
  *    刚出界用 `under` / `over` 的端色画，走得越远越接近"极色"
  *    （需求原话："远远低于最低限度：从蓝色渐变到白底黑字，低于最低限度蓝底白字"）。
- *    文字色在近端 / 远端两个候选之间按对比度挑，行程 = **一个色带跨度**。
+ *    文字色在近端 / 远端两个候选之间按对比度挑，行程 = **一个配色跨度**。
  * 3. **"填上下限"和"5 个体感分类"是同一份数据**：两者都只是 stops 数量不同
  *    （2 个 vs 5 个锚点），渐变率就是相邻锚点的斜率，不需要两套实现。
  */
@@ -31,7 +31,7 @@ export interface ColorStop {
  *
  * 为什么不是"整段一个纯色"：需求原话是"**远远**低于最低限度：从蓝色渐变到白底黑字，
  * 低于最低限度蓝底白字"—— 越界这一段自己还分远近：刚出界是端色，越远越像极色。
- * 行程定死为**一个色带跨度**：`min - span` 处到达 `farColor`，再远就是纯 `farColor`。
+ * 行程定死为**一个配色跨度**：`min - span` 处到达 `farColor`，再远就是纯 `farColor`。
  * 远端的文字色 `farTextColor` 与近端 `textColor` 之间**按对比度**挑一个，
  * 于是"蓝底白字 → 白底黑字"的过渡里不会出现白字压白底的那一段。
  *
@@ -40,7 +40,7 @@ export interface ColorStop {
 export interface RangeStyle {
   color: string
   textColor: string
-  /** 远远低于 / 高于色带两端时渐变成的颜色 */
+  /** 远远低于 / 高于配色两端时渐变成的颜色 */
   farColor: string
   /** `farColor` 上的文字色（与 `textColor` 按对比度二选一） */
   farTextColor: string
@@ -82,7 +82,7 @@ const DARK_TEXT = '#111827'
 const LIGHT_TEXT = '#ffffff'
 
 /**
- * 温度色带的出厂值：蓝（寒）→ 蓝绿 → 绿（温和）→ 橙 → 红（热）。
+ * 温度配色的出厂值：蓝（寒）→ 蓝绿 → 绿（温和）→ 橙 → 红（热）。
  *
  * 这五个锚点就是需求里"标定 5 个体感温度分类"那份数据 —— 用户可以把它们改名成
  * 极寒 / 寒冷 / 温和 / 炎热 / 酷热，数值与渐变率都是现成的。
@@ -97,7 +97,7 @@ export function defaultTemperatureRamp(): RampSpec {
       { value: 45, color: '#ff0000' },
     ],
     // 越界不是"另一个纯色"而是**渐变**（需求原话）：刚过下端仍是蓝底白字，
-    // 再往低走一个色带跨度（75 ℃）之外就渐成白底黑字 —— 越冷越白，方向一眼可辨。
+    // 再往低走一个配色跨度（75 ℃）之外就渐成白底黑字 —— 越冷越白，方向一眼可辨。
     under: { color: '#0000ff', textColor: '#ffffff', farColor: '#ffffff', farTextColor: DARK_TEXT },
     // 高温端镜像：刚过上限红底白字，远远更热渐成黑底白字。
     over: { color: '#ff0000', textColor: '#ffffff', farColor: '#000000', farTextColor: '#ffffff' },
@@ -106,7 +106,7 @@ export function defaultTemperatureRamp(): RampSpec {
 }
 
 /**
- * 深度 / 海拔色带的出厂值：**低 → 高 = 黑 → 白**（用户 2026-09-29 定的口径）。
+ * 深度 / 海拔配色的出厂值：**低 → 高 = 黑 → 白**（用户 2026-09-29 定的口径）。
  *
  * 数值轴与 `depth` 同口径（0 = 海平面，正 = 向下），所以锚点仍是**升序的值**：
  * `-4000`（高海拔）在左、`4000`（深海）在右，颜色从黑走到白。
@@ -128,7 +128,7 @@ export function defaultDepthRamp(): RampSpec {
 
 /* ------------------------------------------------------------------ 轴上的位置 */
 
-/** 色带的读数范围（`stops` 已升序、至少两条；`span` 恒 > 0） */
+/** 配色的读数范围（`stops` 已升序、至少两条；`span` 恒 > 0） */
 export interface RampBounds {
   min: number
   max: number
@@ -164,9 +164,9 @@ export function valueForPosition(position: number, bounds: RampBounds): number {
 /**
  * 解析 hex 颜色 → `[r, g, b]`（每个 0–255 的整数）。
  *
- * 只认 hex：色带是**算**出来的，接受 `rgb()` / `hsl()` / 颜色名只会让解析多一条分支
+ * 只认 hex：配色是**算**出来的，接受 `rgb()` / `hsl()` / 颜色名只会让解析多一条分支
  * 而用户并不会因此得到什么（设置页的颜色选择器本来就给 hex）。
- * 4 位 / 8 位写法里的 alpha **被忽略**：透明度归图层管，不归单条色带管。
+ * 4 位 / 8 位写法里的 alpha **被忽略**：透明度归图层管，不归单条配色管。
  */
 export function parseHexColor(value: unknown): [number, number, number] | null {
   if (typeof value !== 'string') return null
@@ -319,7 +319,7 @@ function normalizeRangeStyle(raw: unknown, fallback: RangeStyle): RangeStyle {
 }
 
 /**
- * 把任意输入收敛成可用的色带。
+ * 把任意输入收敛成可用的配色。
  *
  * 规则都写在这里，避免"设置里改坏了却渲染不出来"：
  * - 锚点按 `value` **升序**排（用户填的顺序不参与语义）；
@@ -354,8 +354,8 @@ export function normalizeRampSpec(raw: unknown, fallback: RampSpec = defaultTemp
   const space = source.interpolate === 'rgb' || source.interpolate === 'oklab' ? source.interpolate : fallback.interpolate
   return {
     stops,
-    // 越界两端的回退是**这一条色带自己的出厂值**（不是温度那对纯蓝/纯红）：
-    // 深度色带坏掉时应当回到深度的白 / 近黑蓝，而不是变成"极低温"的观感
+    // 越界两端的回退是**这一条配色自己的出厂值**（不是温度那对纯蓝/纯红）：
+    // 深度配色坏掉时应当回到深度的白 / 近黑蓝，而不是变成"极低温"的观感
     under: normalizeRangeStyle(source.under, fallback.under),
     over: normalizeRangeStyle(source.over, fallback.over),
     interpolate: space,
@@ -368,7 +368,7 @@ export interface ValueColor {
   color: string
   /** 该底色上可读的文字色（画数值用） */
   textColor: string
-  /** 落在色带之外时是哪一端；在带内是 `null` */
+  /** 落在配色之外时是哪一端；在带内是 `null` */
   outOfRange: 'under' | 'over' | null
 }
 
@@ -409,7 +409,7 @@ export function colorForValue(value: number, ramp: RampSpec): ValueColor | null 
 }
 
 /**
- * 越界值 → 颜色：端色 → 极色按"越出去多远"渐变（行程 = 一个色带跨度，再远就饱和）。
+ * 越界值 → 颜色：端色 → 极色按"越出去多远"渐变（行程 = 一个配色跨度，再远就饱和）。
  *
  * 两端**原样返回、不经过插值**：Oklab 往返会把 `#0000ff` 变成 `#0001ff` 之类的近邻色，
  * 而"刚越界就是端色"这句话必须逐字为真（端帽与格子的颜色都要对得上）。
@@ -457,7 +457,7 @@ function pickReadableTextColor(background: string, a: string, b: string): string
 }
 
 /**
- * 色带是否"看起来可用"：给设置页做一行提示用。
+ * 配色是否"看起来可用"：给设置页做一行提示用。
  *
  * 注意它**不**检查锚点顺序（那由 `normalizeRampSpec` 负责修好），只看颜色本身是否安全。
  */
@@ -467,4 +467,151 @@ export function describeRampProblem(ramp: RampSpec): string | null {
   }
   if (!isSafeColor(ramp.under.color) || !isSafeColor(ramp.over.color)) return '越界颜色不是合法颜色'
   return null
+}
+
+/* ------------------------------------------------------------------ 轴的编辑操作（W2） */
+
+/**
+ * 拖动锚点时**两锚点至少隔多远**（按跨度的比例算）。
+ *
+ * 为什么要有它：值相等的两个锚点会让"锚点间距 = 渐变率"这条除零，
+ * 而拖动是连续动作 —— 不夹取的话用户轻轻一拖就能把两条锚点叠在一起。
+ */
+export const MIN_STOP_GAP_RATIO = 0.001
+
+/** 还能不能再加一条锚点（防呆上限 `RAMP_MAX_STOPS`） */
+export function canAddStop(stops: readonly ColorStop[]): boolean {
+  return stops.length < RAMP_MAX_STOPS
+}
+
+/**
+ * 还能不能再删（少于 `RAMP_MIN_STOPS` 就没有渐变可言）。
+ *
+ * 界面用它**禁用**删除入口 —— 静默失效比禁用更糟（用户会以为点坏了）。
+ */
+export function canRemoveStop(stops: readonly ColorStop[]): boolean {
+  return stops.length > RAMP_MIN_STOPS
+}
+
+/** 每条锚点在轴上的位置（0 = 最低端、1 = 最高端），顺序与 `stops` 一致 */
+export function stopPositions(stops: readonly ColorStop[]): number[] {
+  const bounds = rampBounds(stops)
+  return stops.map((stop) => positionForValue(stop.value, bounds))
+}
+
+/** 相邻两锚点之间的间隔（= 那一段的**渐变率**分母）；界面不画刻度，只用它算间距 */
+export function stopGaps(stops: readonly ColorStop[]): number[] {
+  const gaps: number[] = []
+  for (let index = 1; index < stops.length; index += 1) {
+    gaps.push(stops[index]!.value - stops[index - 1]!.value)
+  }
+  return gaps
+}
+
+/**
+ * 拖动某个锚点后**允许落到**的值：不许越过左右邻居。
+ *
+ * 两端的锚点只有一侧有邻居 ⇒ 往外侧是自由的（那正是"拖动端点 = 改这张地图的限度"）。
+ * index 越界或 value 不是有限数时原样返回（调用方不用先做判断）。
+ */
+export function clampStopValue(stops: readonly ColorStop[], index: number, value: number): number {
+  const count = stops.length
+  if (!Number.isFinite(value) || index < 0 || index >= count) return value
+  const bounds = rampBounds(stops)
+  const gap = (bounds.span > 0 ? bounds.span : 1) * MIN_STOP_GAP_RATIO
+  const previous = index > 0 ? stops[index - 1]!.value : null
+  const next = index < count - 1 ? stops[index + 1]!.value : null
+  let result = value
+  if (previous !== null) result = Math.max(result, previous + gap)
+  if (next !== null) result = Math.min(result, next - gap)
+  return result
+}
+
+/** 改一条锚点的值（夹取 + 保序）。没有变化时返回**原数组引用**（调用方据此跳过落盘） */
+export function withStopValue(stops: readonly ColorStop[], index: number, value: number): ColorStop[] {
+  const current = stops[index]
+  if (current === undefined) return stops as ColorStop[]
+  const clamped = clampStopValue(stops, index, value)
+  if (clamped === current.value) return stops as ColorStop[]
+  return stops.map((stop, position) => (position === index ? { ...stop, value: clamped } : stop))
+}
+
+/** 改一条锚点的颜色。没有变化时返回原数组引用 */
+export function withStopColor(stops: readonly ColorStop[], index: number, color: string): ColorStop[] {
+  const current = stops[index]
+  if (current === undefined || current.color === color) return stops as ColorStop[]
+  return stops.map((stop, position) => (position === index ? { ...stop, color } : stop))
+}
+
+/**
+ * 在某个值处插入一条锚点，颜色由调用方给（一般是 `colorForValue(现有配色, 这个值)` ——
+ * 于是新建的那一刻**画面完全不变**，用户再慢慢调颜色）。
+ *
+ * 与已有锚点几乎重合（差 < 最小间隔）时不插 —— 否则连点两下就会得到两条叠在一起的锚点。
+ */
+export function withStopInserted(stops: readonly ColorStop[], value: number, color: string): ColorStop[] {
+  if (!Number.isFinite(value) || !canAddStop(stops)) return stops as ColorStop[]
+  const bounds = rampBounds(stops)
+  const gap = (bounds.span > 0 ? bounds.span : 1) * MIN_STOP_GAP_RATIO
+  if (stops.some((stop) => Math.abs(stop.value - value) < gap)) return stops as ColorStop[]
+  const lower = stops.filter((stop) => stop.value < value)
+  const upper = stops.filter((stop) => stop.value > value)
+  return [...lower, { value, color }, ...upper]
+}
+
+/** 删一条锚点；少于 `RAMP_MIN_STOPS` 或 index 越界时返回原数组引用 */
+export function withStopRemoved(stops: readonly ColorStop[], index: number): ColorStop[] {
+  if (!canRemoveStop(stops) || index < 0 || index >= stops.length) return stops as ColorStop[]
+  return stops.filter((_, position) => position !== index)
+}
+
+/** 缺口最大的那一对锚点的中点 —— 「新建锚点」按钮默认插在这里（用户最可能想细分的地方） */
+export function widestGapValue(stops: readonly ColorStop[]): number | null {
+  if (stops.length < 2) return null
+  let bestIndex = 1
+  let bestGap = Number.NEGATIVE_INFINITY
+  for (let index = 1; index < stops.length; index += 1) {
+    const gap = stops[index]!.value - stops[index - 1]!.value
+    if (gap > bestGap) {
+      bestGap = gap
+      bestIndex = index
+    }
+  }
+  const lower = stops[bestIndex - 1]!
+  const upper = stops[bestIndex]!
+  return (lower.value + upper.value) / 2
+}
+
+/**
+ * **配色本体**（不含越界端帽）的 CSS 渐变 —— 轴与图例共用这一份实现，别各写一套。
+ *
+ * 为什么按值**采样**而不是把锚点直接写成 CSS 色标：模型用的是 Oklab 插值，
+ * 而 CSS 渐变默认在 sRGB 里插 —— 直接写色标会让轴上的颜色与画布上的格子对不上。
+ * `samples` 只影响平滑度，不影响锚点本身的位置与颜色。
+ */
+export function rampStripGradientCss(ramp: RampSpec, samples = 24): string {
+  const stops = ramp.stops
+  if (stops.length < RAMP_MIN_STOPS) {
+    return 'linear-gradient(90deg, ' + DEFAULT_UNDER.color + ', ' + DEFAULT_OVER.color + ')'
+  }
+  const bounds = rampBounds(stops)
+  const count = Math.max(2, Math.floor(samples))
+  const parts: string[] = []
+  for (let index = 0; index <= count; index += 1) {
+    const position = index / count
+    const value = valueForPosition(position, bounds)
+    const color = colorForValue(value, ramp)?.color ?? stops[0]!.color
+    parts.push(color + ' ' + (position * 100).toFixed(2) + '%')
+  }
+  return 'linear-gradient(90deg, ' + parts.join(', ') + ')'
+}
+
+/**
+ * 越界端帽的 CSS 渐变：**靠轴的一侧是端色、外侧是极色**（与 `outOfRangeValue` 的方向一致）。
+ * `farColor === color` 时退化成纯色，看上去就是"这一侧不渐变"。
+ */
+export function rangeCapGradientCss(style: RangeStyle, side: 'under' | 'over'): string {
+  return side === 'under'
+    ? 'linear-gradient(90deg, ' + style.farColor + ' 0%, ' + style.color + ' 100%)'
+    : 'linear-gradient(90deg, ' + style.color + ' 0%, ' + style.farColor + ' 100%)'
 }

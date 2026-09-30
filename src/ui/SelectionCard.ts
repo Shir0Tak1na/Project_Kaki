@@ -25,7 +25,7 @@ export interface SelectionCardOptions {
   editor: MapEditor
   /** 当前文档（每帧现读；`null` = 还没加载出来） */
   getDocument: () => MapDocument | null
-  /** 数据层样式（决定读数的展示单位） */
+  /** 数值图层样式（决定读数的展示单位） */
   getOverlayStyles: () => OverlayStyles
   /** 地形 / 生物群系的显示名解析（与检查器读同一份目录） */
   terrainLabel: (id: string) => string

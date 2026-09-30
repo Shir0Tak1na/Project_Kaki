@@ -8,7 +8,7 @@
  * 3. **新对象默认值**：只剩**名称字体族** + 一行指路。路径 / 区域类型的**参数**
  *    在 W4-1b 搬进了「地图定义…」弹窗 —— 定义随图之后它们是**每张地图各自一份**，
  *    而这一页的设置是全局的（两处都能改就必然分叉，§1 判据 1）；
- * 4. **数据层**：色带 / 越界两端 / 不透明度 / 显示方式（**按地图**，见 `DATA-LAYER-UI-BRIEF`）；
+ * 4. **数值图层**：配色 / 越界两端 / 不透明度 / 显示方式（**按地图**，见 `DATA-LAYER-UI-BRIEF`）；
  * 5. **定义文件（导入 / 导出）**：从侧栏「文件与导出」组搬来（施工文件 §F.2）。
  *
  * ## 为什么定义管理搬走了
@@ -151,7 +151,7 @@ export class CartographerSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('开发者模式')
       .setDesc(
-        '打开后才会出现开发用探针命令（诊断当前 Canvas、监视视口变化）——' +
+        '开发者工具：诊断当前 Canvas、监视视口变化。' +
           '它们平时会被从命令面板里隐藏，避免误触。地图面板里也会多出「开发工具」一组。',
       )
       .addToggle((toggle) =>
@@ -188,12 +188,12 @@ export class CartographerSettingTab extends PluginSettingTab {
     // 这一页原来那一组（9 个图层开关 + 「显示图例」）已整组移除 —— 同一件事在两个表面各长一份
     // 就是"一个设置两个家"（§1 判据 1 / §5.60），而且它正是"改成中英不一致、两处说法不同"的来源。
 
-    // ---- 3. 数据层（温度 / 深度…）：默认收起 ----
+    // ---- 3. 数值图层（温度 / 深度…）：默认收起 ----
     //
     // **开关不在这里**：它在侧栏「底图」一组里（表驱动，加一层只加一行）。
-    // 这一组只管"怎么看"：色带、越界两端、不透明度、要不要在每个格上写数值。
+    // 这一组只管"怎么看"：配色、越界两端、不透明度、要不要在每个格上写数值。
     const dataGroup = createCollapsibleGroup(containerEl, {
-      title: '数据层',
+      title: '数值图层',
       role: 'data',
       cls: 'fc-settings-group',
       titleCls: 'fc-settings-group-title',
@@ -201,9 +201,9 @@ export class CartographerSettingTab extends PluginSettingTab {
     dataGroup.createEl('div', {
       cls: 'fc-settings-note',
       text:
-        '数据层的值（温度、深度 / 海拔、生物群系）存在地图文件的格上；这里只决定怎么把它画出来。' +
+        '数值图层的值（温度、深度 / 海拔、生物群系）存在地图文件的格上；这里只决定怎么把它画出来。' +
         '每一层的开关在侧栏面板的「底图」一组里（这一页不再重复摆一份）。' +
-        '改了色带下一帧就是新颜色，不用重开画布。',
+        '改了配色下一帧就是新颜色，不用重开画布。',
     })
     for (const spec of OVERLAY_FIELDS) {
       this.renderOverlayField(dataGroup, spec)
@@ -230,12 +230,8 @@ export class CartographerSettingTab extends PluginSettingTab {
     })
 
     new Setting(defaults)
-      .setName('名称字体族')
-      .setDesc(
-        '留空 = 跟随 Obsidian 主题字体。可以写字体列表（例如 Noto Serif SC, serif）。' +
-          '这里只接受字体族：整条 CSS font 简写（含 px 字号、斜杠等）会被拒绝 —— ' +
-          '那种串会让画布静默忽略整条字体声明，结果就是"字号怎么调都不变"。',
-      )
+      .setName('名称字体')
+      .setDesc('留空 = 跟随主题；只填字体名，例：Noto Serif SC, serif。')
       .addText((text) =>
         text
           .setPlaceholder('留空 = 跟随主题')
@@ -331,7 +327,7 @@ export class CartographerSettingTab extends PluginSettingTab {
   }
 
   /**
-   * 一个数据层字段（温度 / 深度 / 生物群系）的参数区。
+   * 一个数值图层字段（温度 / 深度 / 生物群系）的参数区。
    *
    * **实现不在这里**：整节控件在 `settingsSections.ts`，与侧栏面板共用同一份渲染
    * （施工文件 §F.2 那条代码纪律）—— 两处各写一遍就必然分叉。
@@ -342,7 +338,7 @@ export class CartographerSettingTab extends PluginSettingTab {
   }
 
   /**
-   * 数据层控件那一节要的读写入口（设置页版）。
+   * 数值图层控件那一节要的读写入口（设置页版）。
    *
    * `getCategoryUsage` 交给插件算（"地图上出现了哪些群系"要读活动文档与自定义目录，
    * 设置页拿不到这些）；每次编辑都走 `plugin.setOverlayStyle` ——
@@ -350,7 +346,7 @@ export class CartographerSettingTab extends PluginSettingTab {
    */
   private overlaySectionHost(): OverlaySectionHost {
     return {
-      // W4-2：色带 / 不透明度按**当前地图**解析（设置页与侧栏面板共用同一份控件渲染，
+      // W4-2：配色 / 不透明度按**当前地图**解析（设置页与侧栏面板共用同一份控件渲染，
       // 所以这一句必须跟 `MapPanelDeps.getOverlayStyles` 逐字同源）
       getOverlayStyles: () => this.plugin.overlaysFor(this.plugin.activeViewMapPath()),
       setOverlayStyle: (field, patch) => this.plugin.setOverlayStyle(field, patch),
@@ -358,7 +354,7 @@ export class CartographerSettingTab extends PluginSettingTab {
       setOverlayCategoryColor: (field, categoryId, color) =>
         this.plugin.setOverlayCategoryColor(field, categoryId, color),
       getCategoryUsage: (spec) => this.plugin.categoryUsageOf(spec),
-      // 只有"改了会影响后续控件"的那些项要重绘（显示方式、展示单位、恢复色带）——
+      // 只有"改了会影响后续控件"的那些项要重绘（显示方式、展示单位、恢复配色）——
       // 重绘要保住滚动位置，否则用户每改一项就被弹回页面顶部（§5.34）
       requestRerender: () => this.rerenderKeepingScroll(),
       heading: true,

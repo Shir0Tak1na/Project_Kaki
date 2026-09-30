@@ -28,7 +28,7 @@ import {
 } from './overlayFields.ts'
 import { colorForValue, type ColorStop } from './colorRamp.ts'
 
-/** 色带条目要画的渐变（UI 直接拿它做 `linear-gradient`）：锚点 + 两端越界纯色 */
+/** 配色条目要画的渐变（UI 直接拿它做 `linear-gradient`）：锚点 + 两端越界纯色 */
 export interface LegendRampInfo {
   /** 渐变条上的锚点（值 + 颜色），UI 按值把位置归一化到 0–100% */
   stops: ColorStop[]
@@ -57,19 +57,19 @@ export interface LegendEntry {
    * 条目类型（决定**画成什么样**：`ramp` 是渐变条，其余都是一个色块 + 名字 + 次数）。
    *
    * `biome` 与 `terrain` 在画法上同形，但**刻意分开**：它们是两类不同的东西
-   * （"地形"是底图，生物群系是数据层），合成一个 kind 之后就没法只列其中一类。
+   * （"地形"是底图，生物群系是数值图层），合成一个 kind 之后就没法只列其中一类。
    */
   kind: 'terrain' | 'biome' | 'path' | 'region' | 'ramp'
-  /** 图例上显示的短标签（地形名 / 路径类型名 / 区域名 / 数据层名） */
+  /** 图例上显示的短标签（地形名 / 路径类型名 / 区域名 / 数值图层名） */
   label: string
   color: string
-  /** 地图上用了多少次（地形=格数，路径=条数，区域=个数，色带=有值的格数） */
+  /** 地图上用了多少次（地形=格数，路径=条数，区域=个数，配色=有值的格数） */
   count: number
   /** 虚线样式（仅路径），让图例能区分道路与河流 */
   dash?: number[]
-  /** 色带条目（仅 `kind: 'ramp'`）：怎么画那条渐变 */
+  /** 配色条目（仅 `kind: 'ramp'`）：怎么画那条渐变 */
   ramp?: LegendRampInfo
-  /** 色带条目：有多少格落在色带之外（**只在真的有**的时候出现） */
+  /** 配色条目：有多少格落在配色之外（**只在真的有**的时候出现） */
   outOfRange?: { under: number; over: number }
 }
 
@@ -95,7 +95,7 @@ export interface LegendDeps {
    */
   resolveBiome?: (id: string) => { label: string; color: string }
   /**
-   * 数据层（温度 / 深度…）的样式（色带 / 越界两端）。
+   * 数值图层（温度 / 深度…）的样式（配色 / 越界两端）。
    *
    * 缺省即出厂样式 —— 图例只是"给人看的清单"，拿不到设置时宁可按出厂画一条，
    * 也不要静默少一栏（那会让人以为"地图上根本没有温度"）。
@@ -177,13 +177,13 @@ export function buildLegendEntries(
   }
 
   /**
-   * 数据层（温度 / 深度…）：一条**色带** + 有值的格数 + 只在真有越界格时才出现的两端。
+   * 数值图层（温度 / 深度…）：一条**配色** + 有值的格数 + 只在真有越界格时才出现的两端。
    *
    * 与别的段同一口径：**扫地图**（只看有值的格），所以"图例里有温度、地图上却没数据"这种矛盾不会出现。
    * 越界计数与画布同源（同一个 `colorForValue`）—— 这里绝不另写一套"值比大小"的比较。
    */
   const overlaySection = (spec: OverlayFieldSpec): void => {
-    // 分类字段（生物群系）**不是一条色带**：它的图例是"逐个群系一行"
+    // 分类字段（生物群系）**不是一条配色**：它的图例是"逐个群系一行"
     if (!isNumericField(spec)) {
       biomeSection(spec)
       return
@@ -213,7 +213,7 @@ export function buildLegendEntries(
     const entry: LegendEntry = {
       kind: 'ramp',
       label: unitTitle.length > 0 ? `${spec.label}（${unitTitle}）` : spec.label,
-      // 色带条目的 `color` 是"这一栏的主色"（文字输出用）：取正中的锚点
+      // 配色条目的 `color` 是"这一栏的主色"（文字输出用）：取正中的锚点
       color: stops[Math.floor(stops.length / 2)]!.color,
       count,
       ramp: {
@@ -270,7 +270,7 @@ export function buildLegendEntries(
    * 图例是"给人看的清单"，**关掉那一层就不该再列它** —— 否则用户拿着图例找不着画上的东西。
    * 段与层的对应写在这张表里（而不是每段各抄一遍三层 if）：加一层、改一层的名字都不用来这里。
    *
-   * 顺序 = **画布上的叠加次序**：地形 → 数据层（温度 / 深度…）→ 路径 → 区域。
+   * 顺序 = **画布上的叠加次序**：地形 → 数值图层（温度 / 深度…）→ 路径 → 区域。
    */
   const sections: Array<{ layer: LayerKey; build: () => void }> = [
     { layer: 'terrain', build: terrainSection },
@@ -329,7 +329,7 @@ function sortPathTypes(types: string[]): string[] {
 }
 
 /**
- * 把色带条目变成一条 CSS 渐变（图例用它画那条带）。
+ * 把配色条目变成一条 CSS 渐变（图例用它画那条带）。
  *
  * 位置按**值**归一化，而不是按锚点序号平均分：锚点值不均匀时（出厂是 -30/0/15/30/45），
  * 渐变的疏密也跟着不均匀 —— 这正是"渐变率就是相邻锚点的斜率"的可视化。
@@ -350,10 +350,10 @@ export function rampGradientCss(info: LegendRampInfo): string {
 export function legendLines(entries: readonly LegendEntry[], maxEntries = 24): string[] {
   return entries.slice(0, maxEntries).map((entry) => {
     if (entry.kind === 'ramp') {
-      // 色带条目不是一个"用了多少次的类型"：报范围、有值格数与越界格数才是有用的信息
+      // 配色条目不是一个"用了多少次的类型"：报范围、有值格数与越界格数才是有用的信息
       const range = entry.ramp ? `${entry.ramp.minLabel}~${entry.ramp.maxLabel}` : ''
       const out = entry.outOfRange ? `，越界 低 ${entry.outOfRange.under} / 高 ${entry.outOfRange.over}` : ''
-      return `数据层 · ${entry.label} · ${range} · 有值 ${entry.count} 格${out}`
+      return `数值图层 · ${entry.label} · ${range} · 有值 ${entry.count} 格${out}`
     }
     const kind = entry.kind === 'terrain' ? '地形' : entry.kind === 'path' ? '路径' : '区域'
     return `${kind} · ${entry.label} · ${entry.color} · ${entry.count}`

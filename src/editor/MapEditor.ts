@@ -96,7 +96,7 @@ import {
 } from '../render/regionTypeCatalog.ts'
 
 /**
- * 数据层笔刷的**逐格算法**（施工文件 §E 那张表的唯一实现）。
+ * 数值图层笔刷的**逐格算法**（施工文件 §E 那张表的唯一实现）。
  *
  * 返回 `undefined` = **这一格不动**。三种"不动"：
  * - `× / ÷` 遇到没有值的格（拿"没量过"去乘没有意义）；
@@ -253,7 +253,7 @@ export type EditorTool = 'brush' | 'marker' | 'label' | 'path' | 'region'
 export type SelectionMode = 'rect' | 'brush'
 
 /**
- * 数据层笔刷的算法（施工文件 §E）。
+ * 数值图层笔刷的算法（施工文件 §E）。
  *
  * `set` 是给**分类字段**（生物群系）与"我想直接写这个数"用的；`+ - × ÷` 只对数值字段成立
  * （对分类 ID 做乘法是没有意义的）。
@@ -272,7 +272,7 @@ export interface MapDraft {
   /**
    * 已确定的顶点（世界坐标）。
    *
-   * ⚠️ 沿格边模式下，这里存的是**走出来的整条边路**（含中间顶点），不是点击数：
+   * ⚠️ 沿网格线模式下，这里存的是**走出来的整条边路**（含中间顶点），不是点击数：
    * 否则预览里两段之间还是直线、而提交后会变成格边 —— 又是一次"所见非所得"。
    */
   points: Point[]
@@ -368,7 +368,7 @@ export interface EditorStatus {
   strokeCells: number
   /** 进行中的草稿顶点数（0 = 没有草稿） */
   draftPoints: number
-  /** 路径/区域的几何模式（工具栏据此高亮） */
+  /** 路径/区域的绘制模式（工具栏据此高亮） */
   geometryMode: GeometryMode
   /** 当前选中的对象（`null` = 没选中）—— 侧栏检查器与高亮都读它 */
   selection: MapSelection | null
@@ -389,7 +389,7 @@ export interface EditorStatus {
   cellSelection: CellSelection
   /** 选择模式下左键拖动是矩形框选还是笔迹框选 */
   selectionMode: SelectionMode
-  /** 笔刷作用的**字段**：`null` = 地形（既有行为），否则是数据层字段（§E） */
+  /** 笔刷作用的**字段**：`null` = 地形（既有行为），否则是数值图层字段（§E） */
   brushField: FieldId | null
   /** 数值字段的算法（对分类字段恒为 `set`） */
   brushOp: BrushOp
@@ -427,9 +427,9 @@ export class MapEditor {
   regionType: RegionType = defaultRegionTypeId()
   brushRadius = 0
   /**
-   * 路径与区域的几何模式（用户要的"两种模式"）：
+   * 路径与区域的绘制模式（用户要的"两种模式"）：
    * - `interior`：直接通过六边形内部（默认，自由折线 / 平滑曲线）；
-   * - `edge`：勾勒六边形边框 —— 落点吸附到网格顶点，且顶点之间沿格边连接。
+   * - `edge`：勾勒六边形边框 —— 落点吸附到网格顶点，且顶点之间沿网格线连接。
    */
   geometryMode: GeometryMode = 'interior'
   // 说明：这里**刻意没有** `showShapeLabels`。
@@ -442,7 +442,7 @@ export class MapEditor {
   private strokeCells: Axial[] = []
   private strokeLastPoint: Point | null = null
   /**
-   * 数据层笔刷的状态（§E）。**字段为 `null` 时走既有的地形笔刷**（一行都不改）。
+   * 数值图层笔刷的状态（§E）。**字段为 `null` 时走既有的地形笔刷**（一行都不改）。
    */
   brushField: FieldId | null = null
   brushOp: BrushOp = 'set'
@@ -517,7 +517,7 @@ export class MapEditor {
     }
   }
 
-  // ------------------------------------------------- 数据层笔刷（§E）
+  // ------------------------------------------------- 数值图层笔刷（§E）
 
   /**
    * 换笔刷作用的字段。`null` = 回地形笔刷。
@@ -575,7 +575,7 @@ export class MapEditor {
     this.options.onStateChanged?.()
   }
 
-  /** 非地形的笔刷就是"数据层笔刷"（§E 的那一套） */
+  /** 非地形的笔刷就是"数值图层笔刷"（§E 的那一套） */
   isFieldBrush(): boolean {
     return this.brushField !== null
   }
@@ -1131,7 +1131,7 @@ export class MapEditor {
    *   **刻意不做"悄悄夹到边界"**：夹了以后用户看到的输入
    *   与文件里的值会不一致，那是更难查的问题（历史上"输入被静默改写"已经出过一次，§5.33）。
    *
-   * `value === null` = 删掉该字段（例如"清除覆盖色"），而不是写一个 null 进去 ——
+   * `value === null` = 删掉该字段（例如"清除单格叠加色"），而不是写一个 null 进去 ——
    * 文件里少一个键与多一个 `null` 是两种东西。
    */
   setSelectionField(field: string, value: SelectionFieldValue): boolean {
@@ -1244,7 +1244,7 @@ export class MapEditor {
       // 唯一的硬约束是"**必须是有限数**"：NaN / Infinity 不是数据（它们没法被画出来，
       // 写进去只会变成别的库认不出的怪值）。
       // ⚠️ 这里**刻意不**用 `TEMP_RANGE` 那类"物理合理范围"去拦（2026-09-28 用户实机纠正）：
-      // 温度 / 深度没有取值上限，"超出范围"只发生在颜色这一层（色带的 under/over 纯色 + 数值文字）。
+      // 温度 / 深度没有取值上限，"超出范围"只发生在颜色这一层（配色的 under/over 纯色 + 数值文字）。
       // 范围判定只对**声明了 min/max 的字段**生效（例如区域不透明度 0–1）——那种是真正的定义域。
       if (!Number.isFinite(value)) return null
       if (fieldSpec.min !== undefined && value < fieldSpec.min) return null
@@ -1294,7 +1294,7 @@ export class MapEditor {
     const from = document_.dataDefaults ?? null
     const to = defaults === null ? null : { ...defaults }
     if (sameDataDefaults(from, to)) return false
-    this.commit([{ kind: 'setDataDefaults', from, to }], to === null ? '清除数据层默认值' : '设置数据层默认值')
+    this.commit([{ kind: 'setDataDefaults', from, to }], to === null ? '清除数值图层默认值' : '设置数值图层默认值')
     return true
   }
 
@@ -1350,7 +1350,7 @@ export class MapEditor {
    *
    * - 点对象：直接设坐标；
    * - 路径 / 区域：按**包围盒中心**平移，顶点相对位置不变，记的是位移量（撤销即取反）；
-   * - 地块：不支持 —— 搬地形会牵涉覆盖色、相邻连通与"整片铺图"的分组，
+   * - 地块：不支持 —— 搬地形会牵涉单格叠加色、相邻连通与"整片铺图"的分组，
    *   那是另一件事，不该混在"调位置"里悄悄做。
    *
    * `center` 由调用方给（`main.ts` 从当前视口算），编辑器不认识视口 —— 保持这一层可单测。
@@ -1502,10 +1502,10 @@ export class MapEditor {
   }
 
   /**
-   * 切换路径/区域的几何模式。
+   * 切换路径/区域的绘制模式。
    *
    * 换模式时取消进行中的草稿：那一半已经按旧模式吸附过了，
-   * 继续画会出现"前几个顶点沿格边、后面穿内部"的混合形状。
+   * 继续画会出现"前几个顶点沿网格线、后面沿格心连接"的混合形状。
    */
   setGeometryMode(mode: GeometryMode): void {
     if (this.geometryMode === mode) return
@@ -1560,7 +1560,7 @@ export class MapEditor {
   /**
    * 这一格画完之后应该是什么样。
    *
-   * **以该格原有内容为底**，只改地形类型：格上除了 `t` 还可能有位标志、覆盖色，
+   * **以该格原有内容为底**，只改地形类型：格上除了 `t` 还可能有位标志、单格叠加色，
    * 以及**这一版不认识的键**（未来的温度 / 深度就挂在这些键上，见 `TerrainCell.extra`）。
    * 以前这里返回一个新建的 `{ t }`，等于整格替换 —— 未知字段会被顺手抹掉，
    * 而且"用同一种地形重刷一遍"连撤销点都不产生（完整因果见 `opsFromPreviousOf` 的注释）。
@@ -1594,7 +1594,7 @@ export class MapEditor {
     const grid = this.grid()
     const document_ = this.options.getDocument()
     if (!grid || !document_ || this.mode !== 'paint') return
-    // 数据层笔刷：值没填好 / 除以 0 时**不生效**（状态条会说明原因，§E 第 2 条）
+    // 数值图层笔刷：值没填好 / 除以 0 时**不生效**（状态条会说明原因，§E 第 2 条）
     if (this.isFieldBrush() && !this.brushReadiness().ok) return
 
     this.strokePrevious = new Map()
@@ -1635,7 +1635,7 @@ export class MapEditor {
     this.options.onStateChanged?.()
   }
 
-  /** 这一笔的历史名（数据层笔刷要说清"刷的是哪一层、怎么刷的"） */
+  /** 这一笔的历史名（数值图层笔刷要说清"刷的是哪一层、怎么刷的"） */
   private strokeLabel(count: number): string {
     const field = this.brushField
     if (field === null) return `绘制 ${count} 格`
@@ -1784,7 +1784,7 @@ export class MapEditor {
     if (this.mode !== 'paint') return
     const style = this.currentPathStyle()
     const region = kind === 'region' ? this.currentRegionStyle() : null
-    // 沿格边模式下，落点先吸附到最近的网格顶点
+    // 沿网格线模式下，落点先吸附到最近的网格顶点
     const start = this.snapDraftPoint(world)
     this.draft = {
       kind,
@@ -1794,7 +1794,7 @@ export class MapEditor {
       color: kind === 'path' ? style.color : (region?.color ?? '#44cf6e'),
       width: kind === 'path' ? style.width : (region?.borderWidth ?? 3),
       // 预览与最终渲染保持一致（河流：平滑 + 末端变细）。
-      // 沿格边模式**不做平滑**：平滑会把格边抹成曲线，正好毁掉"整洁"的目的。
+      // 沿网格线模式**不做平滑**：平滑会把格边抹成曲线，正好毁掉"整洁"的目的。
       smooth: kind === 'path' && style.smooth === true && this.geometryMode === 'interior',
       taper: kind === 'path' && style.taper === true,
       // 端点/连接也照抄当前类型：否则"平头端点"的类型在预览里会画成圆头
@@ -1810,12 +1810,12 @@ export class MapEditor {
     const grid = this.options.getDocument()?.grid
     const target = this.snapDraftPoint(world)
     if (grid && this.geometryMode === 'edge-step') {
-      // 逐边模式：只前进一条边，方向由点击位置决定
+      // 格步进模式：只前进一条边，方向由点击位置决定
       const last = this.draft.points[this.draft.points.length - 1]!
       const previous = this.draft.points.length >= 2 ? subtract(last, this.draft.points[this.draft.points.length - 2]!) : null
       this.draft.points.push(stepAlongEdges(grid, last, world, previous).point)
     } else if (grid && this.geometryMode === 'edge') {
-      // 沿格边：把"上一个顶点 → 新顶点"的整条边路都记进草稿。
+      // 沿网格线：把"上一个顶点 → 新顶点"的整条边路都记进草稿。
       // 只记终点的话，预览里这一段仍是直线，提交后才变成格边 —— 所见非所得。
       const tail = walkTailToCursor(grid, this.draft.points[this.draft.points.length - 1]!, target)
       for (const point of tail) this.draft.points.push(point)
@@ -1838,7 +1838,7 @@ export class MapEditor {
   /**
    * 草稿显示用的点序列。
    *
-   * 沿格边模式下，光标那一端要从最后一个顶点**沿格边走**过去（而不是一条斜线），
+   * 沿网格线模式下，光标那一端要从最后一个顶点**沿网格线走**过去（而不是一条斜线），
    * 否则预览与实际结果不一致 —— 这是本项目反复强调的"所见即所得"。
    * 显示上把走出来的那一串直接并进 points，因此 `drawDraft` 不需要任何改动。
    */
@@ -1849,7 +1849,7 @@ export class MapEditor {
     }
     const last = draft.points[draft.points.length - 1]!
     if (this.geometryMode === 'edge-step') {
-      // 逐边模式：预览也只显示**接下来那一条边**（点哪个方向就往哪走）
+      // 格步进模式：预览也只显示**接下来那一条边**（点哪个方向就往哪走）
       const previous = draft.points.length >= 2 ? subtract(last, draft.points[draft.points.length - 2]!) : null
       const next = stepAlongEdges(grid, last, draft.cursor, previous).point
       return { points: [...draft.points, next], cursor: null }
@@ -1858,7 +1858,7 @@ export class MapEditor {
     return { points: [...draft.points, ...tail], cursor: null }
   }
 
-  /** 沿格边模式：吸附到最近顶点；否则原样返回 */
+  /** 沿网格线模式：吸附到最近顶点；否则原样返回 */
   private snapDraftPoint(world: Point): Point {
     const grid = this.options.getDocument()?.grid
     if (this.geometryMode === 'interior' || !grid) return { x: world.x, y: world.y }
@@ -1868,9 +1868,9 @@ export class MapEditor {
   /**
    * 提交前的几何转换。
    *
-   * 沿格边模式下，已确定的顶点之间也要**沿格边**连接（不只是把点吸附到顶点上）——
+   * 沿网格线模式下，已确定的顶点之间也要**沿网格线**连接（不只是把点吸附到顶点上）——
    * 否则远距离的两个顶点之间仍是一条斜穿格子的直线。
-   * 逐边模式记录的本来就是相邻顶点，这里的行走是恒等操作（不会改变形状）。
+   * 格步进模式记录的本来就是相邻顶点，这里的行走是恒等操作（不会改变形状）。
    */
   private commitGeometry(points: Point[], closed: boolean): Point[] {
     const grid = this.options.getDocument()?.grid
@@ -1923,7 +1923,7 @@ export class MapEditor {
   private buildPathFrom(points: Point[]): MapOp {
     const document_ = this.options.getDocument()!
     const style = this.currentPathStyle()
-    // 沿格边模式：顶点之间也要沿格边走（否则远处两点之间仍是一条斜穿格子的直线）
+    // 沿网格线模式：顶点之间也要沿网格线走（否则远处两点之间仍是一条斜穿格子的直线）
     const geometry = this.commitGeometry(points, false)
     const path: MapPath = {
       id: nextShapeId(document_, 'p'),
@@ -1937,7 +1937,7 @@ export class MapEditor {
     }
     if (style.dash) path.dash = [...style.dash]
     if (style.taper === true) path.taper = true
-    // 沿格边模式不做平滑：平滑会把格边抹成曲线，正好毁掉"整洁"的目的
+    // 沿网格线模式不做平滑：平滑会把格边抹成曲线，正好毁掉"整洁"的目的
     if (style.smooth === true && this.geometryMode === 'interior') path.smooth = true
     return { kind: 'addPath', path }
   }

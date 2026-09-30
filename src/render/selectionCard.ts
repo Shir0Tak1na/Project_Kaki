@@ -57,7 +57,7 @@ export interface SelectionCardInput {
   summary: SelectionSummary | null
   /** 文档（单选详情要读真值；`null` = 还没加载出来，这时卡片只报格数） */
   document: MapDocument | null
-  /** 数据层样式（决定读数用米还是千米 —— 与图例、画布**同一个**格式化函数） */
+  /** 数值图层样式（决定读数用米还是千米 —— 与图例、画布**同一个**格式化函数） */
   styles: OverlayStyles
   /** 地形 / 生物群系的显示名解析（由调用方注入，保持本模块纯净） */
   terrainLabel: (id: string) => string

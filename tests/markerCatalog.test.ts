@@ -88,7 +88,7 @@ test('未知 ID：**不丢弃**，回退成看得见的占位并标记 unknown�
   assert.equal(style.unknown, true)
   assert.equal(style.builtin, false)
   assert.equal(style.iconName, FALLBACK_MARKER_ICON_NAME)
-  assert.match(style.label, /未知/)
+  assert.match(style.label, /未定义类型/)
   assert.ok(style.label.includes('custom:gone'), '标签里要能看到是哪个 ID，便于排查')
 
   // 永不返回 null：绘制层每帧都问它，null 会让标记直接消失
@@ -238,5 +238,5 @@ test('设置页校验入口：合法返回归一化结果，非法给可读原�
 test('显示名查询：内置给 ID 本身，自定义给显示名，未知给带 ID 的说明', () => {
   assert.equal(markerLabelOf('city', SAMPLE), 'city')
   assert.equal(markerLabelOf('custom:lighthouse', SAMPLE), '灯塔')
-  assert.match(markerLabelOf('custom:gone', SAMPLE), /未知/)
+  assert.match(markerLabelOf('custom:gone', SAMPLE), /未定义类型/)
 })

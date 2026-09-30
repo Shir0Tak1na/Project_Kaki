@@ -31,6 +31,8 @@ import { extractFrontmatterBlock, isMapFileContent, parseFrontmatter } from '../
 import { summarizeMapDocument } from '../src/data/mapDocument.ts'
 import { axialToWorld, cellKey, worldToAxial } from '../src/core/hex.ts'
 import { snapToCellCenter } from '../src/render/markerPlacement.ts'
+// C4：被逐字断言钉住的界面文案从**单一来源**读（改文案只改 src/ui/strings.ts，不再牵动本文件）
+import { DRAW_MODE_LABELS, OVERLAY_CONTROL_LABELS, unknownTypeLabel } from '../src/ui/strings.ts'
 import { assertBundleIsFresh } from './lib/bundleFreshness.mjs'
 import { scanSources } from './lib/sourceSanity.mjs'
 
@@ -954,7 +956,7 @@ class FakeSetting {
         this.value = value
         /**
          * 真实 `TextComponent.setValue` 会**同时**写进 `inputEl.value`，而插件里确实有地方
-         * 直接读 DOM（「设置海拔标定」与「设置数据层默认值」对话框都是先拿 `inputEl` 再读 `.value`）。
+         * 直接读 DOM（「设置海拔标定」与「设置数值图层默认值」对话框都是先拿 `inputEl` 再读 `.value`）。
          * 桩只写自己那个 `value` 的话，这条读取路径在冒烟里永远看到空串 ——
          * 表现是"填了值却没生效"，看起来像实现坏了，其实是桩少了一半行为（§5.13 那类）。
          */
@@ -2215,6 +2217,10 @@ function fireEvent(element, type, init = {}) {
   // 真实键盘事件带 `key`；桩里必须补上，否则"按 Enter 提交"这类断言根本发不出来
   // （缺了它，handler 里的 `event.key === 'Enter'` 永远是 false —— 断言会变成空转）
   if (init.key !== undefined) event.key = init.key
+  // 指针坐标：拖动类断言要按 `clientX` 算位置（缺了它，`event.clientX` 是 undefined，拖动变成空转）
+  if (init.clientX !== undefined) event.clientX = init.clientX
+  if (init.clientY !== undefined) event.clientY = init.clientY
+  if (init.pointerId !== undefined) event.pointerId = init.pointerId
   if (element === undefined || element === null) return { prevented, stopped }
   element.dispatchEvent(event)
   return { prevented, stopped }
@@ -4182,7 +4188,7 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
   plugin.onunload()
 }
 
-console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / 穿内部）')
+console.log('\n场景 21：路径与区域的三种绘制模式（沿网格线连接 / 格步进 / 沿格心连接）')
 {
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -4234,7 +4240,7 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   }
   const allEdges = (pts) => segmentLengths(pts).every((length) => Math.abs(length - grid().size) < 1e-6)
 
-  // ---- 几何模式按钮（§F.2：从浮窗搬进侧栏「工具」一节）----
+  // ---- 绘制模式按钮（§F.2：从浮窗搬进侧栏「工具」一节）----
   const panel = await openMapPanel(app, plugin)
   editor.setMode('paint')
   editor.setTool('region')
@@ -4242,15 +4248,15 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   // ⚠️ 面板是**整块重建**式重绘：每次改状态后元素都是新的，所以这里要按需现取，
   // 不能像浮窗时期那样抓一个常量用到底（抓了常量会在"重建后"读到已脱离 DOM 的旧元素）。
   const geometryButtons = () => inPanel(panel, 'fc-panel-geometry')
-  check('侧栏「工具」有「沿格边 / 逐边 / 穿内部」三个按钮', geometryButtons().length === 3, String(geometryButtons().length))
+  check('侧栏「工具」有「沿网格线连接 / 格步进 / 沿格心连接」三个按钮', geometryButtons().length === 3, String(geometryButtons().length))
   check(
     '三个模式的标签齐全',
-    ['沿格边', '逐边', '穿内部'].every((label) => geometryButtons().some((button) => button.textContent === label)),
+    [DRAW_MODE_LABELS.edge, DRAW_MODE_LABELS.step, DRAW_MODE_LABELS.interior].every((label) => geometryButtons().some((button) => button.textContent === label)),
     geometryButtons().map((button) => button.textContent).join(', '),
   )
-  check('默认是穿内部模式', editor.geometryMode === 'interior', editor.geometryMode)
+  check('默认是沿格心连接模式', editor.geometryMode === 'interior', editor.geometryMode)
   fireEvent(geometryButtons()[0], 'click')
-  check('点击后切到沿格边模式', editor.geometryMode === 'edge', editor.geometryMode)
+  check('点击后切到沿网格线模式', editor.geometryMode === 'edge', editor.geometryMode)
   flushFrames()
   check(
     '按钮高亮跟随模式',
@@ -4258,7 +4264,7 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
     geometryButtons().map((button) => `${button.textContent}:${button.classList.contains('is-active')}`).join('|'),
   )
 
-  // ---- 沿格边模式：区域 ----
+  // ---- 沿网格线模式：区域 ----
   prompts.length = 0
   clickAt({ x: -400, y: 300 })
   clickAt({ x: 100, y: 300 })
@@ -4271,18 +4277,18 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
 
   const region = layers.getDocument(canvasPath).regions[0]
   check('区域已提交', region !== undefined)
-  check('区域记录了沿格边模式', region.mode === 'edge', String(region.mode))
+  check('区域记录了沿网格线模式', region.mode === 'edge', String(region.mode))
   check(
     '区域的每一段都是格边',
     allEdges(region.pts),
     `段长 ${segmentLengths(region.pts).map((n) => n.toFixed(1)).join(', ')} / 边长 ${grid().size}`,
   )
-  // 数据里不重复存起点；隐式闭合的那条边也必须沿格边
+  // 数据里不重复存起点；隐式闭合的那条边也必须沿网格线
   const regionClose = Math.hypot(region.pts[0][0] - region.pts[region.pts.length - 1][0], region.pts[0][1] - region.pts[region.pts.length - 1][1])
   check('不重复存起点的同时，隐式闭合边也是格边', Math.abs(regionClose - grid().size) < 1e-6, String(regionClose))
   check('顶点数多于点击次数（中间补了沿边顶点）', region.pts.length > 4, String(region.pts.length))
 
-  // ---- 沿格边模式：区域命中测试仍然有效（点在图内应能删掉）----
+  // ---- 沿网格线模式：区域命中测试仍然有效（点在图内应能删掉）----
   // 必须先回到选择模式：右键删除只在选择模式下生效（绘制模式里右键是"结束草稿"）
   editor.setMode('select')
   const before = layers.getDocument(canvasPath).regions.length
@@ -4293,14 +4299,14 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   })()
   flushFrames()
   check(
-    '沿格边的区域仍能被右键命中并删除',
+    '沿网格线的区域仍能被右键命中并删除',
     hit.stopped === true && layers.getDocument(canvasPath).regions.length === before - 1,
     `拦截=${hit.stopped} 区域数 ${before} → ${layers.getDocument(canvasPath).regions.length}`,
   )
   editor.undo()
   check('删除区域可撤销（区域回来且模式还在）', layers.getDocument(canvasPath).regions[0]?.mode === 'edge')
 
-  // ---- 沿格边模式：路径（河流不再平滑，否则等于把格边抹掉）----
+  // ---- 沿网格线模式：路径（河流不再平滑，否则等于把格边抹掉）----
   editor.setMode('paint')
   editor.setTool('path')
   editor.setPathType('river')
@@ -4314,27 +4320,27 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   flushFrames()
 
   const edgePath = layers.getDocument(canvasPath).paths[0]
-  check('路径记录了沿格边模式', edgePath.mode === 'edge', String(edgePath.mode))
-  check('沿格边的路径不平滑（平滑会把格边抹成曲线）', edgePath.smooth === undefined, String(edgePath.smooth))
-  check('沿格边的路径每一段都是格边', allEdges(edgePath.pts), `段长 ${segmentLengths(edgePath.pts).map((n) => n.toFixed(1)).join(', ')}`)
+  check('路径记录了沿网格线模式', edgePath.mode === 'edge', String(edgePath.mode))
+  check('沿网格线的路径不平滑（平滑会把格边抹成曲线）', edgePath.smooth === undefined, String(edgePath.smooth))
+  check('沿网格线的路径每一段都是格边', allEdges(edgePath.pts), `段长 ${segmentLengths(edgePath.pts).map((n) => n.toFixed(1)).join(', ')}`)
 
-  // ---- 草稿预览：光标那一端也要沿格边走（所见即所得）----
+  // ---- 草稿预览：光标那一端也要沿网格线走（所见即所得）----
   editor.setTool('region')
   clickAt({ x: -600, y: 200 })
   clickAt({ x: -300, y: 200 })
   const beforeCursor = editor.getDraft().points.length
   moveTo({ x: -100, y: 500 })
   const withCursor = editor.getDraft()
-  check('预览里光标那一端沿格边走（点数变多）', withCursor.points.length > beforeCursor, `${beforeCursor} → ${withCursor.points.length}`)
+  check('预览里光标那一端沿网格线走（点数变多）', withCursor.points.length > beforeCursor, `${beforeCursor} → ${withCursor.points.length}`)
   check('预览的每一段也都是格边', allEdges(withCursor.points), `段长 ${segmentLengths(withCursor.points).map((n) => n.toFixed(1)).join(', ')}`)
   check('预览不再使用橡皮筋直线（cursor 已并入点序列）', withCursor.cursor === null, String(withCursor.cursor))
 
-  // 换模式会取消草稿：否则会出现"前几个顶点沿格边、后面穿内部"的混合形状
+  // 换模式会取消草稿：否则会出现"前几个顶点沿网格线、后面沿格心连接"的混合形状
   editor.setGeometryMode('interior')
   check('切换模式会取消进行中的草稿', editor.isDrafting() === false)
-  check('模式已切回穿内部', editor.geometryMode === 'interior')
+  check('模式已切回沿格心连接', editor.geometryMode === 'interior')
 
-  // ---- 穿内部模式：对照组（段长不应全部等于边长）----
+  // ---- 沿格心连接模式：对照组（段长不应全部等于边长）----
   const undoBefore = editor.getStatus().undo
   editor.setTool('path')
   clickAt({ x: -300, y: -200 })
@@ -4344,37 +4350,37 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   prompts[prompts.length - 1].onSubmit(null)
   flushFrames()
   const freePath = layers.getDocument(canvasPath).paths[1]
-  check('穿内部模式记录在数据里', freePath.mode === 'interior', String(freePath.mode))
-  check('穿内部模式保留了河流的平滑', freePath.smooth === true, String(freePath.smooth))
-  check('穿内部模式只有点击的两个顶点', freePath.pts.length === 2, String(freePath.pts.length))
-  check('穿内部模式产生了一条可撤销历史', editor.getStatus().undo > undoBefore)
+  check('沿格心连接模式记录在数据里', freePath.mode === 'interior', String(freePath.mode))
+  check('沿格心连接模式保留了河流的平滑', freePath.smooth === true, String(freePath.smooth))
+  check('沿格心连接模式只有点击的两个顶点', freePath.pts.length === 2, String(freePath.pts.length))
+  check('沿格心连接模式产生了一条可撤销历史', editor.getStatus().undo > undoBefore)
 
   // ---- 落盘往返：模式要写进文件并读回来 ----
   await store.flush()
   const saved = app.vault.files.get('Maps/World.map.md') ?? ''
-  check('沿格边模式写进了文件', saved.includes('"mode": "edge"') || saved.includes('"mode":"edge"'), saved.slice(0, 160))
+  check('沿网格线模式写进了文件', saved.includes('"mode": "edge"') || saved.includes('"mode":"edge"'), saved.slice(0, 160))
   const reloaded = await store.load(app.vault.getAbstractFileByPath('Maps/World.map.md'))
   check(
     '重新解析后模式仍然保留',
     reloaded.document.paths.some((path) => path.mode === 'edge') && reloaded.document.regions.some((region) => region.mode === 'edge'),
     JSON.stringify(reloaded.document.paths.map((path) => path.mode)),
   )
-  check('旧数据缺 mode 字段时默认按穿内部处理', reloaded.document.paths.every((path) => path.mode === 'edge' || path.mode === 'interior'))
+  check('旧数据缺 mode 字段时默认按沿格心连接处理', reloaded.document.paths.every((path) => path.mode === 'edge' || path.mode === 'interior'))
 
-  // ---- 逐边模式：一次只画一条边 ----
+  // ---- 格步进模式：一次只画一条边 ----
   editor.setMode('paint')
   editor.setTool('region')
   flushFrames()
-  const stepButton = geometryButtons().find((button) => button.textContent === '逐边')
-  check('侧栏「工具」有「逐边」按钮', stepButton !== undefined, geometryButtons().map((b) => b.textContent).join(', '))
+  const stepButton = geometryButtons().find((button) => button.textContent === DRAW_MODE_LABELS.step)
+  check('侧栏「工具」有「格步进」按钮', stepButton !== undefined, geometryButtons().map((b) => b.textContent).join(', '))
   fireEvent(stepButton, 'click')
-  check('已切到逐边模式', editor.geometryMode === 'edge-step', editor.geometryMode)
+  check('已切到格步进模式', editor.geometryMode === 'edge-step', editor.geometryMode)
 
   // 沿着一个方向连续点：每次点击都应正好前进一条边
   const stepStart = { x: 600, y: -600 }
   clickAt(stepStart)
   const draftAfterFirst = editor.getDraft()
-  check('逐边模式起点也吸附到顶点', draftAfterFirst.points.length === 1, String(draftAfterFirst.points.length))
+  check('格步进模式起点也吸附到顶点', draftAfterFirst.points.length === 1, String(draftAfterFirst.points.length))
 
   const directions = [
     { x: stepStart.x + 200, y: stepStart.y },
@@ -4385,14 +4391,14 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   const stepped = editor.getDraft()
   check('三次点击 = 三个顶点（每次只走一条边）', stepped.points.length === 4, String(stepped.points.length))
   check(
-    '逐边走过的每一段都是格边',
+    '格步进走过的每一段都是格边',
     allEdges(stepped.points),
     `段长 ${segmentLengths(stepped.points).map((n) => n.toFixed(1)).join(', ')}`,
   )
   // 预览：只显示"接下来那一条边"
   moveTo({ x: stepStart.x + 900, y: stepStart.y })
   const steppedPreview = editor.getDraft()
-  check('逐边预览只多出一条边', steppedPreview.points.length === 5, String(steppedPreview.points.length))
+  check('格步进预览只多出一条边', steppedPreview.points.length === 5, String(steppedPreview.points.length))
   check('预览的那一条边也是格边', allEdges(steppedPreview.points), `段长 ${segmentLengths(steppedPreview.points).map((n) => n.toFixed(1)).join(', ')}`)
 
   // 拐弯：往另一个方向点，应当朝那个方向拐（而不是继续直行）
@@ -4417,23 +4423,23 @@ console.log('\n场景 21：路径与区域的两种几何模式（沿格边 / �
   prompts[prompts.length - 1].onSubmit(null)
   flushFrames()
   const steppedRegion = layers.getDocument(canvasPath).regions[regionCountBefore]
-  check('逐边模式画出的区域已提交', steppedRegion !== undefined)
-  check('区域记录了逐边模式', steppedRegion.mode === 'edge-step', String(steppedRegion.mode))
-  check('逐边区域每一段都是格边', allEdges(steppedRegion.pts), `顶点 ${steppedRegion.pts.length}`)
+  check('格步进模式画出的区域已提交', steppedRegion !== undefined)
+  check('区域记录了格步进模式', steppedRegion.mode === 'edge-step', String(steppedRegion.mode))
+  check('格步进区域每一段都是格边', allEdges(steppedRegion.pts), `顶点 ${steppedRegion.pts.length}`)
   const steppedClose = Math.hypot(
     steppedRegion.pts[0][0] - steppedRegion.pts[steppedRegion.pts.length - 1][0],
     steppedRegion.pts[0][1] - steppedRegion.pts[steppedRegion.pts.length - 1][1],
   )
-  check('逐边区域的闭合边也是格边', Math.abs(steppedClose - grid().size) < 1e-6, String(steppedClose))
-  // 逐边记录的顶点必须与画出来的完全一致（前缀核对）；多出来的只能是**闭合回程**的顶点
-  // —— 区域必须闭合，而逐边模式下最后一点通常离起点还很远，那段回程同样沿格边走。
+  check('格步进区域的闭合边也是格边', Math.abs(steppedClose - grid().size) < 1e-6, String(steppedClose))
+  // 格步进记录的顶点必须与画出来的完全一致（前缀核对）；多出来的只能是**闭合回程**的顶点
+  // —— 区域必须闭合，而格步进模式下最后一点通常离起点还很远，那段回程同样沿网格线走。
   const traced = afterTurn.map((point) => ({ x: point.x, y: point.y }))
   const prefixMatches = traced.every((point, index) => {
     const actual = steppedRegion.pts[index]
     return actual !== undefined && Math.abs(actual[0] - point.x) < 1e-6 && Math.abs(actual[1] - point.y) < 1e-6
   })
   check(
-    '逐边记录的顶点与描出来的完全一致（不做自动补点）',
+    '格步进记录的顶点与描出来的完全一致（不做自动补点）',
     prefixMatches && steppedRegion.pts.length >= traced.length,
     `描了 ${traced.length} 个，区域共 ${steppedRegion.pts.length} 个`,
   )
@@ -4604,7 +4610,7 @@ console.log('\n场景 22：地图面板（侧边栏视图）与开发者模式�
   plugin.onunload()
 }
 
-console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族）与"只影响新对象"的边界')
+console.log('\n场景 23：样式设置（路径/区域颜色、名称字体）与"只影响新对象"的边界')
 {
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -4718,10 +4724,10 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     JSON.stringify((defSettingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
   )
 
-  // ---- 设置页只剩名称字体族（路径 / 区域类型的参数已经搬走）----
+  // ---- 设置页只剩名称字体（路径 / 区域类型的参数已经搬走）----
   openSettings()
-  const fontText = textNamed('名称字体族')
-  check('设置页有名称字体族输入框', fontText !== undefined && fontText.placeholder === '留空 = 跟随主题', String(fontText?.placeholder))
+  const fontText = textNamed('名称字体')
+  check('设置页有名称字体输入框', fontText !== undefined && fontText.placeholder === '留空 = 跟随主题', String(fontText?.placeholder))
   check('字体族默认为空（= 跟随主题）', fontText?.value === '', JSON.stringify(fontText?.value))
   check(
     '设置页不再有路径 / 区域类型的参数行（一个控件只有一个家）',
@@ -4790,7 +4796,7 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
   check('新画的区域记下了类型 ID', region.type === 'duchy', String(region.type))
   check('区域不透明度仍是出厂默认（颜色设置不该改别的字段）', region.opacity === 0.22, String(region.opacity))
 
-  // ---- 名称字体族：必须真的出现在 ctx.font 里，且不能带 var() ----
+  // ---- 名称字体：必须真的出现在 ctx.font 里，且不能带 var() ----
   await fontText.type('Noto Serif SC, serif')
   const run = (() => {
     editor.setMode('paint')
@@ -4853,7 +4859,7 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体族�
     }),
   )
   check(
-    '「恢复默认参数」不动名称字体族（字体不随图，仍留在设置页）',
+    '「恢复默认参数」不动名称字体（字体不随图，仍留在设置页）',
     restored.labelFontFamily === 'Noto Serif SC, serif',
     JSON.stringify(restored.labelFontFamily),
   )
@@ -5609,7 +5615,7 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   await plugin.setLayerVisible('labels', true)
   // 网格在前面的设置页步骤里被关掉了：这里显式恢复，才能断言"全部显示"这句话
   await plugin.setLayerVisible('grid', true)
-  // 温度 / 深度两条数据层出厂默认都是**关**的（数据层不该在用户没要求时改变现有画面）：
+  // 温度 / 深度两条数值图层出厂默认都是**关**的（数值图层不该在用户没要求时改变现有画面）：
   // 所以只想看"全部显示"那句话，就得连它们一起打开 —— 隐藏清单里会如实写着它们。
   await plugin.setLayerVisible('temperature', true)
   await plugin.setLayerVisible('depth', true)
@@ -5623,7 +5629,7 @@ console.log('\n场景 25：图层开关与图例（改的是"看不看"，不是
   runCommand(plugin, 'map-status')
   await new Promise((resolve) => setTimeout(resolve, 30))
   check(
-    '数据层默认关着这件事在状态命令里可查（"地图怎么没有颜色"有一个可读答案）',
+    '数值图层默认关着这件事在状态命令里可查（"地图怎么没有颜色"有一个可读答案）',
     layerCapture.text().includes('已隐藏 温度 / 深度 / 生物群系'),
     layerCapture.text().slice(0, 200),
   )
@@ -5899,7 +5905,7 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
   check('面板已打开', panel !== undefined)
   const toggleEls = () => collectByClass(panel.contentEl, 'fc-layer-toggle')
   const toggleFor = (key) => toggleEls().find((element) => element.dataset.layer === key)
-  check('面板里有九个图层开关（六层 + 温度、深度、生物群系三条数据层）', toggleEls().length === 9, String(toggleEls().length))
+  check('面板里有九个图层开关（六层 + 温度、深度、生物群系三条数值图层）', toggleEls().length === 9, String(toggleEls().length))
   const panelLayerOrder = toggleEls().map((element) => element.dataset.layer).join(',')
   check(
     '九个开关的 key 与图层登记表一致（表驱动，顺序就是表里的行序）',
@@ -5914,7 +5920,7 @@ console.log('\n场景 27：地图面板的图层开关与工具条精简（用�
   )
   const dataLayerKeys = ['temperature', 'depth', 'biome']
   check(
-    '除数据层外默认都是"开"（三条数据层出厂是关的：新功能不该改变现有画面）',
+    '除数值图层外默认都是"开"（三条数值图层出厂是关的：新功能不该改变现有画面）',
     toggleEls()
       .filter((element) => !dataLayerKeys.includes(element.dataset.layer))
       .every((element) => element.classList.contains('is-active')) &&
@@ -7763,7 +7769,7 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
   )
   check(
     '当前图标已被删掉时下拉里补一个「未知」项（否则 setValue 会静默落回第一项，看着像"图标自己换了"）',
-    (placeDropdown?.options ?? []).some((option) => option.value === 'custom:gone' && /未知/.test(option.label)) &&
+    (placeDropdown?.options ?? []).some((option) => option.value === 'custom:gone' && /未定义类型/.test(option.label)) &&
       (placeDropdown?.options ?? []).length === 12,
     JSON.stringify(placeDropdown?.options),
   )
@@ -8202,7 +8208,7 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   )
   check(
     '图例里未知类型也在（按 ID 字母序排在内置之后）',
-    legendRows().some((row) => (row.textContent ?? '').includes('未知（spaceship-lane）')),
+    legendRows().some((row) => (row.textContent ?? '').includes(unknownTypeLabel('spaceship-lane'))),
     JSON.stringify(legendRows().map((row) => row.textContent)),
   )
   check(
@@ -8265,8 +8271,8 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
       .join(' | ')
     check('Base 行里显示的是目录里的显示名（不是冷冰冰的 custom:highway）', rowText.includes('官道'), rowText.slice(0, 300))
     check(
-      'Base 行里未知类型显示为「未知（ID）」（与图例同一套解析）',
-      rowText.includes('未知（spaceship-lane）'),
+      'Base 行里未知类型显示为「未定义类型（ID）」（与图例同一套解析）',
+      rowText.includes(unknownTypeLabel('spaceship-lane')),
       rowText.slice(0, 300),
     )
   }
@@ -8306,8 +8312,8 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
     `${optionsBeforeDelete} → ${pathOptions().map((option) => option.value).join(',')}`,
   )
   check(
-    '当前类型被删掉后，下拉补一条「未知（custom:highway）」并保持选中（不退回第一项）',
-    pathSelect()?.value === 'custom:highway' && (pathOption('custom:highway')?.textContent ?? '').includes('未知'),
+    '当前类型被删掉后，下拉补一条「未定义类型（custom:highway）」并保持选中（不退回第一项）',
+    pathSelect()?.value === 'custom:highway' && (pathOption('custom:highway')?.textContent ?? '').includes('未定义类型'),
     `${String(pathSelect()?.value)} / ${String(pathOption('custom:highway')?.textContent)}`,
   )
   check(
@@ -9298,8 +9304,8 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     JSON.stringify(legendLabels('region')),
   )
   check(
-    '图例里未知类型显示为「未知（ID）」而不是空着或混进内置名',
-    legendLabels('region').includes(`未知（${FOREIGN_TYPE}）`),
+    '图例里未知类型显示为「未定义类型（ID）」而不是空着或混进内置名',
+    legendLabels('region').includes(unknownTypeLabel(FOREIGN_TYPE)),
     JSON.stringify(legendLabels('region')),
   )
 
@@ -9388,8 +9394,8 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   )
   flushFrames()
   check(
-    '侧栏下拉显示「未知（custom:march）」而不是空着',
-    regionSelect()?.value === 'custom:march' && (regionOption('custom:march')?.textContent ?? '') === '未知（custom:march）',
+    '侧栏下拉显示「未定义类型（custom:march）」而不是空着',
+    regionSelect()?.value === 'custom:march' && (regionOption('custom:march')?.textContent ?? '') === unknownTypeLabel('custom:march'),
     `${String(regionSelect()?.value)} / ${String(regionOption('custom:march')?.textContent)}`,
   )
 
@@ -9572,7 +9578,7 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
     afterText.slice(afterText.indexOf('custom:'), afterText.indexOf('custom:') + 120),
   )
   check(
-    '设置里的定义 ID 也改了（否则地图会显示"未知（旧 ID）"）',
+    '设置里的定义 ID 也改了（否则地图会显示"未定义类型（旧 ID）"）',
     plugin.getSettings().customMarkers.some((marker) => marker.id === 'custom:renamed') &&
       !plugin.getSettings().customMarkers.some((marker) => marker.id === 'custom:renametest'),
     JSON.stringify(plugin.getSettings().customMarkers.map((marker) => marker.id)),
@@ -9957,9 +9963,9 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   check('选中了那条"未知类型"的路径', JSON.stringify(editor.getSelection()) === JSON.stringify({ kind: 'path', id: 'pa-unknown' }), JSON.stringify(editor.getSelection()))
   const unknownSelect = fieldEl('type')
   check(
-    '下拉里补了一条「未知（spaceship-lane）」并保持为当前值（不改写用户数据）',
+    '下拉里补了一条「未定义类型（spaceship-lane）」并保持为当前值（不改写用户数据）',
     unknownSelect?.value === 'spaceship-lane' &&
-      (unknownSelect?.children ?? []).some((option) => (option.textContent ?? '').includes('未知（spaceship-lane）')),
+      (unknownSelect?.children ?? []).some((option) => (option.textContent ?? '').includes(unknownTypeLabel('spaceship-lane'))),
     `${String(unknownSelect?.value)} | ${JSON.stringify((unknownSelect?.children ?? []).map((option) => option.textContent))}`,
   )
   // ⚠️ 抓的是**快照值**而不是对象引用：拿引用比会在"实现把对象换掉"时照样通过（空转）。
@@ -10015,12 +10021,12 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   )
   flushFrames()
 
-  // ---- 覆盖色：设了能清掉（清 = 删字段，不是写 null）----
+  // ---- 单格叠加色：设了能清掉（清 = 删字段，不是写 null）----
   clickWorld({ x: 0, y: 0 })
   changeField('field-c', '#123456')
-  check('覆盖色写进了文档', doc().markers[0]?.c === '#123456', String(doc().markers[0]?.c))
+  check('单格叠加色写进了文档', doc().markers[0]?.c === '#123456', String(doc().markers[0]?.c))
   const clearButton = fieldEl('clear-c')
-  check('有覆盖色时「清除」可用', clearButton?.disabled === false, String(clearButton?.disabled))
+  check('有单格叠加色时「清除」可用', clearButton?.disabled === false, String(clearButton?.disabled))
   clearButton.dispatchEvent({ type: 'click' })
   flushFrames()
   check(
@@ -10048,17 +10054,17 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   changeField('type', 'mountain')
   check('改地形种类写进了文档', doc().terrain[cellKey(6, 0)]?.t === 'mountain', String(doc().terrain[cellKey(6, 0)]?.t))
 
-  // ---- 数据层：地块上的温度 / 深度（「一格多值」的前两个正式字段）----
+  // ---- 数值图层：地块上的温度 / 深度（「一格多值」的前两个正式字段）----
   // 它们**不该**混进「外观」组：那句提示说的是"只影响这一个对象"，而温度是给覆盖层上色用的
   check(
-    '地块多出一组「数据层」，且没有污染「外观」组',
+    '地块多出一组「数值图层」，且没有污染「外观」组',
     groupEl('data') !== undefined &&
       collectByClass(panel.contentEl, 'fc-selection-group').map((el) => el.dataset?.fcGroup).join(',') ===
         'type,position,appearance,data',
     JSON.stringify(collectByClass(panel.contentEl, 'fc-selection-group').map((el) => el.dataset?.fcGroup)),
   )
   const undoBeforeTemp = editor.getStatus().undo
-  groupEl('data').open = true // 模拟用户点开「数据层」这一组
+  groupEl('data').open = true // 模拟用户点开「数值图层」这一组
   commitInput('field-temp', '-12.5')
   check(
     '改完一个字段后，展开着的组仍然是展开的（不用每次重新点开）',
@@ -10090,7 +10096,7 @@ console.log('\n场景 39：侧栏就地编辑（类型 / 位置 / 外观，三�
   const undoBeforeOutOfRange = editor.getStatus().undo
   commitInput('field-depth', '99999')
   check(
-    '超出色带全部锚点的值照样写得进去（数据层没有取值区间：色带两端只决定怎么染色）',
+    '超出配色全部锚点的值照样写得进去（数值图层没有取值区间：配色两端只决定怎么染色）',
     doc().terrain[cellKey(6, 0)]?.depth === 99999 && editor.getStatus().undo === undoBeforeOutOfRange + 1,
     JSON.stringify(doc().terrain[cellKey(6, 0)]),
   )
@@ -10301,8 +10307,8 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     `tag=${String(defaultsGroup?.tagName)} open=${String(defaultsGroup?.open)}`,
   )
   check(
-    '折叠只是"收起"，不是"拿掉"：这一组里仍然摆着名称字体族那一行',
-    FakeSetting.created.some((setting) => setting.containerEl === defaultsGroup && setting.info.name === '名称字体族'),
+    '折叠只是"收起"，不是"拿掉"：这一组里仍然摆着名称字体那一行',
+    FakeSetting.created.some((setting) => setting.containerEl === defaultsGroup && setting.info.name === '名称字体'),
     String(FakeSetting.created.filter((setting) => setting.containerEl === defaultsGroup).map((setting) => setting.info.name)),
   )
   check(
@@ -10655,9 +10661,9 @@ console.log('\n场景 41：重刷地形不得抹掉格上其它键（F1 —— �
   plugin.onunload()
 }
 
-console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 → 色带 → 画布')
+console.log('\n场景 42：数值图层（温度覆盖层）—— 格上的值 → 配色 → 画布')
 {
-  // 这一场是"温度模板"的端到端：值进格 → 色带算色 → 画布画出色块 → 改设置立刻变 → 关层不画。
+  // 这一场是"温度模板"的端到端：值进格 → 配色算色 → 画布画出色块 → 改设置立刻变 → 关层不画。
   // 深度与生物群系以后照抄这一套（字段表里加一行 + 图层表里加一行）。
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -10685,16 +10691,16 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
     return ctx
   }
 
-  // 四格：两个在色带内（正好落在锚点上，颜色可精确断言）、一个低于下限、一个高于上限。
-  // -200 刻意**同时**超出旧的 TEMP_RANGE（-100）：数据层没有取值区间，越界只体现在颜色上。
+  // 四格：两个在配色内（正好落在锚点上，颜色可精确断言）、一个低于下限、一个高于上限。
+  // -200 刻意**同时**超出旧的 TEMP_RANGE（-100）：数值图层没有取值区间，越界只体现在颜色上。
   document_.terrain['0_0'] = { t: 'forest', temp: 15 }
   document_.terrain['1_0'] = { temp: -200 }
   document_.terrain['0_1'] = { t: 'plains', temp: 0 }
-  // 200 越出上限一个色带跨度（75 ℃）以上 ⇒ 直接落在"极黑"那一档，颜色可逐字断言
+  // 200 越出上限一个配色跨度（75 ℃）以上 ⇒ 直接落在"极黑"那一档，颜色可逐字断言
   document_.terrain['2_0'] = { t: 'water', temp: 200 }
   check('第 2 格只有温度、没有地形（F2 之后这是合法状态）', document_.terrain['1_0'].t === undefined)
 
-  // ---- 默认隐藏：数据层不该在用户没要求时改变现有画面 ----
+  // ---- 默认隐藏：数值图层不该在用户没要求时改变现有画面 ----
   frame()
   check(
     '出厂状态下温度层不在绘制序列里',
@@ -10721,9 +10727,9 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
   )
   const overlayFills = () => overlayFrame.fills.filter((fill) => fill.alpha > 0 && fill.alpha < 1)
   const hasFill = (color) => overlayFills().some((fill) => fill.fillStyle === color)
-  check('色带内的 15℃ 用的是 15 那个锚点的颜色', hasFill('#22c55e'), JSON.stringify(overlayFills().map((f) => f.fillStyle)))
-  check('色带内的 0℃ 用的是 0 那个锚点的颜色', hasFill('#00c8c8'))
-  // 越界不是"贴一个纯色"：刚出界是端色，越走越远渐变成极色（行程 = 一个色带跨度 = 75 ℃）。
+  check('配色内的 15℃ 用的是 15 那个锚点的颜色', hasFill('#22c55e'), JSON.stringify(overlayFills().map((f) => f.fillStyle)))
+  check('配色内的 0℃ 用的是 0 那个锚点的颜色', hasFill('#00c8c8'))
+  // 越界不是"贴一个纯色"：刚出界是端色，越走越远渐变成极色（行程 = 一个配色跨度 = 75 ℃）。
   // -200℃ / 200℃ 都越出去一个跨度以上 ⇒ 直接落在两端极色上。
   check('远远低于下限的 -200℃ 渐变成纯白（under → 极白）', hasFill('#ffffff'))
   check('远远高于上限的 200℃ 渐变成纯黑（over → 极黑）', hasFill('#000000'))
@@ -10747,7 +10753,7 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
     JSON.stringify(overlayFrame.texts.map((item) => `${item.text}@${item.fillStyle}`)),
   )
   check(
-    '写出的是它们的实际数值（不是被夹到色带端点）',
+    '写出的是它们的实际数值（不是被夹到配色端点）',
     overlayFrame.texts.map((item) => item.text).sort().join(',') === '-200,200',
     overlayFrame.texts.map((item) => item.text).join(','),
   )
@@ -10757,21 +10763,21 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
     JSON.stringify(overlayFrame.texts.map((item) => item.text)),
   )
 
-  // ---- 图例：色带条目（有值格数 / 两端刻度 / 越界两项只在真有越界格时出现）----
+  // ---- 图例：配色条目（有值格数 / 两端刻度 / 越界两项只在真有越界格时出现）----
   await plugin.setShowLegend(true)
   await tick(20)
   const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
   const rampRows = () => collectByClass(legendEl(), 'fc-legend-row').filter((row) => row.dataset.kind === 'ramp')
-  check('图例里出现一条色带（不是色块分类）', rampRows().length === 1, String(rampRows().length))
+  check('图例里出现一条配色（不是色块分类）', rampRows().length === 1, String(rampRows().length))
   check(
-    '色带条目的名字带单位、次数是有值的格数',
+    '配色条目的名字带单位、次数是有值的格数',
     collectByClass(rampRows()[0], 'fc-legend-label')[0]?.textContent === '温度（℃）' &&
       collectByClass(rampRows()[0], 'fc-legend-count')[0]?.textContent === '4',
     `${collectByClass(rampRows()[0], 'fc-legend-label')[0]?.textContent} / ${collectByClass(rampRows()[0], 'fc-legend-count')[0]?.textContent}`,
   )
   const rampBar = () => collectByClass(rampRows()[0], 'fc-legend-ramp')[0]
   check(
-    '渐变条按锚点画（两端就是色带的最低/最高锚点）',
+    '渐变条按锚点画（两端就是配色的最低/最高锚点）',
     (rampBar()?.style.backgroundImage ?? '').includes('#0000ff 0.00%') &&
       (rampBar()?.style.backgroundImage ?? '').includes('#ff0000 100.00%'),
     String(rampBar()?.style.backgroundImage),
@@ -10788,7 +10794,7 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
     outItems().join(' | '),
   )
 
-  // 改色带 → 图例里的渐变也得跟着变（签名必须覆盖色带，否则会停在旧图上）
+  // 改配色 → 图例里的渐变也得跟着变（签名必须单格叠加配色，否则会停在旧图上）
   const legendRamp = plugin.getSettings().overlays.temperature.ramp
   await plugin.setOverlayStyle('temperature', {
     ramp: { ...legendRamp, stops: legendRamp.stops.map((stop) => (stop.value === -30 ? { ...stop, color: '#0044ff' } : stop)) },
@@ -10821,7 +10827,7 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
   await tick(20)
   frame()
   check('关掉温度层后一格色块都不画', stats().lastOverlayDrawn === 0, String(stats().lastOverlayDrawn))
-  check('关掉温度层后图例里的色带条目也跟着消失（图例与画布同一份开关）', rampRows().length === 0, String(rampRows().length))
+  check('关掉温度层后图例里的配色条目也跟着消失（图例与画布同一份开关）', rampRows().length === 0, String(rampRows().length))
   check(
     '关层不改数据：格上的温度仍在',
     document_.terrain['0_0'].temp === 15 && document_.terrain['1_0'].temp === -200,
@@ -10831,51 +10837,169 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
   const saved = app.vault.files.get(file.path) ?? ''
   check('落盘后温度写在地图文件里（正式字段）', saved.includes('"temp":15'), saved.slice(0, 160))
 
-  // ---- 设置页「数据层」一组：参数都在这里，且能改进去 ----
+  // ---- 设置页「数值图层」一组：参数都在这里，且能改进去 ----
   FakeSetting.created.length = 0
   plugin.settingTabs[0].display()
   const settingNamed = (fragment) =>
     FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
-  check('设置页有「温度层的不透明度」滑块', settingNamed('温度层的不透明度')?.slider !== null)
+  check('设置页有「温度层的不透明度」滑块', settingNamed(OVERLAY_CONTROL_LABELS.opacity('温度'))?.slider !== null)
+  // ---- W2：配色改用「轴」编辑（一条轴 + 可拖动锚点 + 两端端帽）----
+  // 逐行控件与「低于下限 / 高于上限」两个颜色选择器**已被轴取代**（同一件事不留两个家）
+  const settingsRoot = plugin.settingTabs[0].containerEl
+  const axisRoot = () => collectByClass(settingsRoot, 'fc-ramp').find((el) => el.dataset?.fcRampAxis === 'temperature')
+  const axisPart = (className) => collectByClass(axisRoot(), className)
+  const axisHandles = () => axisPart('fc-ramp-handle')
+  const axisCap = (side) => axisPart('fc-ramp-cap').find((el) => el.dataset?.fcRampCap === side)
+  const axisColors = () => axisPart('fc-ramp-color')
+  const selectHandle = async (index) => {
+    fireEvent(axisHandles()[index], 'click')
+    await tick(20)
+    flushFrames()
+  }
+  const commitAxisValue = async (value) => {
+    const input = axisPart('fc-ramp-input')[0]
+    input.value = String(value)
+    fireEvent(input, 'change')
+    await tick(20)
+    flushFrames()
+  }
+  const commitAxisColor = async (picker, color) => {
+    picker.value = color
+    fireEvent(picker, 'change')
+    await tick(20)
+    flushFrames()
+  }
+
   check(
-    '五个色带锚点各自可改值 + 改色',
-    settingNamed('温度色带锚点 1（最低）')?.texts?.length === 1 &&
-      settingNamed('温度色带锚点 1（最低）')?.colorPickers?.length === 1 &&
-      settingNamed('温度色带锚点 5（最高）')?.texts?.length === 1,
-    String(FakeSetting.created.length),
+    '配色现在是一条轴：5 个锚点**按值成比例**摆开（温度出厂 -30…45）',
+    axisHandles().length === 5 &&
+      axisHandles()[0].style.left === '0.00%' &&
+      axisHandles()[2].style.left === '60.00%' &&
+      axisHandles()[4].style.left === '100.00%',
+    JSON.stringify(axisHandles().map((el) => el.style.left)),
   )
-  check('越界两端各有颜色选择器（低于下限 / 高于上限）', settingNamed('低于下限')?.colorPicker !== undefined && settingNamed('高于上限')?.colorPicker !== undefined)
-  check('有「在每个格上写出数值」开关', settingNamed('在每个格上写出数值')?.toggle !== undefined)
-  check('有「恢复出厂色带」按钮', settingNamed('恢复出厂色带')?.button?.text === '恢复默认')
+  check(
+    '两端端帽画出"端色 → 极色"（远远更低渐成白、远远更高渐成黑）',
+    String(axisCap('under')?.style?.backgroundImage).includes('#ffffff 0%') &&
+      String(axisCap('under')?.style?.backgroundImage).includes('#0000ff 100%') &&
+      String(axisCap('over')?.style?.backgroundImage).includes('#000000 100%'),
+    `${String(axisCap('under')?.style?.backgroundImage)} | ${String(axisCap('over')?.style?.backgroundImage)}`,
+  )
+  check('轴上有「新建锚点」入口', axisPart('fc-ramp-add')[0] !== undefined)
+  check('有「在每个格上写出数值」开关', settingNamed(OVERLAY_CONTROL_LABELS.showValues)?.toggle !== undefined)
+  check('有「恢复出厂配色」按钮', settingNamed(OVERLAY_CONTROL_LABELS.resetRamp)?.button?.text === '恢复默认')
 
   // 连续改两个锚点：两次都要留下（用"渲染时的快照"写就会把前一次覆盖掉）
-  await settingNamed('温度色带锚点 1（最低）').texts[0].type('-20')
-  await settingNamed('温度色带锚点 2').texts[0].type('5')
-  await tick(20)
+  await selectHandle(0)
+  await commitAxisValue('-20')
+  await selectHandle(1)
+  await commitAxisValue('5')
   const edited = plugin.getSettings().overlays.temperature.ramp.stops
   check(
     '连续改两个锚点，两次改动都在',
     edited[0].value === -20 && edited[1].value === 5,
     JSON.stringify(edited.map((stop) => stop.value)),
   )
-  await settingNamed('温度色带锚点 1（最低）').colorPickers[0].pick('#0044ff')
-  await tick(20)
+  await selectHandle(0)
+  await commitAxisColor(axisColors()[0], '#0044ff')
   check('改锚点颜色写进设置', plugin.getSettings().overlays.temperature.ramp.stops[0].color === '#0044ff')
-  await settingNamed('低于下限').colorPicker.pick('#00ff88')
+
+  // ---- 拖动：pointerdown → pointermove → pointerup。拖动中不落盘，抬手才写 -
+  const dragBefore = plugin.getSettings().overlays.temperature.ramp.stops[2].value
+  const trackEl = axisPart('fc-ramp-track')[0]
+  trackEl._rect = { left: 0, top: 0, width: 100, height: 12 }
+  const dragHandle = axisHandles()[2]
+  fireEvent(dragHandle, 'pointerdown', { clientX: 60 })
+  fireEvent(dragHandle, 'pointermove', { clientX: 60 })
+  check(
+    '拖动过程中不写设置（一次拖动只落一次盘）',
+    plugin.getSettings().overlays.temperature.ramp.stops[2].value === dragBefore,
+    String(plugin.getSettings().overlays.temperature.ramp.stops[2].value),
+  )
+  fireEvent(dragHandle, 'pointerup', {})
   await tick(20)
-  check('改越界色写进设置', plugin.getSettings().overlays.temperature.ramp.under.color === '#00ff88')
-  await settingNamed('在每个格上写出数值').toggle.handler(true)
+  flushFrames()
+  check(
+    '拖动锚点改的是它自己的值（位置按轴长换算：轴长 60% 处 = -20 + 0.6×65 = 19）',
+    plugin.getSettings().overlays.temperature.ramp.stops[2].value !== dragBefore &&
+      plugin.getSettings().overlays.temperature.ramp.stops[2].value === 19,
+    `${dragBefore} → ${String(plugin.getSettings().overlays.temperature.ramp.stops[2].value)}`,
+  )
+
+  // 拖到邻居身上会被**挡住**（否则两条锚点会叠在一起，那一段的渐变率变成除零）
+  fireEvent(axisHandles()[2], 'pointerdown', { clientX: 60 })
+  fireEvent(axisHandles()[2], 'pointermove', { clientX: 2 })
+  fireEvent(axisHandles()[2], 'pointerup', {})
+  await tick(20)
+  flushFrames()
+  const clampedStops = plugin.getSettings().overlays.temperature.ramp.stops
+  check(
+    '拖过邻居会被挡住（夹取把值挡在邻居内侧，**邻居自己一个字节没动**）',
+    // 只断言"仍落在邻居之间"是空转的：写入口会按值排序，去掉夹取照样满足。
+    // 必须再钉一条"邻居没被换位"——去掉夹取时被拖的值会插到邻居左边，邻居就变成下一条了。
+    clampedStops[1].value === 5 &&
+      clampedStops[2].value > clampedStops[1].value &&
+      clampedStops[2].value < clampedStops[3].value,
+    JSON.stringify(clampedStops.map((stop) => stop.value)),
+  )
+
+  // ---- 端帽：改的是这张地图的限度值 + 越界两色（用户 m01702 第 2 条）----
+  fireEvent(axisCap('under'), 'click')
+  await tick(20)
+  flushFrames()
+  check('点端帽后检视行说的是"低于最低限度"', axisPart('fc-ramp-who')[0]?.textContent === '低于最低限度')
+  await commitAxisColor(axisColors()[0], '#00ff88')
+  check('改端帽颜色写进设置', plugin.getSettings().overlays.temperature.ramp.under.color === '#00ff88')
+  await commitAxisColor(axisColors()[1], '#112233')
+  check(
+    '改端帽的极色写进设置（W1 的 farColor 第一次有界面）',
+    plugin.getSettings().overlays.temperature.ramp.under.farColor === '#112233',
+  )
+  await commitAxisValue('-40')
+  check(
+    '端帽改的是最低限度的**值**，不是端色（拖值不动色）',
+    plugin.getSettings().overlays.temperature.ramp.stops[0].value === -40 &&
+      plugin.getSettings().overlays.temperature.ramp.stops[0].color === '#0044ff',
+  )
+
+  // ---- 新建 / 删除 ----
+  const beforeAdd = plugin.getSettings().overlays.temperature.ramp.stops.length
+  fireEvent(axisPart('fc-ramp-add')[0], 'click')
+  await tick(20)
+  flushFrames()
+  const addedStops = plugin.getSettings().overlays.temperature.ramp.stops
+  check(
+    '新建锚点插在最大缺口的中点，其它锚点不动',
+    addedStops.length === beforeAdd + 1 && addedStops.some((stop) => stop.value === -17.5),
+    JSON.stringify(addedStops.map((stop) => stop.value)),
+  )
+  for (let round = 0; round < 6; round += 1) {
+    await selectHandle(0)
+    const button = axisPart('fc-ramp-delete')[0]
+    if (button === undefined || button.disabled) break
+    fireEvent(button, 'click')
+    await tick(20)
+    flushFrames()
+  }
+  await selectHandle(0)
+  check(
+    '删到只剩两条锚点时删除入口被**禁用**（不是点了没反应）',
+    plugin.getSettings().overlays.temperature.ramp.stops.length === 2 &&
+      axisPart('fc-ramp-delete')[0]?.disabled === true,
+    String(plugin.getSettings().overlays.temperature.ramp.stops.length),
+  )
+  await settingNamed(OVERLAY_CONTROL_LABELS.showValues).toggle.handler(true)
   await tick(20)
   check('打开"写出数值"写进设置', plugin.getSettings().overlays.temperature.showValues === true)
-  await settingNamed('恢复出厂色带').button.click()
+  await settingNamed(OVERLAY_CONTROL_LABELS.resetRamp).button.click()
   await tick(20)
   const restored = plugin.getSettings().overlays.temperature.ramp
   check(
-    '恢复出厂色带：锚点与越界色都回出厂值',
+    '恢复出厂配色：锚点与越界色都回出厂值',
     restored.stops[0].value === -30 && restored.stops[0].color === '#0000ff' && restored.under.color === '#0000ff',
     JSON.stringify(restored.stops.map((stop) => `${stop.value}:${stop.color}`)),
   )
-  check('恢复出厂色带不动"写出数值"开关', plugin.getSettings().overlays.temperature.showValues === true)
+  check('恢复出厂配色不动"写出数值"开关', plugin.getSettings().overlays.temperature.showValues === true)
 
   // ---- 打开"所有格写数值"之后：四格都写（越界那两格本来就写）----
   await plugin.setLayerVisible('temperature', true)
@@ -10895,11 +11019,11 @@ console.log('\n场景 42：数据层（温度覆盖层）—— 格上的值 →
   plugin.onunload()
 }
 
-// ================================================== 场景 43：深度层 —— 色带 / 展示单位 / 标定
-console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 → 地图级海拔标定 → 关层不画')
+// ================================================== 场景 43：深度层 —— 配色 / 展示单位 / 标定
+console.log('\n场景 43：深度层 —— 配色染色 → 展示单位换算 → 地图级海拔标定 → 关层不画')
 {
-  // 深度是"温度模板"的第二份：字段表加一行 + 图层表加一行，就有了完整的一条数据层。
-  // 这一场盯的是深度独有的那几件事：色带是"浅米→浅蓝→深蓝"、越界是白 / 近黑蓝（不是温度的蓝红）、
+  // 深度是"温度模板"的第二份：字段表加一行 + 图层表加一行，就有了完整的一条数值图层。
+  // 这一场盯的是深度独有的那几件事：配色是"浅米→浅蓝→深蓝"、越界是白 / 近黑蓝（不是温度的蓝红）、
   // 数值与图例刻度按**展示单位**换算（米 / 千米 / 相对值）、标定写进地图文件（可撤销）。
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -10944,7 +11068,7 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
   frame()
   check('出厂状态下深度层不在绘制序列里', stats().lastDrawOrder.includes('depth') === false, stats().lastDrawOrder.join(','))
 
-  // ---- 打开深度层：色带颜色 + 越界两端 + 深浅次序 ----
+  // ---- 打开深度层：配色颜色 + 越界两端 + 深浅次序 ----
   await plugin.setLayerVisible('depth', true)
   await tick(20)
   const overlayFrame = frame()
@@ -10992,7 +11116,7 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
   await tick(20)
   const legendEl = () => collectByClass(wrapper, 'fc-legend')[0]
   const rampRows = () => collectByClass(legendEl(), 'fc-legend-row').filter((row) => row.dataset.kind === 'ramp')
-  check('图例里出现深度那一条色带（温度层关着，所以只有它）', rampRows().length === 1, String(rampRows().length))
+  check('图例里出现深度那一条配色（温度层关着，所以只有它）', rampRows().length === 1, String(rampRows().length))
   const depthRow = () => rampRows().find((row) => (collectByClass(row, 'fc-legend-label')[0]?.textContent ?? '').includes('深度'))
   check('深度条目的标题跟着展示单位走', (collectByClass(depthRow(), 'fc-legend-label')[0]?.textContent ?? '') === '深度 / 海拔（km）')
   const depthBar = () => collectByClass(depthRow(), 'fc-legend-ramp')[0]
@@ -11088,7 +11212,7 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
   await plugin.setOverlayStyle('depth', { ramp: { ...plugin.getSettings().overlays.depth.ramp, stops: [] } })
   await tick(20)
   check(
-    '深度色带坏掉时回退到深度自己的出厂（over 仍是纯白）',
+    '深度配色坏掉时回退到深度自己的出厂（over 仍是纯白）',
     plugin.getSettings().overlays.depth.ramp.over.color === '#ffffff',
     plugin.getSettings().overlays.depth.ramp.over.color,
   )
@@ -11097,9 +11221,9 @@ console.log('\n场景 43：深度层 —— 色带染色 → 展示单位换算 
 }
 
 // ================================================== 场景 44：连续场（等温线 / 等高线）
-console.log('\n场景 44：数据层的连续场 —— 插值 + 等值线 + 采样缓存')
+console.log('\n场景 44：数值图层的连续场 —— 插值 + 等值线 + 采样缓存')
 {
-  // 用户可见目标：数据层不只"每格涂一块"，还能把格心值插成连续面并画等值线（不局限于六边形格）。
+  // 用户可见目标：数值图层不只"每格涂一块"，还能把格心值插成连续面并画等值线（不局限于六边形格）。
   // 这一场同时盯**缓存**：IDW 每帧重算是不可接受的，第二帧必须命中。
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -11180,7 +11304,7 @@ console.log('\n场景 44：数据层的连续场 —— 插值 + 等值线 + 采
     String(fieldFrame.calls.strokeText),
   )
   check(
-    '等值线的颜色来自色带（该值在色带里的颜色）',
+    '等值线的颜色来自配色（该值在配色里的颜色）',
     fieldFrame.groups.some((group) => rampColors.includes(group.strokeStyle)),
     JSON.stringify([...new Set(fieldFrame.groups.map((group) => group.strokeStyle))].slice(0, 8)),
   )
@@ -11256,16 +11380,16 @@ console.log('\n场景 44：数据层的连续场 —— 插值 + 等值线 + 采
   const named = (fragment) => FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
   check(
     '设置页有「温度的显示方式」下拉，选项是逐格 / 连续场',
-    (named('温度的显示方式')?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'cell,field',
-    JSON.stringify(named('温度的显示方式')?.dropdowns?.[0]?.options),
+    (named(OVERLAY_CONTROL_LABELS.mode('温度'))?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'cell,field',
+    JSON.stringify(named(OVERLAY_CONTROL_LABELS.mode('温度'))?.dropdowns?.[0]?.options),
   )
-  check('逐格模式下不显示等值线间距（参数只在需要时出现）', named('温度的等值线间距') === undefined)
-  await named('温度的显示方式').dropdowns[0].select('field')
+  check('逐格模式下不显示等值线间距（参数只在需要时出现）', named(OVERLAY_CONTROL_LABELS.contourInterval('温度')) === undefined)
+  await named(OVERLAY_CONTROL_LABELS.mode('温度')).dropdowns[0].select('field')
   await tick(20)
   FakeSetting.created.length = 0
   plugin.settingTabs[0].display()
-  check('切到连续场后设置里出现等值线间距', named('温度的等值线间距') !== undefined)
-  await named('温度的等值线间距').texts[0].type('5')
+  check('切到连续场后设置里出现等值线间距', named(OVERLAY_CONTROL_LABELS.contourInterval('温度')) !== undefined)
+  await named(OVERLAY_CONTROL_LABELS.contourInterval('温度')).texts[0].type('5')
   await tick(20)
   check('等值线间距写进设置', plugin.getSettings().overlays.temperature.contourInterval === 5, String(plugin.getSettings().overlays.temperature.contourInterval))
 
@@ -11273,7 +11397,7 @@ console.log('\n场景 44：数据层的连续场 —— 插值 + 等值线 + 采
 }
 
 // ================================================== 场景 45：导出 / Base 缩略图带上叠加层
-console.log('\n场景 45：导出（SVG / PNG）带上数据层叠加层 —— 与画布同一份几何')
+console.log('\n场景 45：导出（SVG / PNG）带上数值图层叠加层 —— 与画布同一份几何')
 {
   // 工单 D 的验收：图层开关生效、形状与画布一致、越界色一致、导出里默认不写数值。
   const canvas = makeCanvas()
@@ -11377,7 +11501,7 @@ console.log('\n场景 45：导出（SVG / PNG）带上数据层叠加层 —— 
     const exportNotice = noticeLog.filter((line) => line.includes('已导出地图 SVG')).at(-1) ?? ''
     check(
       '导出提示里写明颜色面走了哪条路（含体积）',
-      exportNotice.includes('数据层导出：温度：内联栅格（') && exportNotice.includes('KiB'),
+      exportNotice.includes('数值图层导出：温度：内联栅格（') && exportNotice.includes('KiB'),
       exportNotice.replace(/\n/g, ' ⏎ '),
     )
   }
@@ -11443,7 +11567,7 @@ console.log('\n场景 45：导出（SVG / PNG）带上数据层叠加层 —— 
   plugin.onunload()
 }
 
-// ================================================== 场景 46：数据层每格默认值（§B）
+// ================================================== 场景 46：数值图层每格默认值（§B）
 console.log('\n场景 46：每格默认值 —— 兜底只影响渲染、真值优先、清空即删键')
 {
   // 用户可见目标（原话）："如果有地方没有温度和深度的话就没有渲染，我认为每个格子初始应该自带一个值，
@@ -11547,7 +11671,7 @@ console.log('\n场景 46：每格默认值 —— 兜底只影响渲染、真值
   const fallbackFrame = frame()
   check('兜底格也画出来了（"画过的地方整片都有颜色"）', stats().lastOverlayDrawn === 3, String(stats().lastOverlayDrawn))
   check(
-    '兜底格用的是**默认值在色带里的颜色**（30 ℃ → 橙 #f59e0b）',
+    '兜底格用的是**默认值在配色里的颜色**（30 ℃ → 橙 #f59e0b）',
     fallbackFrame.fills.some((fill) => fill.fillStyle === '#f59e0b' && Math.abs(fill.alpha - 0.5) < 1e-9),
     JSON.stringify([...new Set(fallbackFrame.fills.map((fill) => fill.fillStyle))]),
   )
@@ -11646,7 +11770,7 @@ console.log('\n场景 47：等值线数字 —— 描边与字色相反、字号
   await tick(20)
   const cellFrame = frame()
   const cellPx = pxOf(cellFrame.texts.find((item) => item.kind === 'fill') ?? { font: '' })
-  // 间距取 10：色带两端都落在层级上（-30 = 纯蓝 → 白字；40 附近 → 深字），
+  // 间距取 10：配色两端都落在层级上（-30 = 纯蓝 → 白字；40 附近 → 深字），
   // 这样"深底白字配深边 / 浅底深字配浅边"两种情况都能在同一帧里出现
   await plugin.setOverlayStyle('temperature', { mode: 'field', contourInterval: 10 })
   await tick(20)
@@ -12130,7 +12254,7 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
   plugin.onunload()
 }
 
-console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷（§E）—— 逐格纯色 / 设为 ID / ＋−×÷')
+console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔刷（§E）—— 逐格纯色 / 设为 ID / ＋−×÷')
 {
   // §D 与 §E 的共同点：**语义**比崩溃更容易悄悄变（分类值被插值成渐变、"没量过"被当成 0、
   // 换一层之后笔上还带着上一层的数）。所以断言直接看「格上写了什么」与「画布上什么颜色」，
@@ -12241,7 +12365,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   check('群系下拉在温度层下不渲染（不是"渲染了再藏"）', brushBiomeSelect() === undefined, String(brushBiomeSelect()))
   check(
     '状态条说清"为什么刷不动"（不是让用户猜）',
-    statusEl.textContent === '编辑：数据层笔刷 · 请先填一个数值',
+    statusEl.textContent === '编辑：数值图层笔刷 · 请先填一个数值',
     statusEl.textContent,
   )
   strokeAt(worldOf(0, 0))
@@ -12359,7 +12483,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   check('分类字段才显示群系下拉', brushBiomeSelect() !== undefined)
   check(
     '没选群系就刷不动，状态条说明',
-    statusEl.textContent === '编辑：数据层笔刷 · 请先选一个生物群系',
+    statusEl.textContent === '编辑：数值图层笔刷 · 请先选一个生物群系',
     statusEl.textContent,
   )
   strokeAt(worldOf(0, 0))
@@ -12399,10 +12523,10 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
   check('分类字段不写数值文字（它的值不是数）', stats().lastOverlayLabels === 0, String(stats().lastOverlayLabels))
   check('分类字段没有等值线', stats().lastOverlayContours === 0, String(stats().lastOverlayContours))
 
-  // ---- ⑩ 图例：逐个群系一行（不是一条色带）----
+  // ---- ⑩ 图例：逐个群系一行（不是一条配色）----
   await plugin.setShowLegend(true)
   await tick(20)
-  check('图例里没有生物群系的色带条目（分类值之间没有高低）', legendRows('ramp').every((row) => !rowOf(row).label.includes('生物群系')))
+  check('图例里没有生物群系的配色条目（分类值之间没有高低）', legendRows('ramp').every((row) => !rowOf(row).label.includes('生物群系')))
   check(
     '图例里逐个群系一行：显示名 + 格数 + 目录色',
     legendRows('biome').length === 1 &&
@@ -12430,7 +12554,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
     JSON.stringify(overlayFills(unknownFrame).map((fill) => fill.fillStyle)),
   )
 
-  // ---- ⑫ 设置页：分类字段是"逐条颜色"，不是色带 ----
+  // ---- ⑫ 设置页：分类字段是"逐条颜色"，不是配色 ----
   FakeSetting.created.length = 0
   plugin.settingTabs[0].display()
   const biomeColorSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').startsWith('沙漠（'))
@@ -12579,7 +12703,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数据层笔刷�
 console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 整理 W1④）—— 每个开关只出现一次 + 每层的「画法」跟着层走')
 {
   // 这一场的重点不是"有没有画出来"，而是**同一件事只有一个入口**、且**位置符合用户口径**：
-  // 分组来自图层登记表的一列、图例开关只挂在地物组里、数据层参数与设置页是同一份渲染，
+  // 分组来自图层登记表的一列、图例开关只挂在地物组里、数值图层参数与设置页是同一份渲染，
   // 而「视图」一节把底图 / 地物两小组折进去、每一层的「画法」长在它自己那一行里。
   const canvas = makeCanvas()
   const app = makeApp(canvas)
@@ -12595,7 +12719,7 @@ console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 
 
   const wrapper = canvas.wrapperEl
   const document_ = layers.getDocument(canvasPath)
-  // 一格生物群系：数据层那一组只列"地图上真的出现过"的分类
+  // 一格生物群系：数值图层那一组只列"地图上真的出现过"的分类
   document_.terrain[cellKey(0, 0)] = { t: 'forest', biome: 'desert' }
   // 另两格给"多格摘要"用（其中 1_0 **一个数据字段都没有**，看摘要有没有如实报出来）
   document_.terrain[cellKey(1, 0)] = { t: 'water' }
@@ -12672,19 +12796,19 @@ console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 
   flushFrames()
   check('再点一次就关回去（同一个入口开、也由它关）', plugin.getSettings().showLegend === false)
 
-  // ---- ③ 数据层的「画法」**跟着它那一层走**（用户本轮口径：折进「视图」里跟着层走）----
+  // ---- ③ 数值图层的「画法」**跟着它那一层走**（用户本轮口径：折进「视图」里跟着层走）----
   const rowOf = (key) => collectByClass(panel.contentEl, 'fc-layer-row').find((el) => el.dataset?.fcLayerRow === key)
   const drawToggle = (key) => collectByClass(rowOf(key), 'fc-layer-draw-toggle')[0]
   const drawBody = (key) => collectByClass(rowOf(key), 'fc-layer-draw-body')[0]
   const dataFields = ['temperature', 'depth', 'biome']
   const plainLayers = ['terrain', 'grid', 'regions', 'paths', 'markers', 'labels']
   check(
-    '「画法」只长在数据层那三行上（其余六层没有可调的东西，不摆一个点了没反应的）',
+    '「画法」只长在数值图层那三行上（其余六层没有可调的东西，不摆一个点了没反应的）',
     dataFields.every((key) => drawToggle(key) !== undefined) && plainLayers.every((key) => drawToggle(key) === undefined),
     `${dataFields.filter((key) => drawToggle(key) !== undefined).join(',')} / ${plainLayers.filter((key) => drawToggle(key) !== undefined).join(',')}`,
   )
   check(
-    '默认收起：一个画法控件都没有（面板首屏不被色带锚点占满）',
+    '默认收起：一个画法控件都没有（面板首屏不被配色锚点占满）',
     collectByClass(panel.contentEl, 'fc-layer-draw-body').length === 0,
     String(collectByClass(panel.contentEl, 'fc-layer-draw-body').length),
   )
@@ -12703,15 +12827,17 @@ console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 
     String(drawBody('temperature')?.dataset?.fcOverlayField),
   )
   check(
-    '展开的那一行独占整行（半个格子放不下"色带锚点"那一行的输入框 + 取色器）',
+    '展开的那一行独占整行（半个格子放不下那条轴 + 取色器）',
     rowOf('temperature')?.dataset?.fcDrawOpen === '1',
     String(rowOf('temperature')?.dataset?.fcDrawOpen),
   )
   check('别的层没跟着展开（展开是逐层的，不是一整节）', drawBody('depth') === undefined && drawBody('biome') === undefined)
   panelSettingNames.push(...FakeSetting.created.map((setting) => setting.info.name ?? ''))
   check(
-    '「画法」就是这一层的参数：色带锚点 / 不透明度 / 显示方式都在',
-    ['温度色带锚点 1（最低）', '温度层的不透明度', '温度的显示方式'].every((name) => panelSettingNames.includes(name)),
+    '侧栏「画法」只留配色的轴：出厂数值类（不透明度 / 显示方式）不在这里再摆一份（m01430 第二项）',
+    collectByClass(drawBody('temperature'), 'fc-ramp').some((el) => el.dataset?.fcRampAxis === 'temperature') &&
+      [OVERLAY_CONTROL_LABELS.opacity('温度'), OVERLAY_CONTROL_LABELS.mode('温度')].every((name) => panelSettingNames.includes(name) === false) &&
+      (collectByClass(drawBody('temperature'), 'fc-settings-note')[0]?.textContent ?? '').includes('在设置页'),
     JSON.stringify(panelSettingNames.slice(0, 6)),
   )
   check(
@@ -12722,7 +12848,7 @@ console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 
     })(),
   )
 
-  // 分类字段那一支：逐条颜色，没有色带锚点
+  // 分类字段那一支：逐条颜色，没有配色锚点
   FakeSetting.created.length = 0
   fireEvent(drawToggle('biome'), 'click')
   await tick(30)
@@ -12730,10 +12856,10 @@ console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 
   const biomeNames = FakeSetting.created.map((setting) => setting.info.name ?? '')
   panelSettingNames.push(...biomeNames)
   check(
-    '分类字段那一节是**逐条颜色**、没有色带锚点（分类值之间没有高低）',
+    '分类字段那一节是**逐条颜色**、没有配色锚点（分类值之间没有高低）',
     FakeSetting.created.some((setting) => setting.text?.inputEl?.dataset?.fcBiomeColor === 'desert') &&
       biomeNames.some((name) => name.includes('生物群系的逐条颜色')) &&
-      biomeNames.includes('生物群系色带锚点 1（最低）') === false,
+      collectByClass(drawBody('biome'), 'fc-ramp').length === 0,
     JSON.stringify(biomeNames.filter((name) => name.includes('生物群系')).slice(0, 4)),
   )
 
@@ -12742,21 +12868,31 @@ console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 
   plugin.settingTabs[0].display()
   const settingsNames = FakeSetting.created.map((setting) => setting.info.name ?? '')
   check(
-    '同一份渲染：面板与设置页创建出来的控件名**逐字相同**（不是各写一遍）',
-    ['温度色带锚点 1（最低）', '温度层的不透明度', '生物群系的逐条颜色'].every(
+    '同一份渲染：配色的轴两侧共用；出厂数值类只在设置页（面板里没有、设置页里有）',
+    ['生物群系的逐条颜色'].every(
       (name) => panelSettingNames.includes(name) && settingsNames.includes(name),
-    ),
-    JSON.stringify(settingsNames.filter((name) => name.includes('色带锚点')).slice(0, 2)),
+    ) &&
+      collectByClass(panel.contentEl, 'fc-ramp').some((el) => el.dataset?.fcRampAxis === 'temperature') &&
+      collectByClass(plugin.settingTabs[0].containerEl, 'fc-ramp').some((el) => el.dataset?.fcRampAxis === 'temperature') &&
+      panelSettingNames.includes(OVERLAY_CONTROL_LABELS.opacity('温度')) === false &&
+      settingsNames.includes(OVERLAY_CONTROL_LABELS.opacity('温度')),
+    JSON.stringify(settingsNames.filter((name) => name.includes('不透明度')).slice(0, 2)),
   )
 
-  FakeSetting.created.length = 0
   panel.render(true)
-  const anchorSetting = FakeSetting.created.find((setting) => setting.info.name === '温度色带锚点 1（最低）')
+  const panelAxis = () => collectByClass(panel.contentEl, 'fc-ramp').find((el) => el.dataset?.fcRampAxis === 'temperature')
+  const panelHandle = (index) => collectByClass(panelAxis(), 'fc-ramp-handle')[index]
   const before = plugin.getSettings().overlays.temperature.ramp.stops[0].value
-  await anchorSetting.text.type(String(before - 5))
+  fireEvent(panelHandle(0), 'click')
   await tick(20)
+  flushFrames()
+  const panelValueInput = collectByClass(panelAxis(), 'fc-ramp-input')[0]
+  panelValueInput.value = String(before - 5)
+  fireEvent(panelValueInput, 'change')
+  await tick(20)
+  flushFrames()
   check(
-    '在侧栏里改色带锚点 → 插件设置真的跟着变（面板不是只读镜像）',
+    '在侧栏的轴上改锚点 → 插件设置真的跟着变（面板不是只读镜像）',
     plugin.getSettings().overlays.temperature.ramp.stops[0].value === before - 5,
     `${before} → ${String(plugin.getSettings().overlays.temperature.ramp.stops[0].value)}`,
   )
@@ -12815,7 +12951,7 @@ console.log('\n场景 50：侧栏「视图」与面板定稿顺序（§F.1 + UI 
     `编辑组=${buttonInGroup('编辑', '按规则筛选选择') !== undefined} 地图层组=${buttonInGroup('地图层', '按规则筛选选择') !== undefined}`,
   )
   check(
-    '「地图层」组只剩地图级的东西（启用/停用地图层、海拔标定、数据层默认值）',
+    '「地图层」组只剩地图级的东西（启用/停用地图层、海拔标定、数值图层默认值）',
     collectByClass(groupTitled('地图层'), 'fc-panel-button-label')
       .map((el) => el.textContent ?? '')
       .join('|')

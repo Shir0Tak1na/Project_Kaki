@@ -1,5 +1,5 @@
 /**
- * 数据层的画布绘制：把**图元清单**落到 canvas 上。
+ * 数值图层的画布绘制：把**图元清单**落到 canvas 上。
  *
  * 它现在**不含任何几何**（这是工单 C 的核心要求）：取数、插值、等值线、颜色、
  * 甚至"哪些格该写数值"都在 `overlayPlan.ts` → `fieldPlan.ts` 那条纯函数链上算好，
@@ -9,9 +9,9 @@
  * 与 `shapeDraw.ts` 同一层：**碰 canvas，但不 import obsidian**（于是它测不了像素，
  * 但它的输入输出全是纯数据 —— 图元数、越界数、缓存命中都能被假 ctx 断言）。
  *
- * 一条关键事实（决定了取数方式）：**`plan.cells` 不是数据层的取数来源**。
+ * 一条关键事实（决定了取数方式）：**`plan.cells` 不是数值图层的取数来源**。
  * 那份计划只含"有地形"的格（没有 `t` 的格被地形计划跳过了），而"只有温度没有地形"的格
- * 恰恰是数据层最该画的东西（§5.40 的 F2 就是为了让它合法存在）。
+ * 恰恰是数值图层最该画的东西（§5.40 的 F2 就是为了让它合法存在）。
  * 所以样本来自 `overlayPlan.collectOverlaySamples(document, …)`（遍历 `document.terrain`）。
  */
 
@@ -41,7 +41,7 @@ export interface OverlayDrawContext {
   toRaster: (x: number, y: number) => { x: number; y: number }
   plan: MapRenderPlan
   document: MapDocument
-  /** 这一层的字段与样式；**不是数据层时为 undefined**，此时钩子什么都不做 */
+  /** 这一层的字段与样式；**不是数值图层时为 undefined**，此时钩子什么都不做 */
   overlay?: { spec: OverlayFieldSpec; style: OverlayStyle }
   /**
    * 连续场的**采样缓存**（由绘制层持有、每个字段一份）。
@@ -144,7 +144,7 @@ function rasterCanvasFor(
 }
 
 /**
- * 数据层的绘制钩子 —— `LAYER_TABLE` 里每一行数据层都挂它，`overlay` 决定画哪个字段。
+ * 数值图层的绘制钩子 —— `LAYER_TABLE` 里每一行数值图层都挂它，`overlay` 决定画哪个字段。
  *
  * 分三步：**算计划**（纯函数，连续场的采样走缓存）→ **剔除视口外** → **画**。
  * 返回值是**本帧的统计**：有了它，"叠加层没画出来"能被断言抓到，而不是靠肉眼看截图（同 §5.9）。

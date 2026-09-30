@@ -127,7 +127,7 @@ export interface CartographerSettings {
    */
   layers: LayerVisibility
   /**
-   * 数据层（温度 / 深度…）的渲染参数：色带、越界色、不透明度、是否画数值 —— **库级那一份**。
+   * 数值图层（温度 / 深度…）的渲染参数：配色、越界色、不透明度、是否画数值 —— **库级那一份**。
    *
    * 与 `layers` 的分工是**刻意**的：`layers` 管"看不看"，这里管"怎么看"。
    * 两边都只存一份（§5.12）—— 所以这里**没有** `visible` 字段，
@@ -191,7 +191,7 @@ export const DEFAULT_SETTINGS: CartographerSettings = {
   customMarkers: [],
   customBiomes: [],
   layers: DEFAULT_LAYER_VISIBILITY,
-  // 出厂色带 / 透明度：每次新对象，避免与 DEFAULT_SETTINGS 共用同一份引用
+  // 出厂配色 / 透明度：每次新对象，避免与 DEFAULT_SETTINGS 共用同一份引用
   overlays: defaultOverlayStyles(),
   showLegend: false,
   // 按地图分份的视图偏好：出厂是空的（每张图都用上面那三份"模板"）
@@ -284,7 +284,7 @@ export function normalizeSettings(raw: unknown): CartographerSettings {
     // `source.showGrid` 只作为**迁移输入**读一次：早期只有这一个开关，
     // 老用户把它关掉过的话必须变成"隐藏网格"，不能因为换代就把他的选择丢掉。
     layers: layerVisibilityFromLegacy({ showGrid: source.showGrid, layers: source.layers }),
-    // 数据层样式：缺项 / 坏值按出厂补齐（色带交给 colorRamp 自己的规范化）
+    // 数值图层样式：缺项 / 坏值按出厂补齐（配色交给 colorRamp 自己的规范化）
     overlays: normalizeOverlayStyles(source.overlays),
     showLegend: source.showLegend === true,
     // 按地图分份的视图偏好（W4-2）：老配置里没有这一项 ⇒ 空表 ⇒ 每张图都用上面那三份模板

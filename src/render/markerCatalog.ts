@@ -12,6 +12,7 @@
  * 4. 解析**永不返回 null**：绘制层每帧都会问它，任何"这里没有图标"的分支都会变成"某个标记消失"。
  */
 
+import { unknownTypeLabel } from '../ui/strings.ts'
 import { MARKER_ICONS, type MarkerIcon } from '../data/mapDocument.ts'
 import { lucideIconFor } from './markerPlacement.ts'
 import { checkTerrainImagePath } from './terrainCatalog.ts'
@@ -213,7 +214,7 @@ export function resolveMarkerStyle(id: string, custom: readonly CustomMarker[] =
   }
   return {
     id,
-    label: `未知（${id}）`,
+    label: unknownTypeLabel(id),
     iconName: FALLBACK_MARKER_ICON_NAME,
     imagePath: '',
     builtin: false,
