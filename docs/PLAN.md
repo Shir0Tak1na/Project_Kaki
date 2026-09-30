@@ -29,7 +29,7 @@
 
 - **仓库**：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0）。本机 `git push` **必须走 HTTP/1.1**（已配置）。
 - **基线**（2026-09-30 投影修复实测）：构建 **91 模块 / 1584.5 KiB** · `tsc` **0 错** · 单测 **694** ·
-  冒烟 **52 场景 / 1566 断言** · 已发布 **1.2.0**（2026-09-30）。
+  冒烟 **52 场景 / 1566 断言** · 已发布 **1.2.1**（2026-09-30，重要 bug 修复推 patch）。
 - **测试库**：`E:\ObsidianPulgins\test-vault`（`.obsidian/plugins/project-kaki`）。
   **真实库** `D:\TOS\万千旅路｜Thousands of Sands` **未经用户明确要求不得部署**。
 - **当前进度**（P1）：**A 已完成**（工程图式等值线标注 + D1 导出策略，已提交）；

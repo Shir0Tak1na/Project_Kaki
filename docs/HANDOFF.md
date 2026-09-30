@@ -392,6 +392,9 @@ node scripts/deploy.mjs
 
 ## 发版流程
 
+> **版本号策略（用户 2026-09-30 定）**：功能批次 → 小版本（1.2.0、1.3.0…）；
+> **重要 bug 修复 → patch 小版本立即发**（1.2.1、1.2.2…），不必等功能攒批。
+
 ```powershell
 node scripts/release.mjs 1.1.0 --dry-run   # 先看会改什么（不写盘）
 node scripts/release.mjs 1.1.0             # 真正把版本写进四处
