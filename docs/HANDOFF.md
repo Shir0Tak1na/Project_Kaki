@@ -24,7 +24,7 @@
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
 - 最近一次部署：`node scripts/deploy.mjs`
-- 单元测试：695 个通过
+- 单元测试：696 个通过
 - 冒烟测试：52 个场景、1601 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
 - **最新一轮（ISSUE-005：绘制模式拆出「自由绘制」，2026-09-30）**：路径/区域的绘制模式从三个变四个 ——

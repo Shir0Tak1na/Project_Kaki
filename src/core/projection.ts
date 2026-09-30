@@ -183,24 +183,34 @@ export function resolveProjection(evidence: ProjectionEvidence): ProjectionDecis
   }
 
   const matrixScale = evidence.matrixScale !== null && evidence.matrixScale > 0 ? evidence.matrixScale : null
+  // 第三道闸：采样对与矩阵缩放差 3 倍以上，更像是「采样期间视口在动」而不是宿主认错 —— 当它不可信。
+  // （前两道闸在调用方：采样前后指纹必须一致；`projectionFromPair` 自带轴向一致性校验。）
+  const plausibleSampleScale =
+    sampleScale !== null && matrixScale !== null && (sampleScale > matrixScale * 3 || sampleScale < matrixScale / 3)
+      ? null
+      : sampleScale
   const closedForm = evidence.closedFormOrigin
 
   const scaleDelta = matrixScale !== null && sampleScale !== null ? Math.abs(sampleScale - matrixScale) : null
+  const usableScale = plausibleSampleScale
   const chooseScale = (): { scale: number; fromSample: boolean } | null => {
-    if (matrixScale !== null && sampleScale !== null) {
-      return Math.abs(sampleScale - matrixScale) > tolerance * matrixScale
-        ? { scale: sampleScale, fromSample: true }
+    if (matrixScale !== null && usableScale !== null) {
+      return Math.abs(usableScale - matrixScale) > tolerance * matrixScale
+        ? { scale: usableScale, fromSample: true }
         : { scale: matrixScale, fromSample: false }
     }
     if (matrixScale !== null) return { scale: matrixScale, fromSample: false }
-    if (sampleScale !== null) return { scale: sampleScale, fromSample: true }
+    if (usableScale !== null) return { scale: usableScale, fromSample: true }
     return null
   }
 
   const chosen = chooseScale()
   if (chosen === null) return null
 
-  const sampleOrigin = sampleOriginFor(chosen.scale)
+  // 采样对不可信（与矩阵差 3 倍以上）⇒ **整组采样都不作数**：单点原点也是同一时刻的产物，同样可疑。
+  // 宁可保留闭式（用户看到的是「位置不动」），也不要把一个动画中间态当成修正值。
+  const samplesTrustworthy = sampleScale === null || plausibleSampleScale !== null
+  const sampleOrigin = samplesTrustworthy ? sampleOriginFor(chosen.scale) : null
   let origin: Point | null = null
   let source: ProjectionDecision['source'] = chosen.fromSample ? 'posFromEvt' : 'closed-form'
   let originDeltaPx: number | null = null

@@ -652,7 +652,7 @@ export function buildProjection(canvas: CanvasLike, options: ProjectionOptions =
   // 但闭式只是**一次实测**的归纳：换版本 / 换布局时它可能带一个与缩放有关的偏移，
   // 而投影唯一可见的消费者是标记 / 文字那层 DOM billboard（症状：放大缩小时地标移动不准）。
   // 所以这里用 Obsidian 自己的 posFromEvt 采两个点做一次**裁决**：一致就用闭式，不一致就信它。
-  const decision = verifyProjectionAgainstCanvas(canvas, viewportRect, scale, closedFormOrigin, host?.matrix ?? null)
+  const decision = verifyProjectionAgainstCanvas(canvas, viewportRect, scale, closedFormOrigin, host)
   const effectiveScale = decision?.scale ?? scale
   if (decision !== null) {
     if (decision.scaleDelta !== null && decision.scaleDelta > 0.01 * effectiveScale) {
@@ -812,8 +812,9 @@ function verifyProjectionAgainstCanvas(
   viewportRect: ScreenRect,
   scale: number,
   closedFormOrigin: Point | null,
-  matrix: Matrix2D | null,
+  host: TransformCandidate | null,
 ): ProjectionDecision | null {
+  const matrix = host?.matrix ?? null
   const posFromEvt = asFn(canvas.posFromEvt)
   if (!posFromEvt || closedFormOrigin === null) return null
 
@@ -831,6 +832,27 @@ function verifyProjectionAgainstCanvas(
   const cached = projectionCheckCache.get(canvas as unknown as object)
   if (cached !== undefined && cached.key === key) return cached.decision
 
+  /**
+   * 「此刻的变换指纹」：宿主元素的 CSS transform + 视口矩形。
+   *
+   * 为什么要在采样**前后各取一次**：Obsidian 的缩放是**动画**（实测一次缩放会触发上百次
+   * `markViewportChanged`）。如果两次 `posFromEvt` 采样跨在动画的两帧上，反解出来的缩放就是
+   * 两个时刻拼出来的假值 —— 裁决会据此把投影换成一个**错的缩放**，而错误会一直留到下一次
+   * 平移（用户实测：缩放时不准确、平移一次就复原）。
+   */
+  const fingerprint = (): string => {
+    const element = asElement(host?.el)
+    const rect = readViewportRect(canvas)
+    return [
+      element ? computedTransform(element) : 'no-host',
+      rect ? rect.left : 'na',
+      rect ? rect.top : 'na',
+      rect ? rect.width : 'na',
+      rect ? rect.height : 'na',
+    ].join('|')
+  }
+  const before = fingerprint()
+
   const samples: Array<{ client: Point; world: Point }> = []
   const y = viewportRect.top + viewportRect.height / 2
   for (const ratio of [0.2, 0.8]) {
@@ -847,6 +869,9 @@ function verifyProjectionAgainstCanvas(
       // 采样失败就当这一轮没有证据：保持闭式（行为与升级前一致）
     }
   }
+
+  // 采样期间视口变了 ⇒ 这一帧的样本不可信：保持闭式、**且不写缓存**（下一帧稳定后重算）
+  if (fingerprint() !== before) return null
 
   const decision =
     samples.length > 0 ? resolveProjection({ closedFormOrigin, matrixScale: scale, samples }) : null

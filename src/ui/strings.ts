@@ -15,9 +15,9 @@ import type { GeometryMode } from '../core/hexEdges.ts'
 
 /** 绘制模式的四个人话名（`GeometryMode` → 界面文字；侧栏按钮与浮窗提示共用） */
 export const DRAW_MODE_LABELS = {
-  edge: '沿网格线连接',
-  step: '格步进',
-  interior: '沿格心连接',
+  edge: '沿网格走',
+  step: '逐格前进',
+  interior: '锚点折线',
   free: '自由绘制',
 } as const
 
@@ -29,9 +29,9 @@ export const DRAW_MODE_LABELS = {
  * 短句读得完，长解释留在本文件与 `USER-MANUAL.md` 里。
  */
 export const DRAW_MODE_HINTS = {
-  edge: '落点吸附网格顶点，段段沿网格线',
+  edge: '落点吸附格点，段段沿网格线',
   step: '每次点击沿网格线前进一条边',
-  interior: '过格心的折线，顶点可再编辑',
+  interior: '点哪连哪的折线，顶点可再编辑',
   free: '按住左键随手画，没有可拖顶点',
 } as const
 

@@ -388,6 +388,22 @@ test('resolveProjection：只有一侧证据就给那一侧；两侧都没有 �
   assert.equal(resolveProjection({ closedFormOrigin: null, matrixScale: null, samples: [] }), null)
 })
 
+test('resolveProjection：采样对与矩阵缩放差 3 倍以上 ⇒ 当它不可信（动画期间两次采样跨帧的兜底）', () => {
+  const bogusScale = REAL_SCALE * 5
+  const decision = resolveProjection({
+    closedFormOrigin: { x: 644, y: 366.9 },
+    matrixScale: REAL_SCALE,
+    samples: [
+      { client: { x: 0, y: 0 }, world: { x: 0, y: 0 } },
+      { client: { x: 600, y: 0 }, world: { x: 600 / bogusScale, y: 0 } },
+    ],
+  })
+  // 缩放仍取矩阵（精确值）；原点也用闭式（样本不可信）——但差仍**如实报出**供诊断
+  assert.equal(decision?.scale, REAL_SCALE)
+  assert.equal(decision?.source, 'closed-form')
+  assert.ok(decision!.scaleDelta !== null && decision!.scaleDelta > 3 * REAL_SCALE)
+})
+
 test('resolveProjection：采样噪声（约 0.5px）不该触发切换（阈值是噪声上界的 1.5 倍）', () => {
   const samples = [
     { client: { x: 300, y: 400 }, world: { x: (300 - 644.5) / REAL_SCALE, y: (400 - 366.9) / REAL_SCALE } },
