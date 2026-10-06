@@ -602,7 +602,7 @@ canvases:
 ```bash
 node scripts/build.mjs                            # 构建（自研：TypeScript 编译器 API + 模块内联 → main.js）
 node node_modules/typescript/bin/tsc --noEmit     # 类型检查（0 错是底线）
-node --test --test-isolation=none                 # 643 个单元测试
+node --test --test-isolation=none                 # 单元测试：node:test，纯函数优先
 node scripts/smoke.mjs                            # 冒烟：加载真实 main.js + 假 Obsidian（场景数 / 断言数见输出末行）
 node scripts/deploy.mjs                           # 部署到隔离测试库（默认 E:\ObsidianPulgins\test-vault）
 ```
@@ -622,7 +622,7 @@ docs/         用户手册 · 工程笔记 · 技术方案 · 各阶段实施记
 1. [`docs/USER-MANUAL.md`](docs/USER-MANUAL.md) — 面向使用者的完整手册（含故障排查）；
 2. [`docs/ENGINEERING-NOTES.md`](docs/ENGINEERING-NOTES.md) — **接手必读**：踩过的坑、测试策略、
    未验证项。其中 §5「已经踩过的坑」是这个项目最贵的东西；
-3. [`docs/HANDOFF.md`](docs/HANDOFF.md) — 当前基线与下一步；
+3. [`docs/HANDOFF.md`](docs/HANDOFF.md) — 当前状态（基线 · 版本流水 · 最近几轮）；
 4. [`docs/archive/TECHNICAL-DESIGN-v2.md`](docs/archive/TECHNICAL-DESIGN-v2.md)、
    [`docs/archive/PHASE-0-RESULTS.md`](docs/archive/PHASE-0-RESULTS.md) — 设计推导与平台实测数据。
 
@@ -637,10 +637,11 @@ docs/         用户手册 · 工程笔记 · 技术方案 · 各阶段实施记
   导出侧还有两处**已知缺口**：标记在导出里是固定小圆点、区域类型的不透明度与边框不进导出；
 - **Phase 5**：把自定义地形从"颜色 + 字形 + 图片"扩展到图块与变体；
 - **Phase 6**：移动端与触控笔（长按代替右键、单指绘制、双指平移缩放）；
-- **待你确认的验收项**：本轮（生物群系 / 数据层笔刷 / 侧栏「显示」三组）的
-  **12 条可判伪清单**在 [`docs/PLAN.md`](docs/PLAN.md) 的 §2.1，连同"没做 / 未验证"清单一并列在 §2.2；
-  更早四份（自定义标记、定义文件、路径类型、区域类型）与 A3 设置页瘦身的清单在
-  [`docs/archive/ARCHIVE-HANDOFF.md`](docs/archive/ARCHIVE-HANDOFF.md)。
+- **待你确认的验收项**：**「没做 / 未验证」清单统一在 [`docs/PLAN.md`](docs/PLAN.md) §2.2**
+  （最近一条是 **C4 第三批** —— 工具条状态行那类动态模板；此外还有色带「轴」与两轮地标修复的实机观感）；
+  **可判伪的实机清单**分三处：§2.1（侧栏折叠与排版，9 条）· `docs/DATA-LAYER-UI-BRIEF.md`（色带轴）·
+  [`docs/archive/ARCHIVE-HANDOFF.md`](docs/archive/ARCHIVE-HANDOFF.md)（更早四份：自定义标记、
+  定义文件、路径类型、区域类型，以及 A3 设置页瘦身）。
 
 ## 许可证
 

@@ -28,6 +28,8 @@ import {
 import { isCategoryField, overlayField } from '../src/render/overlayFields.ts'
 import { buildLegendEntries, type LegendDeps } from '../src/render/legend.ts'
 import { DEFAULT_LAYER_VISIBILITY, withLayerVisibility } from '../src/render/layerVisibility.ts'
+// C4 第三批：笔刷"为什么刷不动"的四句话只有一份来源（状态浮窗与侧栏都显示它）
+import { BRUSH_REASONS } from '../src/ui/strings.ts'
 
 /** 笔刷不能作画时的原因（能作画时为空串）—— 收窄放在这里，断言里就不用重复调两次 */
 function brushReason(editor: MapEditor): string {
@@ -172,7 +174,7 @@ test('未确认 / 留空的笔刷**不生效**，并给出一句人话（§E 第
   editor.setBrushField('temperature')
 
   assert.equal(editor.brushReadiness().ok, false, '刚换到温度层、还没填数值')
-  assert.match(brushReason(editor), /请先填一个数值/)
+  assert.equal(brushReason(editor), BRUSH_REASONS.noValue)
   editor.beginStroke(ORIGIN)
   editor.endStroke()
   assert.deepEqual(document.terrain, {}, '没值就一笔都不该落下')
@@ -257,7 +259,7 @@ test('×/÷：无值的格**跳过**；除以 0 整笔拒绝并说明', () => {
   editor.setBrushValue(0)
   const readiness = editor.brushReadiness()
   assert.equal(readiness.ok, false)
-  assert.match(readiness.ok ? '' : readiness.reason, /不能除以 0/)
+  assert.equal(readiness.ok ? '' : readiness.reason, BRUSH_REASONS.divideByZero)
   const before = document.terrain[cellKey(0, 0)]?.temp
   editor.beginStroke(ORIGIN)
   editor.endStroke()

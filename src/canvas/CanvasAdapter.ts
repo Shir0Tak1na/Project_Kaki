@@ -171,6 +171,44 @@ function leafContainerContainsFocus(leaf: WorkspaceLeaf): boolean {
   return active !== null && active !== undefined && el.contains(active)
 }
 
+/**
+ * 解析「用户现在看的那个视图」：活动叶子，取不到时退回 `activeLeaf`（已 deprecated，
+ * 但在 Canvas 缺少公开视图类型时仍是最直接的信号）。
+ *
+ * 抽成函数是因为**两个地方要问同一件事**：`findCanvasHandles()` 用它算 `isActive`，
+ * `activeViewIsOtherDocument()` 用它判断"用户在不在别的文档上"。两处各写一份，
+ * "谁是活动的"迟早会出现两种答案。
+ */
+function resolveActiveView(app: App): unknown {
+  const workspace = app.workspace as unknown as Record<string, unknown>
+  if (typeof workspace.getMostRecentLeaf === 'function') {
+    const mostRecent = (workspace.getMostRecentLeaf as () => { view?: unknown } | null).call(app.workspace)
+    const view = mostRecent?.view ?? null
+    if (view !== null) return view
+  }
+  const activeLeaf = asRecord(workspace.activeLeaf)
+  return activeLeaf?.view ?? null
+}
+
+/**
+ * 活动叶子是不是**别的文档**（markdown / PDF / 图片…）—— 也就是"用户现在不在任何 Canvas 上"。
+ *
+ * 判据：活动视图**有 `file`**（是真文档）且 `getViewType() !== 'canvas'`。
+ * 插件自己的面板、没有文档的视图不算（它们会沿用"最近那张画布"的退路，见 `activeCanvasHandle`）。
+ *
+ * 为什么必须有这条判据（ISSUE-007）：`activeCanvasHandle()` 的退路 `?? handles[0]` 只问
+ * "哪张画布开着"，从不问"用户在看什么"。用户切到一篇笔记后，没有任何 canvas 的 `isActive`
+ * 为真，于是退回列表里的第一张**后台画布** —— 侧栏就把一张不在前台的图当成"当前地图"。
+ */
+export function activeViewIsOtherDocument(app: App): boolean {
+  const view = asRecord(resolveActiveView(app))
+  if (!view) return false
+  const viewType = typeof view.getViewType === 'function' ? (view.getViewType as () => string).call(view) : undefined
+  if (viewType === 'canvas') return false
+  // 有 `file` 的才算"文档"；插件面板这类没有文档的视图仍允许走退路
+  return view.file !== null && view.file !== undefined
+}
+
 export function findCanvasHandles(app: App): {
   handles: CanvasHandle[]
   deferredLeaves: WorkspaceLeaf[]
@@ -180,17 +218,7 @@ export function findCanvasHandles(app: App): {
   const handles: CanvasHandle[] = []
   const deferredLeaves: WorkspaceLeaf[] = []
 
-  const workspace = app.workspace as unknown as Record<string, unknown>
-  let activeView: unknown = null
-  if (typeof workspace.getMostRecentLeaf === 'function') {
-    const mostRecent = (workspace.getMostRecentLeaf as () => { view?: unknown } | null).call(app.workspace)
-    activeView = mostRecent?.view ?? null
-  }
-  if (activeView === null) {
-    // 退路：activeLeaf 已标记 deprecated，但在 Canvas 缺少公开视图类型时仍是最直接的信号
-    const activeLeaf = asRecord(workspace.activeLeaf)
-    activeView = activeLeaf?.view ?? null
-  }
+  const activeView = resolveActiveView(app)
 
   for (const leaf of leaves) {
     if (isDeferredLeaf(leaf)) {
@@ -216,11 +244,21 @@ export function findCanvasHandles(app: App): {
   return { handles, deferredLeaves, totalLeaves: leaves.length }
 }
 
-/** 取「当前要操作」的 Canvas：优先活动叶子，其次第一个已加载的 */
+/**
+ * 取「当前要操作」的 Canvas：优先活动叶子，其次第一个已加载的。
+ *
+ * 退路（`handles[0]`）**只对"点侧栏 / 点面板自己"生效** —— 那时活动叶子是个没有文档的视图
+ * （面板），焦点不在任何 canvas 里，若直接返回 `null`，面板自己的控件按一下就会丢当前地图。
+ * 但用户正看着**别的文档**时（笔记 / PDF…）必须返回 `null`：那张后台画布**不在前台**，
+ * 把它当"当前地图"会让侧栏照旧可点、还会写进它（ISSUE-007）。
+ */
 export function activeCanvasHandle(app: App): CanvasHandle | null {
   const { handles } = findCanvasHandles(app)
   if (handles.length === 0) return null
-  return handles.find((h) => h.isActive) ?? handles[0] ?? null
+  const active = handles.find((h) => h.isActive)
+  if (active) return active
+  if (activeViewIsOtherDocument(app)) return null
+  return handles[0] ?? null
 }
 
 // ---------------------------------------------------------------- 变换矩阵

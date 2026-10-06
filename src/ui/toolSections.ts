@@ -52,10 +52,14 @@ import {
 import { biomeCatalogSignature, listResolvedBiomeStyles, type CustomBiome } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS, type FieldId } from '../render/overlayFields.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
-import { DRAW_MODE_HINTS, DRAW_MODE_LABELS, PANEL_SECTION_TITLES, unknownTypeLabel } from './strings.ts'
-
-/** 没有启用的地图层时，三节共同的那句话 */
-export const NO_LAYER_HINT = '当前没有启用的地图层：打开一张地图并启用地图层之后，这里才有可改的东西。'
+import {
+  DRAW_MODE_HINTS,
+  DRAW_MODE_LABELS,
+  PANEL_EMPTY_HINTS,
+  PANEL_SECTION_TITLES,
+  selectionModeLabel,
+  unknownTypeLabel,
+} from './strings.ts'
 
 /**
  * 这三节控件要的读写入口（**面板版**注入的那一份）。
@@ -66,8 +70,16 @@ export const NO_LAYER_HINT = '当前没有启用的地图层：打开一张地�
  * （浮窗版写的是 `refresh()`，面板版写的是"这一帧重绘面板"）。
  */
 export interface ToolControlsHost {
-  /** 当前活跃地图层的编辑器状态；`null` = 没有启用的地图层 */
+  /** 当前活跃地图层的编辑器状态；`null` = 没有启用的地图层（也可能压根没有当前地图） */
   getStatus: () => EditorStatus | null
+  /**
+   * 现在有没有"要操作的画布"（有活动画布 ⇒ `true`）。
+   *
+   * 为什么需要它：`getStatus()` 为 `null` 有**两种完全不同的原因** ——
+   * ①用户切到了一篇普通笔记（**没有当前地图**，ISSUE-007）；②画布开着但没启用地图层。
+   * 三节的空态文案靠这个布尔二选一（见 `PANEL_EMPTY_HINTS`）。
+   */
+  hasActiveCanvas: () => boolean
   setTool: (tool: EditorTool) => void
   setTerrainType: (id: TerrainId) => void
   setMarkerIcon: (id: MarkerId) => void
@@ -222,6 +234,17 @@ function hintLine(parent: HTMLElement, text: string): HTMLElement {
   return parent.createEl('div', { cls: 'fc-panel-hint', text })
 }
 
+/**
+ * 三节空态该说哪一句。
+ *
+ * 两句必须分开（ISSUE-007）：**没有活动画布**（用户在看别的文档）时 `getStatus()` 也是 `null`，
+ * 但与"画布开着、只是没启用地图层"完全是两回事。不说清是哪一种，用户在笔记里就会看到
+ * "当前没有启用的地图层"这句**假话**（地图层其实还开着，只是不在前台）。
+ */
+function emptyHint(host: ToolControlsHost): string {
+  return host.hasActiveCanvas() ? PANEL_EMPTY_HINTS.noLayer : PANEL_EMPTY_HINTS.noActiveMap
+}
+
 /** 一个按钮（统一样式类 `fc-ctl-button`；`is-active` 与 `disabled` 由调用方设） */
 function button(parent: HTMLElement, cls: string, text: string, title = ''): HTMLButtonElement {
   const element = parent.createEl('button', { cls: `fc-ctl-button ${cls}`.trim(), text })
@@ -253,7 +276,7 @@ export function renderToolSection(parent: HTMLElement, host: ToolControlsHost): 
     defaultOpen: true,
   })
   if (status === null) {
-    hintLine(group, NO_LAYER_HINT)
+    hintLine(group, emptyHint(host))
     return
   }
   const painting = status.mode === 'paint'
@@ -402,7 +425,8 @@ export function renderBrushSection(parent: HTMLElement, host: ToolControlsHost):
   const status = host.getStatus()
   // 默认只在使用笔刷时展开：这一节最长（层 / 算法 / 数值 / 群系 / 半径 / 调色板），
   // 用标记或路径时它整块是灰的，展开只是把真正要用的东西挤出屏幕（用户报的"一大坨"）。
-  // 没有地图层时展开，否则 `NO_LAYER_HINT` 被收在折叠里 = 用户看不到"为什么这里是空的"。
+  // 没有地图层时展开，否则空态那句（`PANEL_EMPTY_HINTS`）被收在折叠里
+  // = 用户看不到"为什么这里是空的"。
   const group = sectionShell(parent, host, {
     title: PANEL_SECTION_TITLES.brush,
     role: 'panel-brush',
@@ -411,7 +435,7 @@ export function renderBrushSection(parent: HTMLElement, host: ToolControlsHost):
     defaultOpen: status === null || (status.mode === 'paint' && status.tool === 'brush'),
   })
   if (status === null) {
-    hintLine(group, NO_LAYER_HINT)
+    hintLine(group, emptyHint(host))
     return
   }
   const usable = status.mode === 'paint' && status.tool === 'brush'
@@ -580,7 +604,7 @@ export function renderSelectionModeSection(parent: HTMLElement, host: ToolContro
     defaultOpen: status === null || status.mode !== 'paint',
   })
   if (status === null) {
-    hintLine(group, NO_LAYER_HINT)
+    hintLine(group, emptyHint(host))
     return
   }
   const selectable = status.mode !== 'paint'
@@ -589,12 +613,13 @@ export function renderSelectionModeSection(parent: HTMLElement, host: ToolContro
   const modes: ReadonlyArray<{ mode: SelectionMode; label: string; hint: string }> = [
     {
       mode: 'rect',
-      label: '矩形框选',
+      // 名字与工具条状态行里的那一份同源（`选择 · 矩形框选 · 14 格`）—— 两处说得不一样用户会以为换了工具
+      label: selectionModeLabel('rect'),
       hint: '按住左键拉出一个矩形：选中框里的格（Shift 加选、Alt 取消）',
     },
     {
       mode: 'brush',
-      label: '笔迹框选',
+      label: selectionModeLabel('brush'),
       hint: '按住左键划过去：笔迹扫过的格被选中（范围跟"笔刷大小"同一个半径）',
     },
   ]

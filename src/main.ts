@@ -784,6 +784,8 @@ export default class ProjectKakiPlugin extends Plugin {
       // 图层开关：状态与写入口都从插件这边注入（面板不认识插件实例）
       // W4-2：面板跟着**活动画布**走 ⇒ 三者都按活动画布那张地图解析
       getLayerVisibility: () => this.layersFor(this.activeViewMapPath()),
+      // 面板的"有没有当前画布"：为假时三节显示「当前没有打开的地图」、图层开关整块置灰（ISSUE-007）
+      hasActiveCanvas: () => this.hasActiveCanvas(),
       onToggleLayer: (key, value) => {
         void this.setLayerVisible(key, value)
       },
@@ -899,6 +901,8 @@ export default class ProjectKakiPlugin extends Plugin {
     }
     return {
       getStatus: () => active()?.getStatus() ?? null,
+      // 三节的空态文案靠它二选一（"没有当前地图" ≠ "画布开着但没启用地图层"，ISSUE-007）
+      hasActiveCanvas: () => this.hasActiveCanvas(),
       setTool: (tool) => apply((editor) => editor.setTool(tool)),
       setTerrainType: (id) => apply((editor) => editor.setTerrainType(id)),
       setMarkerIcon: (id) => apply((editor) => editor.setMarkerIcon(id)),
@@ -1171,10 +1175,20 @@ export default class ProjectKakiPlugin extends Plugin {
    * 需要的实时数字放在命令/状态报告里看。
    */
   private describePanelSummary(): string {
+    const canvasPath = this.activeCanvasPath()
+    if (canvasPath === null) {
+      /**
+       * 两种"没有当前画布"要说两句不同的话（ISSUE-007）：
+       * 一张画布都没开 vs 画布开在后台、用户在看一篇笔记。后者若也说"没有打开 Canvas"
+       * 就是句假话 —— 用户明明开着它，只是不在前台。
+       */
+      return findCanvasHandles(this.app).totalLeaves === 0
+        ? '当前没有打开 Canvas'
+        : '当前没有打开的地图：切回一张 Canvas 后这里会显示它的状态'
+    }
+    // 有当前画布时的口径与以前一致（只看"库里有没有启用的地图层"）—— 那一档不在本次缺陷范围内
     const status = this.layers?.listStatus().find((item) => item.attached)
     if (!status) {
-      const canvasPath = this.activeCanvasPath()
-      if (canvasPath === null) return '当前没有打开 Canvas'
       const mapPath = this.store?.mapFilePathForCanvas(canvasPath) ?? null
       return mapPath === null ? '当前 Canvas 尚未绑定地图' : `已绑定：${mapPath} · 地图层未启用`
     }
@@ -3405,6 +3419,20 @@ export default class ProjectKakiPlugin extends Plugin {
   private activeCanvasPath(): string | null {
     const handle = activeCanvasHandle(this.app)
     return handle?.file?.path ?? null
+  }
+
+  /**
+   * 现在有没有"要操作的画布"。
+   *
+   * 与 `activeCanvasPath()` 同一口径，但**区分了"路径为空"的两种原因**：
+   * `activeCanvasHandle()` 在"用户在看别的文档"时返回 `null`（ISSUE-007 那道闸），
+   * 于是这里为假 —— 面板据此把三节与图层开关切成空态；一张画布都没开时它同样为假。
+   *
+   * 为什么不直接用 `activeCanvasPath() === null`：那条把"画布开在后台、用户在笔记里"
+   * 与"画布开着、只是没绑定地图"混成一种，前者该说"没有打开的地图"，后者该报"尚未绑定地图"。
+   */
+  private hasActiveCanvas(): boolean {
+    return activeCanvasHandle(this.app) !== null
   }
 
   private promptCreateMap(): void {

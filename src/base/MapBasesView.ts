@@ -33,6 +33,7 @@ import { regionTypeLabelOf, type RegionTypeEntry } from '../render/regionTypeCat
 import type { OverlayStyles } from '../render/overlayFields.ts'
 import type { LayerVisibility } from '../render/layerVisibility.ts'
 import { parseNoteMapProps } from './noteCoordinates.ts'
+import { BASE_TEXT } from '../ui/strings.ts'
 import {
   BASES_VIEW_TYPE,
   DEFAULT_COORD_PROPERTY,
@@ -302,7 +303,7 @@ export class MapBasesView extends BasesView {
     line.createEl('span', { cls: 'fc-base-summary-map', text: mapLabel })
     line.createEl('span', {
       cls: 'fc-base-summary-counts',
-      text: `笔记 ${summary.notes} · 地图条目 ${summary.mapEntries} · 共 ${summary.total}`,
+      text: BASE_TEXT.summary(summary.notes, summary.mapEntries, summary.total),
     })
     if (this.lastError) {
       line.createEl('span', { cls: 'fc-base-summary-error', text: this.lastError })
@@ -334,11 +335,14 @@ export class MapBasesView extends BasesView {
         event.preventDefault()
         this.openRow(row)
       })
-      tr.createEl('td', { cls: 'fc-base-kind', text: KIND_LABELS[row.kind] })
-      tr.createEl('td', { cls: 'fc-base-source', text: row.source === 'note' ? '笔记' : '地图' })
+      tr.createEl('td', { cls: 'fc-base-kind', text: BASE_TEXT.kind[row.kind] })
+      tr.createEl('td', {
+        cls: 'fc-base-source',
+        text: row.source === 'note' ? BASE_TEXT.sourceNote : BASE_TEXT.sourceMap,
+      })
       tr.createEl('td', {
         cls: 'fc-base-coords',
-        text: row.point ? `${Math.round(row.point.x)}, ${Math.round(row.point.y)}` : '—',
+        text: row.point ? `${Math.round(row.point.x)}, ${Math.round(row.point.y)}` : BASE_TEXT.noCoords,
       })
       tr.createEl('td', { cls: 'fc-base-detail', text: row.detail })
     }
@@ -366,14 +370,6 @@ export class MapBasesView extends BasesView {
       new Notice(`无法打开：${row.filePath}`, 5000)
     }
   }
-}
-
-const KIND_LABELS: Record<MapRow['kind'], string> = {
-  note: '笔记',
-  marker: '标记',
-  label: '文字',
-  path: '路径',
-  region: '区域',
 }
 
 /** 读取条目属性值；`getValue` 可能返回 null（属性不存在） */

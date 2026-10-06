@@ -26,7 +26,7 @@ import { listResolvedTerrainStyles, type CustomTerrain } from '../render/terrain
 import { resolveBiomeStyle } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS } from '../render/overlayFields.ts'
 import { TOOL_LABELS } from './toolSections.ts'
-import { drawModeHint, drawModeLabel, unknownTypeLabel } from './strings.ts'
+import { TOOLBAR_TEXT, drawModeHint, drawModeLabel, selectionModeLabel, unknownTypeLabel } from './strings.ts'
 
 export interface MapToolbarOptions {
   editor: MapEditorLike
@@ -151,13 +151,13 @@ export class MapToolbar {
   private titleLine(status: EditorStatus, painting: boolean): string {
     if (!painting) {
       const count = status.cellSelection.length
-      if (count === 0) return '空闲'
-      return `选择 · ${status.selectionMode === 'rect' ? '矩形框选' : '笔迹框选'} · ${count} 格`
+      if (count === 0) return TOOLBAR_TEXT.idle
+      return TOOLBAR_TEXT.selection(selectionModeLabel(status.selectionMode), count)
     }
     if (status.tool === 'brush') {
-      return status.brushField === null ? '绘制 · 地形笔刷' : '绘制 · 数值图层笔刷'
+      return status.brushField === null ? TOOLBAR_TEXT.paintTerrainBrush : TOOLBAR_TEXT.paintFieldBrush
     }
-    return `绘制 · ${TOOL_LABELS[status.tool].label}`
+    return TOOLBAR_TEXT.paintTool(TOOL_LABELS[status.tool].label)
   }
 
   /**
@@ -173,17 +173,16 @@ export class MapToolbar {
       const label = spec?.label ?? status.brushField
       if (spec !== undefined && !spec.numeric) {
         const entry = status.brushBiome.length > 0 ? resolveBiomeStyle(status.brushBiome, []).label : '（未选）'
-        return `编辑：${label}笔刷 · ${entry}`
+        return TOOLBAR_TEXT.categoryBrush(label, entry)
       }
-      const op = status.brushOp === 'set' ? '＝' : status.brushOp
       const value = status.brushValue === null ? '（未填）' : status.brushValue
-      return `编辑：${label}笔刷 · ${op}${value}`
+      return TOOLBAR_TEXT.fieldBrush(label, TOOLBAR_TEXT.brushOpLabel(status.brushOp), value)
     }
     const terrain =
       listResolvedTerrainStyles(this.options.getCustomTerrains?.() ?? []).find(
         (style) => style.id === status.terrainType,
       )?.label ?? status.terrainType
-    return `编辑：地形笔刷 · ${terrain}`
+    return TOOLBAR_TEXT.terrainBrush(terrain)
   }
 
   /**
@@ -196,7 +195,7 @@ export class MapToolbar {
     if (!painting) {
       const count = status.cellSelection.length
       return count > 0
-        ? `已选 ${count} 格 · 左键拖动=${status.selectionMode === 'rect' ? '矩形框选' : '笔迹框选'} · Shift 加选 / Alt 取消 · Esc 清空`
+        ? `已选 ${count} 格 · 左键拖动=${selectionModeLabel(status.selectionMode)} · Shift 加选 / Alt 取消 · Esc 清空`
         : '按 D 进入绘制模式 · 左键拖动框选一片格（方式在侧栏「选择方式」）· 双击路径/区域可重命名'
     }
     if (status.tool === 'brush') {
@@ -239,7 +238,7 @@ export class MapToolbar {
     // ⚠️ 顺序：必须在上面的 detail 之后覆盖 —— 这行原因比"当前参数"更重要。
     // 侧栏「笔刷」一节下方也写了同一句（控件在那里，原因就该在那里看得见）。
     if (painting && status.tool === 'brush' && status.brushField !== null && !status.brushReady.ok) {
-      this.statusEl.textContent = `编辑：数值图层笔刷 · ${status.brushReady.reason}`
+      this.statusEl.textContent = TOOLBAR_TEXT.fieldBrushBlocked(status.brushReady.reason)
       this.statusEl.style.display = ''
     }
 

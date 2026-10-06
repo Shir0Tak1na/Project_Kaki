@@ -33,18 +33,24 @@ import { axialToWorld, cellKey, worldToAxial } from '../src/core/hex.ts'
 import { snapToCellCenter } from '../src/render/markerPlacement.ts'
 // C4：被逐字断言钉住的界面文案从**单一来源**读（改文案只改 src/ui/strings.ts，不再牵动本文件）
 import {
+  BASE_TEXT,
+  BRUSH_REASONS,
   COMMAND_NAMES,
   DEFINITION_MODAL_LABELS,
+  DEFINITION_ROW_LABELS,
   DIALOG_LABELS,
   DRAW_MODE_LABELS,
   MODAL_ACTIONS,
   NOTICES,
+  PANEL_EMPTY_HINTS,
   PANEL_SECTION_TITLES,
   PANEL_TITLES,
   RAMP_AXIS_LABELS,
+  SELECTION_MODE_LABELS,
   SELECTION_TEXT,
   SETTINGS_LABELS,
   STATUS_SECTIONS,
+  TOOLBAR_TEXT,
   drawModeHint,
   OVERLAY_CONTROL_LABELS,
   unknownTypeLabel,
@@ -843,6 +849,14 @@ fakeDocument.defaultView = {
 // Electron 渲染进程里 window 存在；桩环境提供实测到的 devicePixelRatio（1.65），
 // 用于验证报告能正确区分「量化粒度是 CSS 像素」与「量化粒度是设备像素」。
 globalThis.window = globalThis.window ?? fakeDocument.defaultView
+
+/**
+ * 同理：真实环境里 `document` 一直都在，而 `CanvasAdapter.leafContainerContainsFocus` 会读
+ * `document.activeElement`（元素自己那份 `doc.activeElement` 为空时的退路）。
+ * 桩里不提供这个全局，那条退路一旦被走到就是 `ReferenceError: document is not defined`
+ * —— 报错位置离真正的原因很远（场景 53 第一次跑就是这么崩的）。
+ */
+globalThis.document = globalThis.document ?? fakeDocument
 
 const noticeLog = []
 /** 与 noticeLog 一一对应：每条提示的时长（毫秒）。用户抱怨过"等太久才消失"，所以时长必须可断言 */
@@ -2799,7 +2813,11 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   check('工具条显示为绘制中', (modeButtonEl()?.textContent ?? '').includes('绘制'), String(modeButtonEl()?.textContent))
   // ISSUE-004：这个浮框必须有**标题行**（它是这个框的名字），且标题说明"这个框现在归谁"。
   // 用户的原话是"筛选和绘制在同一个框里，反直觉"—— 显隐早已按模式做对，缺的就是这一行。
-  check('工具条有标题行，写着"绘制 · <工具>"', /^绘制 · .+/.test(toolbarTitle()?.textContent ?? ''), String(toolbarTitle()?.textContent))
+  check(
+    '工具条有标题行，写着"绘制 · <工具>"',
+    new RegExp(`^${TOOLBAR_TEXT.paintPrefix}.+`).test(toolbarTitle()?.textContent ?? ''),
+    String(toolbarTitle()?.textContent),
+  )
   check('标题行是工具条的**第一个**元素（身份要最先被看到）', toolbarEl.children[0] === toolbarTitle(), String(toolbarEl.children[0]?.className))
   check(
     '浮窗上不再有工具切换与参数组（§F.2 的搬家：一个框只留一个角色）',
@@ -4050,16 +4068,22 @@ console.log('\n场景 19：Base 自定义视图（注册、合并两个来源、
   const dragonRows = rows.map(cellsOf).filter((cells) => cells[0] === '龙脊城')
   check(
     '笔记与地图标记同名时各占一行，来源可区分',
-    dragonRows.length === 2 && dragonRows.some((cells) => cells[2] === '笔记') && dragonRows.some((cells) => cells[2] === '地图'),
+    dragonRows.length === 2 &&
+      dragonRows.some((cells) => cells[2] === BASE_TEXT.sourceNote) &&
+      dragonRows.some((cells) => cells[2] === BASE_TEXT.sourceMap),
     JSON.stringify(dragonRows),
   )
-  check('区域行来自地图文档', byName.get('北境领')?.[1] === '区域', JSON.stringify(byName.get('北境领')))
-  check('没有坐标的笔记仍然入表', byName.get('无名地')?.[3] === '—', JSON.stringify(byName.get('无名地')))
+  check('区域行来自地图文档', byName.get('北境领')?.[1] === BASE_TEXT.kind.region, JSON.stringify(byName.get('北境领')))
+  check('没有坐标的笔记仍然入表', byName.get('无名地')?.[3] === BASE_TEXT.noCoords, JSON.stringify(byName.get('无名地')))
   check('坐标写错的笔记被标记出来', byName.get('荒村') && rows.find((r) => r.children[0]?.textContent === '荒村')?.classList.contains('is-invalid'))
   check('表格按名称排序（缺坐标的不影响排序）', rows[0]?.children[0]?.textContent !== undefined)
 
   const summaryText = collectByClass(container, 'fc-base-summary')[0]?.children.map((c) => c.textContent).join(' | ') ?? ''
-  check('摘要显示地图路径与计数', summaryText.includes(mapPath) && /笔记 4/.test(summaryText) && /地图条目 2/.test(summaryText), summaryText)
+  check(
+    '摘要显示地图路径与计数',
+    summaryText.includes(mapPath) && summaryText.includes(BASE_TEXT.summary(4, 2, 6)),
+    summaryText,
+  )
 
   const warnings = collectByClass(container, 'fc-base-warning')
   check('对无法解析的坐标给出警告', warnings.length === 1, String(warnings.length))
@@ -5002,15 +5026,15 @@ console.log('\n场景 23：样式设置（路径/区域颜色、名称字体）�
   check('「地图定义」弹窗有每种区域类型的参数行（含颜色选择器）', pickerNamed('王国') !== undefined && pickerNamed('海域') !== undefined)
   check(
     '区域类型的第二行是「边框宽与虚线 · <名字>」（与路径类型的「线宽与虚线」同构）',
-    defSettingNamed('边框宽与虚线 · 公国') !== undefined &&
-      (defSettingNamed('边框宽与虚线 · 公国')?.texts ?? []).length === 2,
-    JSON.stringify((defSettingNamed('边框宽与虚线 · 公国')?.texts ?? []).map((text) => text.placeholder)),
+    defSettingNamed(DEFINITION_ROW_LABELS.borderWidthDash('公国')) !== undefined &&
+      (defSettingNamed(DEFINITION_ROW_LABELS.borderWidthDash('公国'))?.texts ?? []).length === 2,
+    JSON.stringify((defSettingNamed(DEFINITION_ROW_LABELS.borderWidthDash('公国'))?.texts ?? []).map((text) => text.placeholder)),
   )
   check('选择器带出当前值（出厂默认）', riverPicker?.value === defaultRiver, String(riverPicker?.value))
   check(
     '每种路径类型都有端点与连接两个下拉（都要带出当前值）',
-    (defSettingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
-    JSON.stringify((defSettingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
+    (defSettingNamed(DEFINITION_ROW_LABELS.appearance('河流'))?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
+    JSON.stringify((defSettingNamed(DEFINITION_ROW_LABELS.appearance('河流'))?.dropdowns ?? []).map((dropdown) => dropdown.value)),
   )
 
   // ---- 设置页只剩名称字体（路径 / 区域类型的参数已经搬走）----
@@ -5337,7 +5361,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   await switchMode('幽灵地', 'image')
   await switchMode('破碎地', 'image')
   openSettings()
-  const reefRow = settingNamed('图片 · 礁石')
+  const reefRow = settingNamed(DEFINITION_ROW_LABELS.image('礁石'))
   await reefRow.texts[0].type('Assets\\marsh.png')
   check(
     '图片路径写进设置（Windows 反斜杠被统一为正斜杠）',
@@ -5345,7 +5369,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(plugin.getSettings().customTerrains[1]),
   )
   openSettings()
-  const ghostRow = settingNamed('图片 · 幽灵地')
+  const ghostRow = settingNamed(DEFINITION_ROW_LABELS.image('幽灵地'))
   await ghostRow.texts[0].type('Assets/does-not-exist.png')
   check(
     '指向不存在文件的路径**合法**（存不存在只有加载器知道），照样写进设置 —— 回退由绘制层负责',
@@ -5353,7 +5377,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(plugin.getSettings().customTerrains[2]),
   )
   openSettings()
-  const brokenRow = settingNamed('图片 · 破碎地')
+  const brokenRow = settingNamed(DEFINITION_ROW_LABELS.image('破碎地'))
   await brokenRow.texts[0].type('Assets/broken.png')
   check(
     '存在但解不开的图片路径也照样写进设置（解不开是运行期的事）',
@@ -5361,7 +5385,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     JSON.stringify(plugin.getSettings().customTerrains[3]),
   )
   openSettings()
-  const reefRow2 = settingNamed('图片 · 礁石')
+  const reefRow2 = settingNamed(DEFINITION_ROW_LABELS.image('礁石'))
   await reefRow2.texts[0].type('http://example.com/a.png')
   check(
     '非法图片路径被拒绝并就地给出原因',
@@ -5370,8 +5394,8 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   )
   check(
     '字形下拉框列出「通用」+ 内置 9 种（借字形是个可选项，不是隐藏功能）',
-    (settingNamed('字形 · 沼泽地')?.dropdown?.options?.length ?? 0) === 10,
-    JSON.stringify(settingNamed('字形 · 沼泽地')?.dropdown?.options?.map((option) => option.value)),
+    (settingNamed(DEFINITION_ROW_LABELS.glyph('沼泽地'))?.dropdown?.options?.length ?? 0) === 10,
+    JSON.stringify(settingNamed(DEFINITION_ROW_LABELS.glyph('沼泽地'))?.dropdown?.options?.map((option) => option.value)),
   )
 
   // ---------------------------------------------------------- 侧栏「笔刷」里的地形调色板
@@ -5484,7 +5508,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   app.vault.files.set('Assets/reef2.png', '<png-bytes-2>')
   loadableImageUrls.add(resourceUrlFor('Assets/reef2.png'))
   openSettings()
-  await settingNamed('图片 · 礁石').texts[0].type('Assets/reef2.png')
+  await settingNamed(DEFINITION_ROW_LABELS.image('礁石')).texts[0].type('Assets/reef2.png')
   check(
     '设置里换成了新路径',
     plugin.getSettings().customTerrains.find((terrain) => terrain.id === 'custom:reef')?.imagePath === 'Assets/reef2.png',
@@ -5568,7 +5592,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
   try {
     openSettings()
     const beforeDeleteData = plugin._data
-    await settingNamed('名称与颜色 · 沼泽地').button.click()
+    await settingNamed(DEFINITION_ROW_LABELS.terrainNameColor('沼泽地')).button.click()
     // 「删除」按钮的处理函数不返回 promise（它 fire-and-forget 地发起影响面扫描），
     // 所以这里要等一拍，让 collectReferences 的读盘跑完
     await new Promise((resolve) => setTimeout(resolve, 20))
@@ -5621,7 +5645,7 @@ console.log('\n场景 24：自定义地形（设置定义 → 工具条 → 画�
     // 对照组：一条**从没被画过**的定义 → 不弹框，直接删（这条断言在"总是拦一下"的写法上会失败）
     const openedBefore = deletes.opened.length
     openSettings()
-    await settingNamed('名称与颜色 · 幽灵地').button.click()
+    await settingNamed(DEFINITION_ROW_LABELS.terrainNameColor('幽灵地')).button.click()
     await new Promise((resolve) => setTimeout(resolve, 20))
     check(
       '没有引用时**不弹**确认框（无影响面可说就别打扰用户）',
@@ -6557,7 +6581,7 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
     await new Promise((resolve) => setTimeout(resolve, 20))
     openSettings()
   }
-  const imageRow = () => settingNamed('图片 · 沼泽地')
+  const imageRow = () => settingNamed(DEFINITION_ROW_LABELS.image('沼泽地'))
   const allNotes = () => collectByClass(defModal.contentEl, 'fc-settings-note').map((el) => el.textContent ?? '')
   /** 地形那一节的就地提示（按 `dataset.fcNote` 取：弹窗里四节各有一条提示行） */
   const noteText = () =>
@@ -6606,7 +6630,7 @@ console.log('\n场景 29：自定义地形的图片「从库里选」（不再�
   check('默认是「调色」模式（新建时的默认值：不依赖任何外部资源）', plugin.getSettings().customTerrains[0]?.mode === 'color', String(plugin.getSettings().customTerrains[0]?.mode))
   check(
     '调色模式下**也有**图片那一栏（用户实测反馈"没有看到图片导入按钮" —— 找不到入口就等于没有这个功能）',
-    imageRow() !== undefined && imageRow()?.button !== undefined && settingNamed('字形 · 沼泽地') !== undefined,
+    imageRow() !== undefined && imageRow()?.button !== undefined && settingNamed(DEFINITION_ROW_LABELS.glyph('沼泽地')) !== undefined,
     JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
   )
   check(
@@ -6904,8 +6928,8 @@ console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）�
   )
   check(
     '调色模式下同时显示字形与图片入口（图片入口永远可见 —— 藏起来用户就找不到）',
-    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('字形 · 礁石')) &&
-      FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 礁石')),
+    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.glyph('礁石'))) &&
+      FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.image('礁石'))),
     JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
   )
 
@@ -6943,8 +6967,8 @@ console.log('\n场景 30：自定义地形的两种模式（调色 / 图片）�
   check('切换后设置里是图片模式，并且已落盘', terrainOf()?.mode === 'image' && JSON.parse(plugin._data ?? '{}')?.customTerrains?.[0]?.mode === 'image', `${terrainOf()?.mode} / ${JSON.parse(plugin._data ?? '{}')?.customTerrains?.[0]?.mode}`)
   check(
     '图片模式下显示图片那一栏、不再显示字形（同一件事只在一个地方配置）',
-    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 礁石')) &&
-      !FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('字形 · 礁石')),
+    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.image('礁石'))) &&
+      !FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.glyph('礁石'))),
     JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
   )
   frame()
@@ -7937,8 +7961,8 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
   openSettings()
   check(
     '字形模式下同时显示字形与图片入口',
-    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('字形 · 灯塔')) &&
-      FakeSetting.created.some((setting) => (setting.info.name ?? '').includes('图片 · 灯塔')),
+    FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.glyph('灯塔'))) &&
+      FakeSetting.created.some((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.image('灯塔'))),
     JSON.stringify(FakeSetting.created.map((setting) => setting.info.name)),
   )
   check(
@@ -7949,7 +7973,7 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
   )
   // 字形下拉：给「灯塔」借用 tower 的字形（设置页里真的选一次）
   openSettings()
-  const glyphSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('字形 · 灯塔'))
+  const glyphSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.glyph('灯塔')))
   check('字形那一栏是下拉框', glyphSetting?.dropdown !== undefined)
   check(
     '字形下拉里有「通用」与全部内置图标',
@@ -8076,7 +8100,7 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
   // ---------------------------------------------------------- 切到图片模式
   openSettings()
   const beaconImageText = FakeSetting.created
-    .filter((setting) => (setting.info.name ?? '').includes('图片 · 灯标'))
+    .filter((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.image('灯标')))
     .flatMap((setting) => setting.texts ?? [])[0]
   await beaconImageText.type('Assets/lighthouse.png')
   await new Promise((resolve) => setTimeout(resolve, 20))
@@ -8133,7 +8157,7 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
   const warnBaseline = warnLog.length
   openSettings()
   const beaconImageText2 = FakeSetting.created
-    .filter((setting) => (setting.info.name ?? '').includes('图片 · 灯标'))
+    .filter((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.image('灯标')))
     .flatMap((setting) => setting.texts ?? [])[0]
   await beaconImageText2.type('Assets/gone.png')
   await new Promise((resolve) => setTimeout(resolve, 30))
@@ -8174,7 +8198,7 @@ console.log('\n场景 33：自定义标记图标（设置 → 工具条 → 放�
 
   // ---------------------------------------------------------- 删除定义：数据不动，画布回退
   openSettings()
-  const deleteSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('名称 · 灯塔'))
+  const deleteSetting = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.name('灯塔')))
   const beforeDeleteIcons = iconButtons().length
   await deleteSetting.buttons.find((button) => button.text === MODAL_ACTIONS.delete).click()
   await new Promise((resolve) => setTimeout(resolve, 20))
@@ -8326,31 +8350,31 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   check(
     '内置 4 种路径各有参数行（颜色 + 端点 + 连接）',
     ['河流', '道路', '贸易路线', '边界'].every((label) => {
-      const setting = FakeSetting.created.find((item) => item.info.name === `外观 · ${label}`)
+      const setting = FakeSetting.created.find((item) => item.info.name === DEFINITION_ROW_LABELS.appearance(label))
       return (setting?.colorPickers?.length ?? 0) === 1 && (setting?.dropdowns?.length ?? 0) === 2
     }),
   )
   check(
     '端点/连接下拉带出当前值（出厂 round/round）',
-    (settingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
-    JSON.stringify((settingNamed('外观 · 河流')?.dropdowns ?? []).map((dropdown) => dropdown.value)),
+    (settingNamed(DEFINITION_ROW_LABELS.appearance('河流'))?.dropdowns ?? []).map((dropdown) => dropdown.value).join(',') === 'round,round',
+    JSON.stringify((settingNamed(DEFINITION_ROW_LABELS.appearance('河流'))?.dropdowns ?? []).map((dropdown) => dropdown.value)),
   )
   check(
     '端点下拉里有三个选项（平头/圆头/方头）',
-    (settingNamed('外观 · 河流')?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'butt,round,square',
-    JSON.stringify(settingNamed('外观 · 河流')?.dropdowns?.[0]?.options),
+    (settingNamed(DEFINITION_ROW_LABELS.appearance('河流'))?.dropdowns?.[0]?.options ?? []).map((option) => option.value).join(',') === 'butt,round,square',
+    JSON.stringify(settingNamed(DEFINITION_ROW_LABELS.appearance('河流'))?.dropdowns?.[0]?.options),
   )
   check(
     '线宽/虚线两行带出当前值（河流：8、实线）',
-    settingNamed('线宽与虚线 · 河流')?.texts?.[0]?.value === '8' && settingNamed('线宽与虚线 · 河流')?.texts?.[1]?.value === '',
-    `${String(settingNamed('线宽与虚线 · 河流')?.texts?.[0]?.value)} / ${String(settingNamed('线宽与虚线 · 河流')?.texts?.[1]?.value)}`,
+    settingNamed(DEFINITION_ROW_LABELS.widthDash('河流'))?.texts?.[0]?.value === '8' && settingNamed(DEFINITION_ROW_LABELS.widthDash('河流'))?.texts?.[1]?.value === '',
+    `${String(settingNamed(DEFINITION_ROW_LABELS.widthDash('河流'))?.texts?.[0]?.value)} / ${String(settingNamed(DEFINITION_ROW_LABELS.widthDash('河流'))?.texts?.[1]?.value)}`,
   )
-  check('道路的虚线带出来了（14,10）', settingNamed('线宽与虚线 · 道路')?.texts?.[1]?.value === '14,10', String(settingNamed('线宽与虚线 · 道路')?.texts?.[1]?.value))
+  check('道路的虚线带出来了（14,10）', settingNamed(DEFINITION_ROW_LABELS.widthDash('道路'))?.texts?.[1]?.value === '14,10', String(settingNamed(DEFINITION_ROW_LABELS.widthDash('道路'))?.texts?.[1]?.value))
 
   // ---------------------------------------------------------- 改参数 → 只影响之后新画的
-  await settingNamed('线宽与虚线 · 河流').texts[0].type('20')
+  await settingNamed(DEFINITION_ROW_LABELS.widthDash('河流')).texts[0].type('20')
   check('线宽写进目录', entryOf('river')?.params.width === 20, JSON.stringify(entryOf('river')?.params))
-  await settingNamed('外观 · 河流').dropdowns[0].select('butt')
+  await settingNamed(DEFINITION_ROW_LABELS.appearance('河流')).dropdowns[0].select('butt')
   check('端点样式写进目录', entryOf('river')?.params.cap === 'butt', JSON.stringify(entryOf('river')?.params))
   check('改端点不影响其它字段（线宽还是 20）', entryOf('river')?.params.width === 20)
   check(
@@ -8390,7 +8414,7 @@ console.log('\n场景 34：路径类型目录（自定义类型参数 → 工具
   // 参数控件在「地图定义」弹窗里，所以这里对着弹窗取（它的提示行与新增区共用同一条 `fcNote`）
   openDefModal()
   const riverDashBefore = entryOf('river')?.params.dash.join(',')
-  await settingNamed('线宽与虚线 · 河流').texts[1].type('1')
+  await settingNamed(DEFINITION_ROW_LABELS.widthDash('河流')).texts[1].type('1')
   check('奇数段虚线被拒绝并给出原因', pathNote().includes('偶数'), pathNote())
   check('非法虚线没有改写目录', entryOf('river')?.params.dash.join(',') === riverDashBefore, String(entryOf('river')?.params.dash.join(',')))
 
@@ -9515,39 +9539,39 @@ console.log('\n场景 37：区域类型目录（旧区域不变 → 工具条下
   check(
     '内置 6 种区域各有参数行（颜色 + 不透明度 + 边框色）',
     ['王国', '帝国', '公国', '教区', '荒原', '海域'].every((label) => {
-      const setting = FakeSetting.created.find((item) => item.info.name === `填充与边框 · ${label}`)
+      const setting = FakeSetting.created.find((item) => item.info.name === DEFINITION_ROW_LABELS.fillBorder(label))
       return (setting?.colorPickers?.length ?? 0) === 1 && (setting?.texts?.length ?? 0) === 2
     }),
   )
   check(
     '第二行是「边框宽与虚线 · <名字>」（边框宽 + 边框虚线）',
-    (settingNamed('边框宽与虚线 · 王国')?.texts ?? []).length === 2,
-    JSON.stringify((settingNamed('边框宽与虚线 · 王国')?.texts ?? []).map((text) => text.value)),
+    (settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('王国'))?.texts ?? []).length === 2,
+    JSON.stringify((settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('王国'))?.texts ?? []).map((text) => text.value)),
   )
   check(
     '出厂值带出来了（不透明度 0.22、边框宽 3、边框色留空 = 跟随填充色、虚线留空 = 实线）',
-    settingNamed('填充与边框 · 王国')?.texts?.[0]?.value === '0.22' &&
-      settingNamed('填充与边框 · 王国')?.texts?.[1]?.value === '' &&
-      settingNamed('边框宽与虚线 · 王国')?.texts?.[0]?.value === '3' &&
-      settingNamed('边框宽与虚线 · 王国')?.texts?.[1]?.value === '',
+    settingNamed(DEFINITION_ROW_LABELS.fillBorder('王国'))?.texts?.[0]?.value === '0.22' &&
+      settingNamed(DEFINITION_ROW_LABELS.fillBorder('王国'))?.texts?.[1]?.value === '' &&
+      settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('王国'))?.texts?.[0]?.value === '3' &&
+      settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('王国'))?.texts?.[1]?.value === '',
     JSON.stringify([
-      settingNamed('填充与边框 · 王国')?.texts?.[0]?.value,
-      settingNamed('填充与边框 · 王国')?.texts?.[1]?.value,
-      settingNamed('边框宽与虚线 · 王国')?.texts?.[0]?.value,
-      settingNamed('边框宽与虚线 · 王国')?.texts?.[1]?.value,
+      settingNamed(DEFINITION_ROW_LABELS.fillBorder('王国'))?.texts?.[0]?.value,
+      settingNamed(DEFINITION_ROW_LABELS.fillBorder('王国'))?.texts?.[1]?.value,
+      settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('王国'))?.texts?.[0]?.value,
+      settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('王国'))?.texts?.[1]?.value,
     ]),
   )
 
   // ---- 改「帝国」的参数：只影响**之后**新画的区域 ----
   const beforeDraw = editor.getStatus()
   void beforeDraw
-  await settingNamed('填充与边框 · 帝国').texts[0].type('0.6')
+  await settingNamed(DEFINITION_ROW_LABELS.fillBorder('帝国')).texts[0].type('0.6')
   check('不透明度写进区域类型目录', entryOf('empire')?.params.opacity === 0.6, JSON.stringify(entryOf('empire')?.params))
-  await settingNamed('填充与边框 · 帝国').texts[1].type('#101010')
+  await settingNamed(DEFINITION_ROW_LABELS.fillBorder('帝国')).texts[1].type('#101010')
   check('边框色写进目录', entryOf('empire')?.params.borderColor === '#101010', JSON.stringify(entryOf('empire')?.params))
-  await settingNamed('边框宽与虚线 · 帝国').texts[0].type('9')
+  await settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('帝国')).texts[0].type('9')
   check('边框宽写进目录', entryOf('empire')?.params.borderWidth === 9, JSON.stringify(entryOf('empire')?.params))
-  await settingNamed('边框宽与虚线 · 帝国').texts[1].type('6,3')
+  await settingNamed(DEFINITION_ROW_LABELS.borderWidthDash('帝国')).texts[1].type('6,3')
   check('边框虚线写进目录', JSON.stringify(entryOf('empire')?.params.borderDash) === '[6,3]', JSON.stringify(entryOf('empire')?.params))
 
   editor.setRegionType('empire')
@@ -10690,7 +10714,7 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     defGroups.length === 4 && defGroups.every((el) => el.tagName === 'DETAILS' && el.open === false),
     JSON.stringify(defGroups.map((el) => [el.tagName, el.open])),
   )
-  const reefRow = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes('名称与颜色 · 礁石'))
+  const reefRow = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.terrainNameColor('礁石')))
   check('地形组里有这条定义的配色行（搬迁前后控件一个不少）', reefRow !== undefined)
   await reefRow.colorPickers[0].pick('#123456')
   await tick(30)
@@ -10733,8 +10757,8 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     // W4-1b：路径 / 区域类型的内置项**参数可改**，所以给它们开了入口 —— 做成可点开的条目，不是只读清单
     '路径 / 区域类型的内置项不是只读清单，而是可改参数的条目（内置 4 + 6 也给了入口）',
     collectByClass(defModal.contentEl, 'fc-defsection').filter((el) => el.dataset?.fcSection === 'builtin').length === 2 &&
-      FakeSetting.created.some((setting) => setting.info.name === '外观 · 河流') &&
-      FakeSetting.created.some((setting) => setting.info.name === '填充与边框 · 王国'),
+      FakeSetting.created.some((setting) => setting.info.name === DEFINITION_ROW_LABELS.appearance('河流')) &&
+      FakeSetting.created.some((setting) => setting.info.name === DEFINITION_ROW_LABELS.fillBorder('王国')),
     JSON.stringify(collectByClass(defModal.contentEl, 'fc-defsection').map((el) => [el.dataset?.fcSection, el.textContent])),
   )
   const defItems = collectByClass(defModal.contentEl, 'fc-defitem')
@@ -10813,7 +10837,7 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
   )
   // 名字就是显示名 —— 自定义与内置已经分在两个区里，不再需要「（自定义）」后缀区分
   // （W4-1b：这一行现在叫「名称 · 商路」—— 它同一行里还挂着参数入口之外的身份信息）
-  const newPathRow = FakeSetting.created.find((setting) => setting.info.name === '名称 · 商路')
+  const newPathRow = FakeSetting.created.find((setting) => setting.info.name === DEFINITION_ROW_LABELS.name('商路'))
   check(
     '新增出来的那一行带「改 ID…」与「删除」两个按钮',
     (newPathRow?.buttons ?? []).map((button) => button.text).join(',') === `${MODAL_ACTIONS.renameId},${MODAL_ACTIONS.delete}`,
@@ -12222,7 +12246,7 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
   )
   check(
     '标题行写清"当前是哪种框选、选了多少格"（ISSUE-004：信息在标题行）',
-    titleEl()?.textContent === '选择 · 矩形框选 · 14 格',
+    titleEl()?.textContent === TOOLBAR_TEXT.selection(SELECTION_MODE_LABELS.rect, 14),
     String(statusEl()?.textContent),
   )
   up(farB, dragId)
@@ -12535,7 +12559,7 @@ console.log('\n场景 48：选择系统 —— 框选 / Shift 加选 / Alt 取�
   check('没有选择时整张卡片收起（不是显示一张空的）', cardEl().classList.contains('is-empty') === true)
   check(
       '标题行回到"空闲"（副行整行隐藏，不再重复同一句话）',
-      titleEl()?.textContent === '空闲' && statusEl()?.style.display === 'none',
+      titleEl()?.textContent === TOOLBAR_TEXT.idle && statusEl()?.style.display === 'none',
       `${String(titleEl()?.textContent)} / display=${String(statusEl()?.style.display)}`,
     )
 
@@ -12654,7 +12678,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
   check('群系下拉在温度层下不渲染（不是"渲染了再藏"）', brushBiomeSelect() === undefined, String(brushBiomeSelect()))
   check(
     '状态条说清"为什么刷不动"（不是让用户猜）',
-    statusEl.textContent === '编辑：数值图层笔刷 · 请先填一个数值',
+    statusEl.textContent === TOOLBAR_TEXT.fieldBrushBlocked(BRUSH_REASONS.noValue),
     statusEl.textContent,
   )
   strokeAt(worldOf(0, 0))
@@ -12683,7 +12707,11 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
 
   // ---- ⑤ 回车确认 → 生效；一笔 = 一条历史 ----
   commitValue('12')
-  check('确认后状态条写清"刷哪一层、怎么刷"', statusEl.textContent === '编辑：温度笔刷 · ＝12', statusEl.textContent)
+  check(
+    '确认后状态条写清"刷哪一层、怎么刷"',
+    statusEl.textContent === TOOLBAR_TEXT.fieldBrush('温度', TOOLBAR_TEXT.brushOpLabel('set'), 12),
+    statusEl.textContent,
+  )
   strokeAt(worldOf(0, 0))
   check('刷上了 12', document_.terrain[cellKey(0, 0)]?.temp === 12, JSON.stringify(document_.terrain[cellKey(0, 0)]))
   check('一笔 = 一条历史（Ctrl+Z 一次回到笔画前）', editor.getStatus().undo === 1, String(editor.getStatus().undo))
@@ -12714,13 +12742,17 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
   check('换算法后数值**保留**（不用重打）', brushValueInput()?.value === '12', String(brushValueInput()?.value))
   check(
     '但笔刷被标成"未确认"，状态条提示回车',
-    /按回车确认这个数值后笔刷才生效/.test(statusEl.textContent ?? ''),
+    (statusEl.textContent ?? '').includes(BRUSH_REASONS.unconfirmedValue),
     statusEl.textContent,
   )
   strokeAt(worldOf(0, 0))
   check('未确认时这一笔不生效（12 还是 12）', document_.terrain[cellKey(0, 0)]?.temp === 12)
   commitValue('12')
-  check('回车确认后状态条变成 ＋', statusEl.textContent === '编辑：温度笔刷 · +12', statusEl.textContent)
+  check(
+    '回车确认后状态条变成 ＋',
+    statusEl.textContent === TOOLBAR_TEXT.fieldBrush('温度', TOOLBAR_TEXT.brushOpLabel('+'), 12),
+    statusEl.textContent,
+  )
   strokeAt(worldOf(0, 0))
   check('12 + 12 = 24', document_.terrain[cellKey(0, 0)]?.temp === 24, JSON.stringify(document_.terrain[cellKey(0, 0)]))
 
@@ -12755,7 +12787,11 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
   press(brushOpButton('÷'))
   commitValue('0')
   const undoBefore = editor.getStatus().undo
-  check('÷0 在整笔上就被拦下（状态条说明原因）', /不能除以 0/.test(statusEl.textContent ?? ''), statusEl.textContent)
+  check(
+    '÷0 在整笔上就被拦下（状态条说明原因）',
+    (statusEl.textContent ?? '').includes(BRUSH_REASONS.divideByZero),
+    statusEl.textContent,
+  )
   strokeAt(worldOf(0, 0))
   check(
     '÷0 不生效，也不会写出 Infinity',
@@ -12772,7 +12808,7 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
   check('分类字段才显示群系下拉', brushBiomeSelect() !== undefined)
   check(
     '没选群系就刷不动，状态条说明',
-    statusEl.textContent === '编辑：数值图层笔刷 · 请先选一个生物群系',
+    statusEl.textContent === TOOLBAR_TEXT.fieldBrushBlocked(BRUSH_REASONS.noBiome),
     statusEl.textContent,
   )
   strokeAt(worldOf(0, 0))
@@ -12793,7 +12829,11 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
   brushBiomeSelect().value = 'desert'
   fireEvent(brushBiomeSelect(), 'change')
   flushFrames()
-  check('选完群系，状态条报出它的显示名', statusEl.textContent === '编辑：生物群系笔刷 · 沙漠', statusEl.textContent)
+  check(
+    '选完群系，状态条报出它的显示名',
+    statusEl.textContent === TOOLBAR_TEXT.categoryBrush('生物群系', '沙漠'),
+    statusEl.textContent,
+  )
   strokeAt(worldOf(0, 0))
   check('刷上了沙漠', document_.terrain[cellKey(0, 0)]?.biome === 'desert', JSON.stringify(document_.terrain[cellKey(0, 0)]))
   check('一格多值：刷生物群系**不碰温度**（24 还在）', document_.terrain[cellKey(0, 0)]?.temp === 24)
@@ -13536,6 +13576,136 @@ console.log('\n场景 52：视图偏好按地图分份（W4-2）—— 每张图
     '视图偏好没有写进地图文件（分享一张图不该把对方的看法一起改掉）',
     !String(app.vault.files.get(world.path)).includes('mapViews'),
     String(app.vault.files.get(world.path)).slice(0, 80),
+  )
+
+  plugin.onunload()
+}
+
+// ---------------------------------------------- 场景 53：离开 Canvas 之后面板不再工作（ISSUE-007）
+
+/**
+ * 用户报的"致命问题"：「侧边栏离开原本的 canvas 文件过后还可以接着在其他的文件里面用，
+ * 而且状态是保存的。」
+ *
+ * 根因是两处"退路"都只问"哪张画布开着"、从不问"用户在看什么"：
+ * ① `activeCanvasHandle()` 的 `?? handles[0]`（活动叶子变成笔记时，退回后台那张画布）；
+ * ② `getInspectorEditor()` 自带的三级回落（面板的"当前编辑器"正是取它）。
+ * 修法给两处都加了一道"用户在别的文档上"的闸，并让空态文案分家。
+ *
+ * 这条场景的造景就是缺陷的现场：**画布仍开在后台标签页里**，只是活动叶子换成了一篇笔记。
+ * 破坏性验证：去掉 `CanvasAdapter.ts` 里那道闸（或 `getInspectorEditor` 开头那两行），
+ * 下面"检查器为 null / 三节空态 / 开关置灰"的断言必须变红。
+ */
+console.log('\n场景 53：离开 Canvas 之后面板不再是"上一张图的操作台"（ISSUE-007）')
+{
+  const app = makeApp(makeCanvas())
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const world = await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  const loaded = await store.load(world)
+  loaded.document.terrain['0_0'] = { t: 'forest' }
+  await store.writeNow(world, loaded.document, loaded.frontmatter.name ?? 'World', loaded.frontmatter.canvases, loaded.frontmatter.rest)
+  runCommand(plugin, 'toggle-map-layer')
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  const panel = await openMapPanel(app, plugin)
+  flushFrames()
+
+  // ---- 前提：画布在前台时面板是"能用的"（否则下面"变空"证不出是被切走导致的）----
+  check(
+    '前提：画布在前台时面板可用（笔刷一节列出了 9 种地形）',
+    inPanel(panel, 'fc-panel-terrain').length === 9,
+    String(inPanel(panel, 'fc-panel-terrain').length),
+  )
+  check('前提：画布在前台时检查器拿得到当前编辑器', layers.getInspectorEditor() !== null)
+  const togglesWhenActive = inPanel(panel, 'fc-layer-toggle')
+  check(
+    '前提：画布在前台时图层开关可点（9 个，且都不是灰的）',
+    togglesWhenActive.length === 9 && togglesWhenActive.every((button) => button.disabled !== true),
+    `${togglesWhenActive.length}/${togglesWhenActive.filter((button) => button.disabled === true).length} 灰`,
+  )
+
+  // ---- 用户切到一篇普通笔记：活动叶子换成 markdown，画布仍开在后台 ----
+  const noteLeaf = { view: { file: new FakeTFile('Notes/a.md'), getViewType: () => 'markdown' } }
+  app.workspace.getMostRecentLeaf = () => noteLeaf
+  app.workspace.activeLeaf = noteLeaf
+  plugin.refreshPanel()
+  flushFrames()
+
+  check('画布仍开着（不是"一张 canvas 都没有"那条降级路）', app.workspace.getLeavesOfType('canvas').length === 1)
+  check('"当前编辑器"变成 null：所有写入口一起失效', layers.getInspectorEditor() === null)
+  check('"当前地图文档"也变成 null（读数 / 标定弹窗的回显不会指向后台那张图）', layers.getActiveDocument() === null)
+  check(
+    '工具一项不再列上一张图的地形按钮',
+    inPanel(panel, 'fc-panel-terrain').length === 0,
+    String(inPanel(panel, 'fc-panel-terrain').length),
+  )
+  check(
+    '选择方式一项不再有可点的按钮',
+    inPanel(panel, 'fc-panel-selection-mode-button').length === 0,
+    String(inPanel(panel, 'fc-panel-selection-mode-button').length),
+  )
+  const emptyHintOf = (cls) => collectByClass(inPanel(panel, cls)[0], 'fc-panel-hint')[0]?.textContent
+  check(
+    '三节都改成「当前没有打开的地图」',
+    ['fc-panel-tools', 'fc-panel-brush', 'fc-panel-selection-mode'].every(
+      (cls) => emptyHintOf(cls) === PANEL_EMPTY_HINTS.noActiveMap,
+    ),
+    ['fc-panel-tools', 'fc-panel-brush', 'fc-panel-selection-mode'].map((cls) => `${cls}=${emptyHintOf(cls)}`).join(' | '),
+  )
+  check(
+    '「视图」一节也说同一句（它同样没有可操作的对象了）',
+    emptyHintOf('fc-panel-view') === PANEL_EMPTY_HINTS.noActiveMap,
+    String(emptyHintOf('fc-panel-view')),
+  )
+  check(
+    '面板里一处都不再说"没有启用的地图层"（在这种情况下那是假话）',
+    !collectByClass(panel.contentEl, 'fc-panel-hint').some((el) => el.textContent === PANEL_EMPTY_HINTS.noLayer),
+    collectByClass(panel.contentEl, 'fc-panel-hint').map((el) => el.textContent).join(' | '),
+  )
+  const togglesWhenNote = inPanel(panel, 'fc-layer-toggle')
+  check(
+    '图层开关还在（不消失），但整排置灰 = 点不动',
+    togglesWhenNote.length === 9 && togglesWhenNote.every((button) => button.disabled === true),
+    `${togglesWhenNote.length}/${togglesWhenNote.filter((button) => button.disabled === true).length} 灰`,
+  )
+  check(
+    '「显示图例」开关同样置灰',
+    inPanel(panel, 'fc-legend-toggle').length > 0 && inPanel(panel, 'fc-legend-toggle').every((button) => button.disabled === true),
+    String(inPanel(panel, 'fc-legend-toggle').map((button) => button.disabled).join(',')),
+  )
+  check(
+    '「画法」展开项也置灰（数值图层的配色不该在没有地图时可改）',
+    inPanel(panel, 'fc-layer-draw-toggle').every((button) => button.disabled === true),
+    String(inPanel(panel, 'fc-layer-draw-toggle').map((button) => button.disabled).join(',')),
+  )
+  const summaryWhenNote = inPanel(panel, 'fc-panel-summary-body')[0]?.textContent ?? ''
+  check('顶部状态行不再说"地图层已启用"', !summaryWhenNote.includes('地图层已启用'), summaryWhenNote)
+  check(
+    '依赖当前地图的动作按钮全部变灰（例如「导出地图…」）',
+    inPanel(panel, 'fc-panel-button')
+      .filter((button) => button.disabled === true)
+      .some((button) => (button.textContent ?? '').includes('导出地图')),
+    inPanel(panel, 'fc-panel-button').filter((button) => button.disabled === true).map((button) => button.textContent).join(' | '),
+  )
+
+  // ---- 切回 Canvas：面板立刻恢复（不需要重开面板）----
+  const canvasLeaf = app.workspace.getLeavesOfType('canvas')[0]
+  app.workspace.getMostRecentLeaf = () => canvasLeaf
+  app.workspace.activeLeaf = canvasLeaf
+  plugin.refreshPanel()
+  flushFrames()
+  check('切回 Canvas 后检查器立刻回来（没有重开面板）', layers.getInspectorEditor() !== null)
+  check(
+    '切回 Canvas 后笔刷一节又列出地形',
+    inPanel(panel, 'fc-panel-terrain').length === 9,
+    String(inPanel(panel, 'fc-panel-terrain').length),
+  )
+  check(
+    '切回 Canvas 后图层开关恢复可点',
+    inPanel(panel, 'fc-layer-toggle').every((button) => button.disabled !== true),
+    String(inPanel(panel, 'fc-layer-toggle').map((button) => button.disabled).join(',')),
   )
 
   plugin.onunload()

@@ -51,7 +51,7 @@ import { createCollapsibleGroup } from './collapsible.ts'
 import { MARKER_ICONS } from '../data/mapDocument.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
 import { resolveVaultResourceUrl } from '../base/vaultResource.ts'
-import { DEFINITION_MODAL_LABELS, MODAL_ACTIONS } from './strings.ts'
+import { DEFINITION_MODAL_LABELS, DEFINITION_ROW_LABELS, MODAL_ACTIONS } from './strings.ts'
 import {
   CUSTOM_REGION_TYPE_PREFIX,
   DEFAULT_CUSTOM_REGION_COLOR,
@@ -274,7 +274,7 @@ export class DefinitionManagerModal extends Modal {
    */
   private renderStyleResetRow(contentEl: HTMLElement): void {
     new Setting(contentEl)
-      .setName('路径与区域类型参数恢复出厂')
+      .setName(DEFINITION_ROW_LABELS.resetPathRegionParams)
       .setDesc('把内置 4 种路径类型与 6 种区域类型的参数恢复为出厂默认（自定义类型的定义与参数都不动）。')
       .addButton((button) =>
         button.setButtonText('恢复默认参数').onClick(async () => {
@@ -389,7 +389,7 @@ export class DefinitionManagerModal extends Modal {
       })
 
       new Setting(body)
-        .setName(`名称与颜色 · ${terrain.label}`)
+        .setName(DEFINITION_ROW_LABELS.terrainNameColor(terrain.label))
         .setDesc(`ID ${terrain.id}（不可改 —— 改它等于换一种地形）。`)
         .addText((text) =>
           text
@@ -418,7 +418,7 @@ export class DefinitionManagerModal extends Modal {
 
       if (!imageMode) {
         new Setting(body)
-          .setName(`字形 · ${terrain.label}`)
+          .setName(DEFINITION_ROW_LABELS.glyph(terrain.label))
           .setDesc('借用某种内置地形的图元；「通用」= 三个点。')
           .addDropdown((dropdown) => {
             dropdown.addOption('', '通用')
@@ -431,7 +431,7 @@ export class DefinitionManagerModal extends Modal {
       }
 
       new Setting(body)
-        .setName(`图片 · ${terrain.label}`)
+        .setName(DEFINITION_ROW_LABELS.image(terrain.label))
         .setDesc(
           imageMode
             ? '库内路径；也可以点右边的按钮从库里挑。'
@@ -494,7 +494,7 @@ export class DefinitionManagerModal extends Modal {
         )
 
       new Setting(body)
-        .setName(`图片排版 · ${terrain.label}`)
+        .setName(DEFINITION_ROW_LABELS.imageLayout(terrain.label))
         .setDesc('单格一张：每格各贴一张。整片一张：连通的同类型格共用一张（等比缩放居中到这一片里）。')
         .addDropdown((dropdown) => {
           dropdown.addOption('cell', '单格一张')
@@ -593,7 +593,7 @@ export class DefinitionManagerModal extends Modal {
       })
 
       new Setting(body)
-        .setName(`名称 · ${marker.label}`)
+        .setName(DEFINITION_ROW_LABELS.name(marker.label))
         .setDesc(`ID ${marker.id}（不可改 —— 改它等于换一种标记）。`)
         .addText((text) =>
           text
@@ -615,7 +615,7 @@ export class DefinitionManagerModal extends Modal {
         )
 
       new Setting(body)
-        .setName(`字形 · ${marker.label}`)
+        .setName(DEFINITION_ROW_LABELS.glyph(marker.label))
         .setDesc(imageMode ? '图片丢失或打不开时用它兜底显示。' : '借用某个内置图标的形状；「通用」= 一个圆点。')
         .addDropdown((dropdown) => {
           dropdown.addOption('', '通用（圆点）')
@@ -627,7 +627,7 @@ export class DefinitionManagerModal extends Modal {
         })
 
       const imageSetting = new Setting(body)
-        .setName(`图片 · ${marker.label}`)
+        .setName(DEFINITION_ROW_LABELS.image(marker.label))
         .setDesc(
           imageMode
             ? '库内路径；也可以点右边的按钮从库里挑。'
@@ -786,7 +786,7 @@ export class DefinitionManagerModal extends Modal {
     for (const [index, entry] of custom.entries()) {
       const body = this.createDefinitionItem(containerEl, entry.id, `${index + 1}. ${entry.label}`)
       new Setting(body)
-        .setName(`名称 · ${entry.label}`)
+        .setName(DEFINITION_ROW_LABELS.name(entry.label))
         .setDesc(`ID ${entry.id}（不可改 —— 改它等于换一种路径类型）。`)
         .addButton((button) => {
           button.setButtonText(MODAL_ACTIONS.renameId).setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
@@ -900,7 +900,7 @@ export class DefinitionManagerModal extends Modal {
   private renderPathTypeParams(body: HTMLElement, entry: PathTypeEntry): void {
     const dashText = entry.params.dash.join(',')
     new Setting(body)
-      .setName(`外观 · ${entry.label}`)
+      .setName(DEFINITION_ROW_LABELS.appearance(entry.label))
       .setDesc(`ID ${entry.id} · ${describePathTypeParams(entry.params)}`)
       .addColorPicker((picker) =>
         picker.setValue(entry.params.color).onChange(async (value) => {
@@ -926,7 +926,7 @@ export class DefinitionManagerModal extends Modal {
       )
 
     new Setting(body)
-      .setName(`线宽与虚线 · ${entry.label}`)
+      .setName(DEFINITION_ROW_LABELS.widthDash(entry.label))
       .setDesc('线宽是世界单位（1–40）；虚线留空 = 实线')
       .addText((text) =>
         text
@@ -971,7 +971,7 @@ export class DefinitionManagerModal extends Modal {
     for (const [index, entry] of custom.entries()) {
       const body = this.createDefinitionItem(containerEl, entry.id, `${index + 1}. ${entry.label}`)
       new Setting(body)
-        .setName(`名称 · ${entry.label}`)
+        .setName(DEFINITION_ROW_LABELS.name(entry.label))
         .setDesc(`ID ${entry.id}（不可改 —— 改它等于换一种区域类型）。`)
         .addButton((button) => {
           button.setButtonText(MODAL_ACTIONS.renameId).setTooltip('改内部标识，并把地图里已画的引用一起改掉').onClick(() => {
@@ -1101,7 +1101,7 @@ export class DefinitionManagerModal extends Modal {
   private renderRegionTypeParams(body: HTMLElement, entry: RegionTypeEntry): void {
     const dashText = entry.params.borderDash.join(',')
     new Setting(body)
-      .setName(`填充与边框 · ${entry.label}`)
+      .setName(DEFINITION_ROW_LABELS.fillBorder(entry.label))
       .setDesc(`ID ${entry.id} · ${describeRegionTypeParams(entry.params)}`)
       .addColorPicker((picker) =>
         picker.setValue(entry.params.color).onChange(async (value) => {
@@ -1128,7 +1128,7 @@ export class DefinitionManagerModal extends Modal {
       )
 
     new Setting(body)
-      .setName(`边框宽与虚线 · ${entry.label}`)
+      .setName(DEFINITION_ROW_LABELS.borderWidthDash(entry.label))
       .setDesc('边框宽是世界单位（0–40，0 = 不画边框）；虚线留空 = 实线')
       .addText((text) =>
         text

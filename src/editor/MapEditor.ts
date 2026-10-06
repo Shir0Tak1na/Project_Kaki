@@ -102,6 +102,8 @@ import {
   type RegionTypeEntry,
   type ResolvedRegionStyle,
 } from '../render/regionTypeCatalog.ts'
+// "笔刷为什么刷不动"的四句话：状态浮窗与侧栏会各显示一次，所以只能有一份（C4 第三批）
+import { BRUSH_REASONS } from '../ui/strings.ts'
 
 /**
  * 数值图层笔刷的**逐格算法**（施工文件 §E 那张表的唯一实现）。
@@ -614,11 +616,11 @@ export class MapEditor {
     const field = this.brushField
     if (field === null) return { ok: true }
     if (!this.brushFieldIsNumeric()) {
-      return this.brushBiome.length > 0 ? { ok: true } : { ok: false, reason: '请先选一个生物群系' }
+      return this.brushBiome.length > 0 ? { ok: true } : { ok: false, reason: BRUSH_REASONS.noBiome }
     }
-    if (this.brushValue === null) return { ok: false, reason: '请先填一个数值' }
-    if (!this.brushValueConfirmed) return { ok: false, reason: '按回车确认这个数值后笔刷才生效' }
-    if (this.brushOp === '÷' && this.brushValue === 0) return { ok: false, reason: '不能除以 0' }
+    if (this.brushValue === null) return { ok: false, reason: BRUSH_REASONS.noValue }
+    if (!this.brushValueConfirmed) return { ok: false, reason: BRUSH_REASONS.unconfirmedValue }
+    if (this.brushOp === '÷' && this.brushValue === 0) return { ok: false, reason: BRUSH_REASONS.divideByZero }
     return { ok: true }
   }
 

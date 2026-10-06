@@ -18,7 +18,14 @@
  * - **只在可见时重绘**，并且同一帧内的多次请求合并成一次（`requestAnimationFrame`）。
  */
 
-import { MODAL_ACTIONS, PANEL_SECTION_TITLES, PANEL_TITLES, devToolsSectionTitle, unknownTypeLabel } from './strings.ts'
+import {
+  MODAL_ACTIONS,
+  PANEL_EMPTY_HINTS,
+  PANEL_SECTION_TITLES,
+  PANEL_TITLES,
+  devToolsSectionTitle,
+  unknownTypeLabel,
+} from './strings.ts'
 import { ItemView, setIcon, type WorkspaceLeaf } from 'obsidian'
 import {
   formatSelectionFieldValue,
@@ -123,6 +130,14 @@ export interface MapPanelDeps {
   onSetSelectionPosition: (x: number, y: number) => void
   /** 把当前选中项整体移到视口中心（形状按包围盒中心平移） */
   onMoveSelectionToViewportCenter: () => void
+  /**
+   * 现在有没有"要操作的画布"（有活动画布 ⇒ `true`）。
+   *
+   * 与 `getLayerVisibility` 同一理由由外部注入：面板不认识工作区，"谁在前台"是宿主的事。
+   * 它为假时（用户切到了一篇笔记 / PDF，或一张画布都没开）：三节控件显示
+   * 「当前没有打开的地图」，图层开关与图例置灰 —— 面板**整块**都不可操作（ISSUE-007）。
+   */
+  hasActiveCanvas: () => boolean
   /**
    * 六个图层当前的可见性。
    *
@@ -1205,12 +1220,22 @@ export class MapPanelView extends ItemView {
       dataKey: 'fcView',
       defaultOpen: true,
     })
+    /**
+     * 没有当前画布（用户在看别的文档 / 一张画布都没开）⇒ 这一节整块置灰。
+     *
+     * 与三节控件同一条闸（ISSUE-007）：这些开关改的是"我眼前这张图想怎么看"（颜色 / 显隐），
+     * 没有图在眼前时它们既没有对象、点下去也会写错地方。这里**保留控件、置灰并写清原因**
+     * （§F.2 那条"一节整个消失会让人以为功能没了"），不去把整节删掉。
+     */
+    const enabled = this.deps.hasActiveCanvas()
     group.createEl('div', {
       cls: 'fc-panel-hint',
-      text: '每一行管"看不看"；带「画法」的层可以展开调它怎么画（配色 / 不透明度 / 显示方式）。',
+      text: enabled
+        ? '每一行管"看不看"；带「画法」的层可以展开调它怎么画（配色 / 不透明度 / 显示方式）。'
+        : PANEL_EMPTY_HINTS.noActiveMap,
     })
-    this.renderLayerGroup(group, visibility, 'base', '底图')
-    this.renderLayerGroup(group, visibility, 'feature', '地物')
+    this.renderLayerGroup(group, visibility, 'base', '底图', enabled)
+    this.renderLayerGroup(group, visibility, 'feature', '地物', enabled)
   }
 
   /**
@@ -1228,6 +1253,7 @@ export class MapPanelView extends ItemView {
     visibility: LayerVisibility,
     group: 'base' | 'feature',
     title: string,
+    enabled: boolean,
   ): void {
     const list = parent.createEl('div', { cls: 'fc-panel-layers' })
     list.dataset.fcDisplayGroup = group
@@ -1243,6 +1269,7 @@ export class MapPanelView extends ItemView {
       const visible = isLayerVisible(visibility, spec.id)
       const button = row.createEl('button', { cls: 'fc-layer-toggle' })
       button.dataset.layer = spec.id
+      button.disabled = !enabled
       if (visible) button.addClass('is-active')
       button.title = `${spec.label}：${spec.hint}（点一下${visible ? '隐藏' : '显示'}）`
       // 用 ●/○ 而不是图标：状态一眼可辨，也不依赖图标库是否有这个名字
@@ -1255,7 +1282,7 @@ export class MapPanelView extends ItemView {
         this.requestRender()
       })
       // 表里声明了 `overlay` 的层才有「画法」（温度 / 深度 / 生物群系）
-      if (spec.overlay !== undefined) this.renderLayerDraw(row, spec.overlay)
+      if (spec.overlay !== undefined) this.renderLayerDraw(row, spec.overlay, enabled)
     }
 
     // 「显示图例」跟着**地物**那一组（它列的就是"地图上有什么"）：图例的可见性也是图层设置，
@@ -1266,6 +1293,7 @@ export class MapPanelView extends ItemView {
     legendRow.dataset.fcLayerRow = 'legend'
     const legendButton = legendRow.createEl('button', { cls: 'fc-legend-toggle' })
     legendButton.dataset.fcLegendToggle = '1'
+    legendButton.disabled = !enabled
     if (showLegend) legendButton.addClass('is-active')
     legendButton.title = `显示图例：在画布右下角列出地图上实际有的地形 / 群系 / 路径 / 区域（点一下${showLegend ? '隐藏' : '显示'}）`
     legendButton.createEl('span', { cls: 'fc-legend-toggle-mark', text: showLegend ? '●' : '○' })
@@ -1287,7 +1315,7 @@ export class MapPanelView extends ItemView {
    *
    * 控件本体仍然走 `renderOverlayFieldSection` —— 与设置页**共用同一份渲染**（§5.12）。
    */
-  private renderLayerDraw(row: HTMLElement, fieldId: FieldId): void {
+  private renderLayerDraw(row: HTMLElement, fieldId: FieldId, enabled: boolean): void {
     const spec = OVERLAY_FIELDS.find((item) => item.id === fieldId)
     // 登记表写了 `overlay` 却没有对应的字段定义：不画这一项，而不是拿 undefined 去渲染
     if (spec === undefined) return
@@ -1296,6 +1324,7 @@ export class MapPanelView extends ItemView {
     if (open) row.dataset.fcDrawOpen = '1'
     const toggle = row.createEl('button', { cls: 'fc-layer-draw-toggle' })
     toggle.dataset.fcDrawToggle = fieldId
+    toggle.disabled = !enabled
     toggle.textContent = open ? '画法 ▾' : '画法 ▸'
     toggle.title = `${spec.label}这一层怎么上色：配色锚点与两端越界色（其余画法在设置页）`
     toggle.addEventListener('click', () => {
@@ -1304,7 +1333,9 @@ export class MapPanelView extends ItemView {
       this.lastSignature = null
       this.requestRender()
     })
-    if (!open) return
+    // 置灰时（没有当前画布）连"展开过的"画法正文也不画：那里面是一整片控件，
+    // 逐个置灰要穿透 `renderOverlayFieldSection`，而且它们此刻本来就没有对象可改（ISSUE-007）
+    if (!open || !enabled) return
     const body = row.createEl('div', { cls: 'fc-layer-draw-body fc-panel-data-field' })
     body.dataset.fcDrawBody = fieldId
     body.dataset.fcOverlayField = fieldId

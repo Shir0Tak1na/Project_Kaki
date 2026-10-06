@@ -288,9 +288,16 @@ export class MapLayerManager {
    * ⚠️ 诚实的边界：这一条**在冒烟里证不出来**（桩环境只有一张画布，两条实现结果相同；
    * 把它改回 `getActiveEditor()` 一条断言都不会红 —— 见工程笔记"没红也是一种结果"）。
    * 保留它是因为它在多画布下严格更合理，而不是因为某条断言钉住了它。
+   *
+   * ⚠️ **开头那道闸是后加的（ISSUE-007）**：`activeCanvasHandle()` 返回 `null` 就说明
+   * "没有当前画布"（用户在看别的文档 / 一张画布都没开），此时三级回落**一条都不许走** ——
+   * 否则用户切到一篇笔记后，面板照样能拿到那张后台画布的编辑器（按钮点下去就写进它）。
+   * 只砍掉"完全没在画布上"的回落：多画布之间"挑有选中项的那张"照旧保留。
    */
   getInspectorEditor(): MapEditor | null {
-    const activePath = activeCanvasHandle(this.deps.app)?.file?.path
+    const handle = activeCanvasHandle(this.deps.app)
+    if (handle === null) return null
+    const activePath = handle.file?.path
     if (activePath !== undefined && activePath !== null) {
       const entry = this.entries.get(activePath)
       if (entry) return entry.editor
