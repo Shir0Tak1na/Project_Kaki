@@ -90,6 +90,7 @@ import {
   DEFAULT_CUSTOM_TERRAIN_COLOR,
   DEFAULT_CUSTOM_TERRAIN_MODE,
   MAX_CUSTOM_TERRAINS,
+  TERRAIN_TAGS,
   checkTerrainImagePath,
   terrainIdProblem,
   type CustomTerrainMode,
@@ -504,6 +505,33 @@ export class DefinitionManagerModal extends Modal {
             await this.plugin.updateCustomTerrain(terrain.id, { imageLayout: value })
           })
         })
+
+      /**
+       * 标签（`BORROWED-IDEAS.md` §0.2）：筛选器按标签**一次命中一组** ——
+       * 于是"所有水域"不用把水域 / 沼泽（以及你自定义的水域地形）逐个勾一遍。
+       *
+       * 为什么是**一排小按钮**而不是下拉：下拉选不了多个，而标签本来就是"一组"的语义；
+       * 一排 chip 还能一眼看出"这条地形现在属于哪几组"（点亮的就是）。
+       * 标签**一个都没勾也是合法的**（还没归类），它只是筛不到标签。
+       */
+      const tagSetting = new Setting(body)
+        .setName(DEFINITION_ROW_LABELS.tags(terrain.label))
+        .setDesc('筛选器按标签一次命中一组（例如「所有水域」= 勾「水域」）。标签不进地图文件。')
+      const tagRow = tagSetting.controlEl.createEl('div', { cls: 'fc-terrain-tags' })
+      for (const tag of TERRAIN_TAGS) {
+        // 复用 `.fc-ctl-button`（侧栏那一套 chip 外观）—— 同一套外观只写一次（见 styles.css）
+        const chip = tagRow.createEl('button', { cls: 'fc-ctl-button fc-terrain-tag' })
+        chip.dataset.fcTerrainTag = tag.id
+        chip.textContent = tag.label
+        chip.title = `${tag.group}·${tag.label}`
+        if (terrain.tags.includes(tag.id)) chip.addClass('is-active')
+        chip.addEventListener('click', () => {
+          const next = terrain.tags.includes(tag.id)
+            ? terrain.tags.filter((item) => item !== tag.id)
+            : [...terrain.tags, tag.id]
+          void this.plugin.updateCustomTerrain(terrain.id, { tags: next }).then(() => this.rerender())
+        })
+      }
     })
 
     const atLimit = set.terrains.length >= MAX_CUSTOM_TERRAINS

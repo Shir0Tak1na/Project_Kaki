@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 图层开关与图例的单元测试。
  *
  * 两条最值钱的断言在这里：
@@ -17,6 +17,7 @@ import {
   LAYER_TABLE,
   LAYERS_BY_DRAW_ORDER,
   allLayersHidden,
+  brushFieldLayerHidden,
   hiddenLayerLabels,
   isLayerVisible,
   layerVisibilityFromLegacy,
@@ -79,6 +80,23 @@ test('隐藏清单：给状态命令一个可读答案', () => {
   let all = DEFAULT_LAYER_VISIBILITY
   for (const key of LAYER_KEYS) all = withLayerVisibility(all, key, false)
   assert.equal(allLayersHidden(all), true)
+})
+
+/**
+ * ISSUE-008：刷数据图层时"这一层是关着的"这条判据。
+ *
+ * 用户报"笔刷工作不正常 / 刷了没反应" ⇒ 真因是数据图层**出厂关着**而笔刷照旧能写，
+ * 于是屏幕上什么都不变。判据本身要能被单测钉住（浮窗与侧栏都靠它决定要不要说那句提示）。
+ */
+test('刷的字段所属图层是关着的 ⇒ true；打开之后 ⇒ false', () => {
+  // 出厂：数据层全关着
+  assert.equal(brushFieldLayerHidden('temperature', DEFAULT_LAYER_VISIBILITY), true)
+  assert.equal(brushFieldLayerHidden('biome', DEFAULT_LAYER_VISIBILITY), true)
+  const shown = withLayerVisibility(DEFAULT_LAYER_VISIBILITY, 'biome', true)
+  assert.equal(brushFieldLayerHidden('biome', shown), false, '打开之后就不该再说"看不见"')
+  assert.equal(brushFieldLayerHidden('temperature', shown), true, '别的层还关着、互不影响')
+  // 地形笔刷（field = null）没有"看不见"这回事：地形是底图
+  assert.equal(brushFieldLayerHidden(null, DEFAULT_LAYER_VISIBILITY), false)
 })
 
 /* ------------------------------------------------------------ 图层描述表 */

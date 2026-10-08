@@ -31,9 +31,12 @@ import { extractFrontmatterBlock, isMapFileContent, parseFrontmatter } from '../
 import { summarizeMapDocument } from '../src/data/mapDocument.ts'
 import { axialToWorld, cellKey, worldToAxial } from '../src/core/hex.ts'
 import { snapToCellCenter } from '../src/render/markerPlacement.ts'
+// 地形标签那一批（场景 54 用它当"期望值"）—— 与实现**共读同一常量**，改表不必改断言（同 C4 口径）
+import { TERRAIN_TAGS } from '../src/render/terrainCatalog.ts'
 // C4：被逐字断言钉住的界面文案从**单一来源**读（改文案只改 src/ui/strings.ts，不再牵动本文件）
 import {
   BASE_TEXT,
+  BRUSH_NOTES,
   BRUSH_REASONS,
   COMMAND_NAMES,
   DEFINITION_MODAL_LABELS,
@@ -595,6 +598,17 @@ function makeEl({
     get childElementCount() {
       return el.children.length
     },
+    /**
+     * `<select multiple>` 的 `selectedOptions` —— 筛选器的「属于其中之一」用的就是原生多选
+     * （`SelectionFilterModal`），而"值"那一栏是枚举里唯一走多选的地方。
+     *
+     * 真实 DOM 里它是**当时**被选中的那些 option，所以这里按 `selected` **现算**，
+     * 而不是在设值的那一刻快照一份 —— 否则测试里改完 `option.selected` 再派发 change
+     * 会读到改之前的旧值（"桩少写一半行为"，§5.13 那类）。
+     */
+    get selectedOptions() {
+      return el.children.filter((child) => child.selected === true)
+    },
     width: 0,
     height: 0,
     clientWidth: rect.width,
@@ -940,6 +954,13 @@ class FakeSetting {
 
   constructor(containerEl) {
     this.containerEl = containerEl
+    /**
+     * 真实的 `Setting` 会把控件挂进 `.setting-item-control`（名字在左、控件在右的那一栏），
+     * 插件也可以直接往它里面塞自定义控件 —— 自定义地形的「标签」一排 chip 就是这么挂的。
+     * 桩里缺这个成员的表现是"真实 Obsidian 一切正常、冒烟里抛 TypeError"（§5.13 那类）。
+     */
+    this.controlEl = makeEl({ tagName: 'div', className: 'setting-item-control' })
+    containerEl.appendChild(this.controlEl)
     this.info = {}
     this.slider = null
     FakeSetting.created.push(this)
@@ -2875,6 +2896,27 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   check('笔刷画上了地形', paintedKeys.length > 5, `格数=${paintedKeys.length}`)
   check('落点格正确（世界原点 → 格 0_0）', paintedKeys.includes('0_0'), paintedKeys.slice(0, 5).join(','))
 
+  // ---- FEATURE-AUDIT §1.1 B1：同一片地形**再刷一遍** ⇒ 提示行必须说"这一笔没有改变任何格" ----
+  // "值相同就不动"是刻意的（不该为空操作堆历史），但**静默**是缺陷：与 ISSUE-008（刷了隐藏层）
+  // 长得一模一样 —— 用户只会看到"我刷了、屏幕没变"。
+  const hintEl = () => collectByClass(toolbarEl, 'fc-toolbar-hint')[0]
+  const undoBeforeRepeat = editor.getStatus().undo
+  firePointer(host, 'pointerdown', { clientX: start.x, clientY: start.y, target: wrapper })
+  firePointer(host, 'pointermove', { clientX: end.x, clientY: end.y, target: wrapper })
+  firePointer(host, 'pointerup', { clientX: end.x, clientY: end.y, target: wrapper })
+  flushFrames()
+  check(
+    '重刷同一片地形：地图一个字节没变、也没多出一条历史',
+    Object.keys(layers.getDocument(canvasPath).terrain).length === paintedKeys.length &&
+      editor.getStatus().undo === undoBeforeRepeat,
+    `${Object.keys(layers.getDocument(canvasPath).terrain).length} 格 / undo=${editor.getStatus().undo}`,
+  )
+  check(
+    '但提示行说清了"这一笔没有改变任何格"（不许静默）',
+    hintEl()?.textContent === `${BRUSH_NOTES.noChange} · Esc 退出`,
+    String(hintEl()?.textContent),
+  )
+
   // 注意：世界坐标竖直向下在六边形网格里是"斜穿"的（q/r 交替步进），
   // 因此不能硬编码期望格号，而应断言真正关心的性质：**笔画连通无洞**，且覆盖到终点附近。
   const parsed = paintedKeys.map((key) => {
@@ -2945,6 +2987,42 @@ console.log('\n场景 12：地形笔刷（按下—拖动—抬手、撤销/重�
   check('Esc 回到选择模式', editor.mode === 'select', String(editor.mode))
   press('d')
   check('D 再次进入绘制模式', editor.mode === 'paint', String(editor.mode))
+
+  // ---- FEATURE-AUDIT §3.3：**五个工具键**与"撤销只在绘制模式下接管"以前没有任何断言 ----
+  // （数字键 / `[` `]` / Esc / D 上面已经钉住了；这里补的是剩下那两类，
+  //   而它们正是"按了没反应"最容易发生的地方。）
+  press('m')
+  check('「m」切到标记工具', editor.tool === 'marker', String(editor.tool))
+  press('t')
+  check('「t」切到文字标注', editor.tool === 'label', String(editor.tool))
+  press('p')
+  check('「p」切到路径工具', editor.tool === 'path', String(editor.tool))
+  press('r')
+  check('「r」切到区域工具', editor.tool === 'region', String(editor.tool))
+  press('b')
+  check('「b」切回地形笔刷', editor.tool === 'brush', String(editor.tool))
+
+  const cellsBeforeUndoKey = Object.keys(layers.getDocument(canvasPath).terrain).length
+  check('绘制模式下 Ctrl+Z 被我们接管（返回 false = 已消费）', press('z', ['Mod']) === false)
+  check(
+    '它真的撤销了一笔（不是只吞了按键）',
+    Object.keys(layers.getDocument(canvasPath).terrain).length < cellsBeforeUndoKey,
+    `${cellsBeforeUndoKey} → ${Object.keys(layers.getDocument(canvasPath).terrain).length}`,
+  )
+  check('Ctrl+Shift+Z 被我们接管（重做）', press('z', ['Mod', 'Shift']) === false)
+  check(
+    '重做把它还回来了',
+    Object.keys(layers.getDocument(canvasPath).terrain).length === cellsBeforeUndoKey,
+    String(Object.keys(layers.getDocument(canvasPath).terrain).length),
+  )
+  press('Escape')
+  check(
+    '选择模式下 Ctrl+Z **放行**给 Obsidian（返回 true = 未处理；否则会去撤销地图而不是撤销文字）',
+    press('z', ['Mod']) === true,
+    String(press('z', ['Mod'])),
+  )
+  press('d')
+  check('回到绘制模式（下面的断言仍按绘制模式走）', editor.mode === 'paint', String(editor.mode))
 
   // 笔刷大小生效：半径 2 的一次落笔应覆盖 19 格
   editor.setBrushRadius(2)
@@ -12834,6 +12912,22 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
     statusEl.textContent === TOOLBAR_TEXT.categoryBrush('生物群系', '沙漠'),
     statusEl.textContent,
   )
+
+  // ---- ⑦e（ISSUE-008）：刷的是**被关掉的**数据图层 ⇒ 必须说清"看不见"，而不是静默 ----
+  // 用户原话是"笔刷工作不正常 / 刷了没反应"：数据真的写进去了，但那一层没画出来，
+  // 于是屏幕上什么都不变。这几条钉的是"提示而不拦"这条决定 —— 下面那条"刷上了沙漠"同时证明
+  // **提示不等于拦下**（隐藏状态下照旧写得进文件）。
+  const hintEl = () => collectByClass(toolbarEl, 'fc-toolbar-hint')[0]
+  check(
+    '提示行说清"这一层现在隐藏着"（而不是只列按键 —— 那会让人以为笔刷坏了）',
+    hintEl()?.textContent === `${BRUSH_NOTES.hiddenLayer} · Esc 退出`,
+    String(hintEl()?.textContent),
+  )
+  check(
+    '侧栏「笔刷」一节共读同一句（两处各写一份必然分叉）',
+    inPanel(panel, 'fc-panel-hint').some((el) => el.textContent === `笔刷能用，但看不到结果：${BRUSH_NOTES.hiddenLayer}。`),
+    inPanel(panel, 'fc-panel-hint').map((el) => el.textContent).join(' | '),
+  )
   strokeAt(worldOf(0, 0))
   check('刷上了沙漠', document_.terrain[cellKey(0, 0)]?.biome === 'desert', JSON.stringify(document_.terrain[cellKey(0, 0)]))
   check('一格多值：刷生物群系**不碰温度**（24 还在）', document_.terrain[cellKey(0, 0)]?.temp === 24)
@@ -12841,6 +12935,16 @@ console.log('\n场景 49：生物群系（§D 分类字段）与数值图层笔�
   // ---- ⑨ 画布：逐格纯色（不插值、不写数值）----
   await plugin.setLayerVisible('biome', true)
   await tick(20)
+  // 图层是**从插件 API**改的（不是面板上那个开关），所以面板不会自己重绘 ——
+  // 手动请它重绘一次再读 DOM（与"改完状态要 flushFrames()"同一条纪律）
+  plugin.refreshPanel()
+  flushFrames()
+  check(
+    '打开这一层之后那句提示**自己消失**（提示跟着状态走，不是一次性弹窗）',
+    hintEl()?.textContent.includes(BRUSH_NOTES.hiddenLayer) === false &&
+      inPanel(panel, 'fc-panel-hint').some((el) => String(el.textContent).includes(BRUSH_NOTES.hiddenLayer)) === false,
+    `${String(hintEl()?.textContent)} | ${inPanel(panel, 'fc-panel-hint').map((el) => el.textContent).join(' | ')}`,
+  )
   const biomeFrame = frame()
   check('生物群系层进了绘制序列', stats().lastDrawOrder.includes('biome'), stats().lastDrawOrder.join(','))
   check('只画有群系的那一格（没填的格不画，而不是画成某个颜色）', stats().lastOverlayDrawn === 1, String(stats().lastOverlayDrawn))
@@ -13707,6 +13811,213 @@ console.log('\n场景 53：离开 Canvas 之后面板不再是"上一张图的�
     inPanel(panel, 'fc-layer-toggle').every((button) => button.disabled !== true),
     String(inPanel(panel, 'fc-layer-toggle').map((button) => button.disabled).join(',')),
   )
+
+  plugin.onunload()
+}
+
+// ---------------------------------------------- 场景 54：地形标签（BORROWED-IDEAS §0.2）
+
+/**
+ * 「所有水域」本该是**一个词**的事：9 种内置地形逐个勾很麻烦，而沼泽既是水域又是湿地 ——
+ * 单值枚举字段根本表达不了。这一轮按群系那条现成的路（`BIOME_TAGS` + `biomeTag` 规则）做了
+ * `TERRAIN_TAGS` + `terrainTag` 规则，并让**自定义地形也能打标签**（定义弹窗里一排 chip）。
+ *
+ * 破坏性验证（三处都能让下面的断言变红）：
+ * ① 规则登记表里去掉 `TERRAIN_TAG_RULE` ⇒ 规则下拉里就没有「地形标签」；
+ * ② `BUILTIN_TERRAIN_TAGS.swamp` 去掉 `aquatic` ⇒ "所有水域"少一格；
+ * ③ `updateCustomTerrain` 不把 `tags` 带上 ⇒ 定义弹窗里点 chip 不生效。
+ */
+console.log('\n场景 54：地形标签 —— 「所有水域」一个词管到底（BORROWED-IDEAS §0.2）')
+{
+  const canvas = makeCanvas()
+  const app = makeApp(canvas)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPath = 'Maps/World.canvas'
+  const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath })
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(90)
+  const editor = layers.getEditor(canvasPath)
+  const doc = () => layers.getDocument(canvasPath)
+  const selected = () => [...editor.getCellSelection()].sort()
+  const press = (element) => element.dispatchEvent({ type: 'click' })
+
+  // 自定义地形也能打标签（本批口径）：暗礁 = 水域
+  const added = await plugin.addCustomTerrain({ id: 'reef', label: '暗礁', color: '#2f6f8f', tags: ['aquatic'] })
+  check('自定义地形可以带标签（标签是定义的一部分，不进格数据）', added.ok === true, JSON.stringify(added))
+
+  // 四格：森林 / 水 / 沼泽 / 自定义暗礁 ——「所有水域」应当命中**后三格**
+  doc().terrain['0_0'] = { t: 'forest' }
+  doc().terrain['1_0'] = { t: 'water' }
+  doc().terrain['2_0'] = { t: 'swamp' }
+  doc().terrain['3_0'] = { t: 'custom:reef' }
+
+  runCommand(plugin, 'filter-selection')
+  const modal = fakeObsidian.Modal.lastAny
+  const clausesEl = collectByClass(modal?.contentEl, 'fc-filter-clauses')[0]
+  const addClauseButton = FakeSetting.created
+    .flatMap((setting) => setting.buttons ?? [])
+    .find((button) => button.buttonEl?.dataset?.fcFilter === 'add')
+  await addClauseButton.click()
+  // 控件**现取**：换规则 / 换运算符都会重建整行（与场景 48 / 50 同一条纪律）
+  const rowSelects = () =>
+    (collectByClass(clausesEl, 'fc-filter-row')[0]?.children ?? []).filter((child) => child.tagName === 'SELECT')
+  const resultEl = () => collectByClass(modal?.contentEl, 'fc-filter-result')[0]
+  const echo = () => collectByClass(modal?.contentEl, 'fc-filter-echo')[0]
+
+  const ruleSelect = rowSelects()[0]
+  check(
+    '规则下拉里有「地形标签」（加一条规则 = 加一行）',
+    ruleSelect.children.some((option) => option.value === 'terrainTag' && option.textContent === '地形标签'),
+    JSON.stringify(ruleSelect.children.map((option) => `${option.value}:${option.textContent}`)),
+  )
+  ruleSelect.value = 'terrainTag'
+  ruleSelect.dispatchEvent({ type: 'change' })
+
+  check('运算符默认是「属于其中之一」（标签本来就是一组）', rowSelects()[1]?.value === 'in', String(rowSelects()[1]?.value))
+  const valueSelect = rowSelects()[2]
+  check(
+    '值控件是**多选**，列出的正是地形标签那一批（与 `TERRAIN_TAGS` 同源）',
+    valueSelect.multiple === true && valueSelect.children.length === TERRAIN_TAGS.length,
+    `multiple=${String(valueSelect.multiple)} 选项=${valueSelect.children.length} 期望=${TERRAIN_TAGS.length}`,
+  )
+  check(
+    '刚换成「地形标签」时一个标签都没预选，所以这一条**不算数**（不会悄悄筛出全部）',
+    valueSelect.children.every((option) => option.selected !== true) && /还没有可用的条件/.test(resultEl()?.textContent ?? ''),
+    String(resultEl()?.textContent),
+  )
+
+  // 勾「水域」（真实用户路径：在多选里点一下）
+  valueSelect.children.find((option) => option.value === 'aquatic').selected = true
+  valueSelect.dispatchEvent({ type: 'change' })
+
+  check(
+    '顶部结果：按「水域」会选中 3 格（水 / 沼泽 / 自定义暗礁）',
+    resultEl()?.textContent === '按这些条件会选中 3 格',
+    String(resultEl()?.textContent),
+  )
+  check(
+    '人话回显把标签翻成显示名（不是 aquatic）',
+    /特殊·水域 类的地形/.test(echo()?.textContent ?? '') && !(echo()?.textContent ?? '').includes('aquatic'),
+    String(echo()?.textContent),
+  )
+
+  const actionButton = (key) =>
+    collectByClass(modal?.contentEl, 'fc-filter-action').find((button) => button.dataset.fcFilter === key)
+  // 先记一笔：这个场景里**改定义**（上面那条 addCustomTerrain）本身是进撤销栈的，
+  // 所以要证明的是"筛选**没有再加**一条历史"，而不是"撤销栈为空"
+  const undoBefore = editor.getStatus().undo
+  press(actionButton('apply-replace'))
+  check(
+    '「替换选择」选中的正是那三格（森林没被收进来）',
+    JSON.stringify(selected()) === JSON.stringify(['1_0', '2_0', '3_0']),
+    JSON.stringify(selected()),
+  )
+  check('标签筛选同样不改地图数据、不进撤销栈', editor.getStatus().undo === undoBefore, `${undoBefore} → ${editor.getStatus().undo}`)
+
+  // ---- 定义弹窗：一排 chip，点亮 = 属于这一组 ----
+  openDefinitionManager(plugin)
+  const tagSetting = FakeSetting.created
+    .filter((setting) => setting.info.name === DEFINITION_ROW_LABELS.tags('暗礁'))
+    .at(-1)
+  check('自定义地形多了一行「标签 · 暗礁」', tagSetting !== undefined)
+  const chips = () => collectByClass(tagSetting?.controlEl, 'fc-terrain-tag')
+  check(
+    '一排 chip = 地形标签那一批（与筛选器那张下拉同源）',
+    chips().length === TERRAIN_TAGS.length,
+    `${chips().length} / ${TERRAIN_TAGS.length}`,
+  )
+  check(
+    '「水域」是点亮的（这条地形本来就带 aquatic）',
+    chips().find((chip) => chip.dataset.fcTerrainTag === 'aquatic')?.classList.contains('is-active') === true,
+    chips().map((chip) => `${chip.dataset.fcTerrainTag}:${chip.classList.contains('is-active') ? 'on' : 'off'}`).join(' '),
+  )
+
+  const reefTags = () =>
+    plugin.activeDefinitions().terrains.find((terrain) => terrain.id === 'custom:reef')?.tags ?? []
+  press(chips().find((chip) => chip.dataset.fcTerrainTag === 'forest'))
+  await tick(40)
+  check('点一下 chip 就写进定义（暗礁 = 水域 + 森林）', JSON.stringify(reefTags()) === JSON.stringify(['aquatic', 'forest']), JSON.stringify(reefTags()))
+  await plugin.updateCustomTerrain('custom:reef', { color: '#123456' })
+  check(
+    '改颜色**不会**把标签弄丢（补丁不传 tags 就原样保留）',
+    JSON.stringify(reefTags()) === JSON.stringify(['aquatic', 'forest']),
+    JSON.stringify(reefTags()),
+  )
+
+  // ---- 标签的落点：进**定义段**（搬运工具要带走它），不进**格数据** ----
+  check(
+    '标签不住在格上（一格的字段仍然只有 t / 温度 / 深度这些）',
+    Object.keys(doc().terrain['3_0']).join(',') === 't',
+    JSON.stringify(doc().terrain['3_0']),
+  )
+  await store.flush()
+  const mapText = String(app.vault.files.get('Maps/World.map.md'))
+  check(
+    '标签随定义写进地图文件（定义随图：分享一张图，对方拿到的筛选口径也是完整的）',
+    mapText.includes('aquatic'),
+    mapText.slice(0, 100),
+  )
+
+  plugin.onunload()
+}
+
+// ---------------------------------------------- 场景 55：多画布 —— 状态行只说"活动这张画布"的事
+
+/**
+ * FEATURE-AUDIT §1.1 **B2**：侧栏顶部状态行以前按"**库里有没有**启用的地图层"判断，
+ * 于是同时开着两张画布、切到那张**没绑定地图**的上面时，它还在说"地图层已启用"——同一族的假话
+ * （ISSUE-007 是"面板还能操作"，这一条是"状态行说谎"）。
+ *
+ * 这条场景同时补上一直缺的**多画布覆盖**：桩里让 `getLeavesOfType('canvas')` 返回**两张**画布叶子。
+ * 破坏性验证：把 `describePanelSummary` 里的 `.find((item) => item.canvasPath === canvasPath)`
+ * 改回 `.find((item) => item.attached)` ⇒ 下面第 2 条必须变红。
+ */
+console.log('\n场景 55：多画布 —— 顶部状态行只说"活动这张画布"的事（FEATURE-AUDIT §1.1 B2）')
+{
+  const canvasA = makeCanvas()
+  const app = makeApp(canvasA)
+  const plugin = await loadPlugin(app)
+  const store = plugin.getStore()
+  const layers = plugin.getLayerManager()
+  const canvasPathA = 'Maps/World.canvas'
+  const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms))
+  await store.createMap({ name: 'World', folder: 'Maps', canvasPath: canvasPathA })
+  runCommand(plugin, 'toggle-map-layer')
+  await tick(90)
+  check('前提：A 这张画布启用了地图层', layers.isEnabled(canvasPathA) === true)
+
+  // 第二张画布：**没有绑定地图**（于是它不可能"已启用"）
+  const canvasB = makeCanvas()
+  const leafB = {
+    isDeferred: false,
+    view: { canvas: canvasB, file: new FakeTFile('Maps/Other.canvas'), getViewType: () => 'canvas' },
+  }
+  const leafA = app.workspace.getLeavesOfType('canvas')[0]
+  const originalGetLeaves = app.workspace.getLeavesOfType
+  // 只改 canvas 那一支，别的视图类型照旧走原实现（否则 `openMapPanel` 找不到侧栏叶子）
+  app.workspace.getLeavesOfType = (type) => (type === 'canvas' ? [leafA, leafB] : originalGetLeaves(type))
+
+  const panel = await openMapPanel(app, plugin)
+  const summary = () => inPanel(panel, 'fc-panel-summary-body')[0]?.textContent ?? ''
+  flushFrames()
+  check('活动叶子是 A 时，状态行说"地图层已启用"', summary().includes('地图层已启用'), summary())
+
+  app.workspace.getMostRecentLeaf = () => leafB
+  app.workspace.activeLeaf = leafB
+  plugin.refreshPanel()
+  flushFrames()
+  check('切到没绑定地图的 B：状态行**不再**说"已启用"', !summary().includes('地图层已启用'), summary())
+  check('而且说清是"这一张还没绑定地图"', summary().includes('尚未绑定地图'), summary())
+  check('切视图不会顺手把 A 的地图层关掉（图层只属于它自己那张画布）', layers.isEnabled(canvasPathA) === true)
+
+  app.workspace.getMostRecentLeaf = () => leafA
+  app.workspace.activeLeaf = leafA
+  plugin.refreshPanel()
+  flushFrames()
+  check('切回 A：状态行又变回"地图层已启用"', summary().includes('地图层已启用'), summary())
 
   plugin.onunload()
 }

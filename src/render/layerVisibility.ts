@@ -27,7 +27,7 @@
 
 import type { MapDocument } from '../data/mapDocument.ts'
 import { drawOverlayLayer } from './overlayDraw.ts'
-import type { FieldId, OverlayFieldSpec, OverlayMode, OverlayStyle } from './overlayFields.ts'
+import { OVERLAY_FIELDS, type FieldId, type OverlayFieldSpec, type OverlayMode, type OverlayStyle } from './overlayFields.ts'
 import type { OverlayFieldCache } from './overlayPlan.ts'
 import type { MapRenderPlan } from './renderPlan.ts'
 
@@ -323,6 +323,31 @@ export function withLayerVisibility(visibility: LayerVisibility, key: LayerKey, 
 /** 当前被隐藏的图层名（给状态命令输出用，让"地图怎么少了东西"有一个可查的答案） */
 export function hiddenLayerLabels(visibility: LayerVisibility): string[] {
   return LAYER_TABLE.filter((spec) => !isLayerVisible(visibility, spec.id)).map((spec) => spec.label)
+}
+
+/**
+ * 笔刷现在要刷的那个**数据字段**，它那一层是不是**关着的**（关着 ⇒ 刷进去看不见）。
+ *
+ * ## 为什么需要这一条（ISSUE-008，用户报"笔刷工作不正常"）
+ *
+ * 数据图层**出厂是关着的**（`defaultVisible: false`），而笔刷**照旧能写**（这是对的：
+ * 图层是"看不看"、不是"有没有"，§E 与 `renderPlan.ts` 都把这条写死了）。
+ * 但两者叠在一起就是一个**静默失败**：数据真的写进了文件，屏幕上**一个像素都不变**，
+ * 也没有任何一句话解释 —— 用户只能得出"笔刷坏了"。
+ *
+ * ## 为什么是"提示"而不是"拦下"或"自动打开"
+ *
+ * - **不拦**：那会把"编辑数据"绑死在"看不看"上，与上面那条分层口径直接冲突；
+ * - **不自动打开**：图层开关是用户自己的选择，替他改会让人困惑（"我没开它怎么亮了"）；
+ * - 于是只剩一条**必须做到**的事：**说清为什么看不见、以及去哪里打开**（呼叫方负责说）。
+ *
+ * 地形层（`field === null`）永远返回 `false`：地形是底图，没有"看不见"这回事。
+ */
+export function brushFieldLayerHidden(field: FieldId | null, visibility: LayerVisibility): boolean {
+  if (field === null) return false
+  // 字段 → 图层 的权威映射写在字段表里（`OverlayFieldSpec.layerId`），别在这里另写一份
+  const spec = OVERLAY_FIELDS.find((item) => item.id === field)
+  return spec !== undefined && !isLayerVisible(visibility, spec.layerId)
 }
 
 /** 是否全部隐藏（用于给出"你把所有图层都关了"这种可读提示） */

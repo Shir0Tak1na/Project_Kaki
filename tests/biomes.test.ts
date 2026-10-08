@@ -308,6 +308,34 @@ test('生物群系笔刷：设为某个 ID；取消笔刷（切回地形）后�
   assert.equal(document.terrain[cellKey(0, 0)]?.biome, 'desert', '地形笔刷不动 biome（它只负责 t/f/c）')
 })
 
+test('刷的地形与格子原本相同 ⇒ 记成"这一笔没有改变任何格"（不许静默，FEATURE-AUDIT §1.1 B1）', () => {
+  const document = createEmptyMapDocument({ size: 40 })
+  document.terrain[cellKey(0, 0)] = { t: 'forest' }
+  const editor = makeEditor(document)
+  editor.setMode('paint')
+  editor.setTerrainType('forest')
+  assert.equal(editor.getStatus().strokeNoChange, false, '还没刷过，不该有这句提示')
+
+  // 用同一种地形重刷：不产生 op（既有行为，不该为空操作堆历史），但必须**留下状态**可被界面说出来
+  const undoBefore = editor.getStatus().undo
+  editor.beginStroke(ORIGIN)
+  editor.endStroke()
+  assert.equal(editor.getStatus().undo, undoBefore, '空操作不进撤销栈（既有行为不变）')
+  assert.equal(editor.getStatus().strokeNoChange, true, '但必须能说出"这一笔没改变任何格"')
+
+  // 真的画到东西之后，那句提示要消失（它是"上一笔"的事）
+  editor.setTerrainType('water')
+  editor.beginStroke(ORIGIN)
+  editor.endStroke()
+  assert.equal(document.terrain[cellKey(0, 0)]?.t, 'water')
+  assert.equal(editor.getStatus().strokeNoChange, false, '改到了东西就不该再说"没改变"')
+
+  // 而在"改不到"的地方再刷一次，又会重新记上
+  editor.beginStroke(ORIGIN)
+  editor.endStroke()
+  assert.equal(editor.getStatus().strokeNoChange, true)
+})
+
 test('换字段会取消进行中的笔画（不留下"半笔"）', () => {
   const document = createEmptyMapDocument({ size: 40 })
   document.terrain[cellKey(0, 0)] = { t: 'forest' }

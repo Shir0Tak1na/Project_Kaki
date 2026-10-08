@@ -127,6 +127,7 @@ import {
 } from './base/assetFiles.ts'
 import {
   MAX_CUSTOM_TERRAINS,
+  TERRAIN_TAGS,
   isBuiltinTerrain,
   resolveTerrainStyle,
   validateCustomTerrainInput,
@@ -903,6 +904,9 @@ export default class ProjectKakiPlugin extends Plugin {
       getStatus: () => active()?.getStatus() ?? null,
       // 三节的空态文案靠它二选一（"没有当前地图" ≠ "画布开着但没启用地图层"，ISSUE-007）
       hasActiveCanvas: () => this.hasActiveCanvas(),
+      // ISSUE-008：「笔刷」一节要判断"正在刷的那一层是不是关着的"（关着 ⇒ 刷进去看不见）。
+      // 与画布、图例、图层开关共读**同一份**可见性（按活动画布那张地图解析）
+      getLayers: () => this.layersFor(this.activeViewMapPath()),
       setTool: (tool) => apply((editor) => editor.setTool(tool)),
       setTerrainType: (id) => apply((editor) => editor.setTerrainType(id)),
       setMarkerIcon: (id) => apply((editor) => editor.setMarkerIcon(id)),
@@ -1186,8 +1190,9 @@ export default class ProjectKakiPlugin extends Plugin {
         ? '当前没有打开 Canvas'
         : '当前没有打开的地图：切回一张 Canvas 后这里会显示它的状态'
     }
-    // 有当前画布时的口径与以前一致（只看"库里有没有启用的地图层"）—— 那一档不在本次缺陷范围内
-    const status = this.layers?.listStatus().find((item) => item.attached)
+    // 只看**活动这张画布**启用没有：以前这里是"随便哪张启用了就报已启用"，
+    // 于是切到另一张没启用地图层的画布时，顶部还在说"地图层已启用"（同一族的假话，见 FEATURE-AUDIT §1.1 B2）
+    const status = this.layers?.listStatus().find((item) => item.canvasPath === canvasPath)
     if (!status) {
       const mapPath = this.store?.mapFilePathForCanvas(canvasPath) ?? null
       return mapPath === null ? '当前 Canvas 尚未绑定地图' : `已绑定：${mapPath} · 地图层未启用`
@@ -1896,6 +1901,7 @@ export default class ProjectKakiPlugin extends Plugin {
     imagePath?: unknown
     mode?: unknown
     imageLayout?: unknown
+    tags?: unknown
   }): Promise<{ ok: true } | { ok: false; problem: string }> {
     // ID 留空 = 自动生成：手打 ID 是没必要的负担，显示名才是人看的（用户实测反馈）
     const existing = this.activeDefinitions().terrains
@@ -1943,6 +1949,7 @@ export default class ProjectKakiPlugin extends Plugin {
       imagePath?: unknown
       mode?: unknown
       imageLayout?: unknown
+      tags?: unknown
     },
   ): Promise<void> {
     await this.mutateDefinitions((set) => {
@@ -1957,6 +1964,9 @@ export default class ProjectKakiPlugin extends Plugin {
         // 只切模式时其余字段原样带着走 —— 于是"切回去"不会丢配置（用户来回切不会白配一遍）
         mode: patch.mode !== undefined ? patch.mode : current.mode,
         imageLayout: patch.imageLayout !== undefined ? patch.imageLayout : current.imageLayout,
+        // 标签同理：不传就**原样保留**。漏了这一步，用户改个颜色就会把标签悄悄清空
+        // （而标签在界面上是另一处控件，看起来像是"改颜色把标签弄丢了"，极难自查）
+        tags: patch.tags !== undefined ? patch.tags : current.tags,
       })
       if (!next.ok) {
         console.warn(`[project-kaki] 自定义地形 ${current.id} 的修改被拒绝：${next.problem}`)
@@ -2677,8 +2687,8 @@ export default class ProjectKakiPlugin extends Plugin {
    *
    * 为什么在这里（而不是规则表里）：目录来自插件设置与内置表两处，
    * 而规则表是模块级常量 —— 常量化它就等于"改了自定义定义要重启插件"。
-   * 生物群系的**标签跟着选项一起进去**：`biomeTag` 规则要在纯函数里判断
-   * "这一格的群系带不带这个标签"，而 `match` 拿不到目录（见 `selectionRules.ts`）。
+   * 生物群系 / 地形的**标签跟着选项一起进去**：`biomeTag` 与 `terrainTag` 两条规则要在纯函数里
+   * 判断"这一格的群系 / 地形带不带这个标签"，而 `match` 拿不到目录（见 `selectionRules.ts`）。
    */
   private selectionRuleContext(): SelectionRuleContext {
     // 目录**按活动地图**解析（与检查器、画布同一份定义）：筛选器列出的是"这张图上真有意义的地形/群系"
@@ -2687,7 +2697,10 @@ export default class ProjectKakiPlugin extends Plugin {
       terrains: listResolvedTerrainStyles(definitions.terrains).map((style) => ({
         value: style.id,
         label: style.label,
+        // 标签跟着选项一起进去：`terrainTag` 规则要在纯函数里判断"这一格的地形带不带这个标签"
+        tags: style.tags,
       })),
+      terrainTags: TERRAIN_TAGS.map((tag) => ({ value: tag.id, label: `${tag.group}·${tag.label}` })),
       biomes: listResolvedBiomeStyles(definitions.biomes).map((entry) => ({
         value: entry.id,
         label: entry.label,

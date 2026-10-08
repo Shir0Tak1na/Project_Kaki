@@ -111,7 +111,10 @@ export interface SelectionRuleSpec {
 
 /** 界面把"现在有哪些地形 / 生物群系（含各自的标签）"传进来（表不自己去看设置） */
 export interface SelectionRuleContext {
+  /** 地形（每一项可以带 `tags`，`terrainTag` 规则据此匹配） */
   terrains?: readonly RuleEnumOption[]
+  /** 地形的**标签**候选（`terrainTag` 规则的下拉里列这些） */
+  terrainTags?: readonly RuleEnumOption[]
   /** 生物群系（每一项可以带 `tags`，`biomeTag` 规则据此匹配） */
   biomes?: readonly RuleEnumOption[]
   /** 生物群系的**标签**候选（`biomeTag` 规则的下拉里列这些） */
@@ -328,6 +331,43 @@ const BIOME_RULE: SelectionRuleSpec = {
 }
 
 /**
+ * **按标签匹配地形**（`BORROWED-IDEAS.md` §0.2 / 用户口径：地形与群系共用同一批标签 ID）。
+ *
+ * 与 `BIOME_TAG_RULE` **逐字同构**，只有两处不同：读的是格上的 `t`（地形），
+ * 标签从 `context.terrains` 里取。之所以要它：9 种内置地形逐个勾很麻烦，而
+ * "所有水域"（含自定义的水域地形）本该是一个词的事 —— 沼泽既是水域又是湿地，
+ * 这在单值枚举字段上根本表达不出来。
+ *
+ * 只提供 `in` 与 `=`：标签本来就是"一组"的语义，`>` / `between` 在这里没有意义。
+ */
+const TERRAIN_TAG_RULE: SelectionRuleSpec = {
+  key: 'terrainTag',
+  label: '地形标签',
+  ops: ['in', '='],
+  valueKind: 'enum',
+  options: (context) => context.terrainTags ?? [],
+  match: (cell, op, value, context) => {
+    const actual = typeof cell?.t === 'string' ? cell.t : undefined
+    if (actual === undefined) return false
+    // 这一格的地形带哪些标签 —— 从**规则上下文**里的选项表读（`match` 拿不到目录）。
+    // 没有上下文（调用方没给目录）时 `tags` 是空的 → 筛不中（见接口上那段注释）
+    const tags = context?.terrains?.find((option) => option.value === actual)?.tags ?? []
+    if (tags.length === 0) return false
+    const wanted = asStrings(value)
+    if (wanted === null) return false
+    // `in` 与 `=` 在这里同义（值本来就是一组）；保留 `=` 是为了"只勾一个标签"时读起来顺
+    void op
+    return wanted.some((tag) => tags.includes(tag))
+  },
+  describe: (op, value, context) => {
+    const list = asStrings(value)
+    if (list === null) return '地形标签（未选）'
+    const labels = list.map((tag) => enumLabel(context.terrainTags, tag))
+    return `${labels.join(' / ')} 类的地形`
+  },
+}
+
+/**
  * **按标签匹配生物群系**（`BIOMES.md` §3 决定二的核心）—— 一条子句命中一整组。
  *
  * 为什么需要它（而不是"给群系加一个 category 字段"）：一个群系常同时属于多个组
@@ -366,6 +406,7 @@ const BIOME_TAG_RULE: SelectionRuleSpec = {
 /** 规则登记表：**加一条规则 = 加一行**（数值字段那些是自动生成的） */
 export const SELECTION_RULE_SPECS: readonly SelectionRuleSpec[] = [
   TERRAIN_RULE,
+  TERRAIN_TAG_RULE,
   BIOME_RULE,
   BIOME_TAG_RULE,
   ...NUMERIC_OVERLAY_FIELDS.map(numericFieldRule),

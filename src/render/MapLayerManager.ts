@@ -671,6 +671,9 @@ export class MapLayerManager {
           // 副行要写出当前地形笔刷的中文名（自定义地形也得有名字，不能显示成一串 ID）；
           // 目录**按这张地图解析**
           getCustomTerrains: () => this.deps.getCustomTerrains?.(this.entryDocument(canvasPath)) ?? [],
+          // 提示行要判断"正在刷的那一层是不是关着的"（关着 ⇒ 刷进去看不见，ISSUE-008）。
+          // 按**这张画布**解析（与画布、图例、图层开关同一份）
+          getLayers: () => this.layersVisibility(canvasPath),
           onModeChanged: (mode) => interaction.notifyModeChanged(mode),
           // 工具条上那个「地图层」按钮已删掉（用户反馈"不知道是干什么的"，且与面板里的
           // 「启用/停用当前 Canvas 的地图层」重复）。停用地图层现在的入口是：侧栏地图面板

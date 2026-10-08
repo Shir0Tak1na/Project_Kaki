@@ -21,6 +21,7 @@
 import { unknownTypeLabel } from '../ui/strings.ts'
 import { TERRAIN_TYPES, type TerrainType } from '../data/mapDocument.ts'
 import { normalizeColor } from './stylePalette.ts'
+import { normalizeTagsFor, tagLabelOf, tagsFor, type TagDef } from './tagCatalog.ts'
 import {
   FALLBACK_TERRAIN_BASE,
   FALLBACK_TERRAIN_OUTLINE,
@@ -62,6 +63,53 @@ export const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif']
  * 表现是"地形全部不显示"，而这条静态上限恰好是防止那种情况的第一道闸。
  */
 export const MAX_CUSTOM_TERRAINS = 40
+
+/* ------------------------------------------------------------------ 标签 */
+
+/**
+ * 地形用得上的那批标签 —— 从**共用词表**里取（`render/tagCatalog.ts`）。
+ *
+ * 与生物群系**共用同一批标签 ID**（用户口径）：`aquatic`（水域）在两边是同一个词，
+ * 所以筛选器里"所有水域"一个词管到底。地形不需要的层位标签（地表 / 地下 / 高空）
+ * 不在这一批里，下拉不会混进对地形无意义的项。
+ *
+ * ⚠️ 顺序来自词表（`TAG_DEFS`），也就是下拉里的显示顺序。
+ */
+export const TERRAIN_TAGS: readonly TagDef[] = tagsFor('terrain')
+
+/**
+ * 内置 9 种地形各带哪些标签。
+ *
+ * 为什么是**逐条写死**而不是"按名字推"：地形标签是**产品口径**（"沼泽算不算水域"），
+ * 不是从别的字段算得出来的东西。写成一张表 ⇒ 想改口径只改这里一行。
+ *
+ * 一对多是常态：沼泽既是**水域**又是**湿地**（还有"潮湿"），沙漠既是**荒漠**又是**干旱** ——
+ * 这正是"用标签而不是单一分类字段"的理由（见 `tagCatalog.ts` 的 Minecraft 1.19 那条）。
+ *
+ * ⚠️ 改这里的标签**不影响任何已存数据**（标签不住在地图文件里，只影响筛选）。
+ */
+export const BUILTIN_TERRAIN_TAGS: Record<TerrainType, readonly string[]> = {
+  mountain: ['alpine', 'mountain'],
+  forest: ['forest'],
+  water: ['aquatic'],
+  desert: ['arid', 'desert'],
+  plains: ['grassland'],
+  swamp: ['aquatic', 'wetland', 'wet'],
+  hills: ['mountain', 'grassland'],
+  tundra: ['polar', 'grassland'],
+  volcanic: ['volcanic', 'mountain'],
+}
+
+/** 取某一格地形的标签集（内置查表、自定义读定义、认不出的给空集） */
+export function terrainTagsOf(id: string, custom: readonly CustomTerrain[] = []): readonly string[] {
+  if (isBuiltinTerrain(id)) return BUILTIN_TERRAIN_TAGS[id]
+  return findCustomTerrain(id, custom)?.tags ?? []
+}
+
+/** 标签的显示名（不认识的标签原样显示 ID —— 与群系那一侧同一条口径） */
+export function terrainTagLabel(id: string): string {
+  return tagLabelOf(id)
+}
 
 /** 显示名长度上限（工具条一行放得下） */
 const MAX_LABEL_LENGTH = 24
@@ -111,6 +159,13 @@ export interface CustomTerrain {
   mode: CustomTerrainMode
   /** 图片模式下怎么铺：每格一张，还是整片（连通区域）一张 */
   imageLayout: TerrainImageLayout
+  /**
+   * 标签集（筛选器按标签一次命中一组，见 `TERRAIN_TAGS`）。
+   *
+   * 可以为空数组：一个还没归类的自定义地形是合法的，它只是筛不到标签。
+   * **不进地图文件**（标签是"怎么归类"，不是世界里有什么）—— 与群系的自定义标签同一口径。
+   */
+  tags: readonly string[]
 }
 
 /** 绘制层真正消费的地形视觉（内置、自定义、未知三种情况被抹平成同一个形状） */
@@ -124,6 +179,8 @@ export interface ResolvedTerrainStyle {
   imagePath: string
   /** 图片怎么铺：`cell` 每格一张；`region` 连通的同类型格共用一张（绘制层据此走裁剪路径） */
   imageLayout: TerrainImageLayout
+  /** 标签集（内置来自 `BUILTIN_TERRAIN_TAGS`，自定义来自定义本身，认不出的为空） */
+  tags: readonly string[]
   /** 内置 9 种之一 */
   builtin: boolean
   /** 设置里找不到这个 ID（旧文件、别人的文件、或用户刚把定义删了） */
@@ -281,6 +338,8 @@ function normalizeOneTerrain(raw: unknown): CustomTerrain | null {
     imagePath,
     mode: normalizeTerrainMode(source.mode, imagePath),
     imageLayout: normalizeTerrainImageLayout(source.imageLayout),
+    // 标签**宽松收**（不认识的丢掉，不因此丢整条定义）—— 见 `tagCatalog.normalizeTagsFor` 的说明
+    tags: normalizeTagsFor('terrain', source.tags),
   }
 }
 
@@ -336,6 +395,7 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
       glyph: style.glyph,
       imagePath: '',
       imageLayout: DEFAULT_TERRAIN_IMAGE_LAYOUT,
+      tags: BUILTIN_TERRAIN_TAGS[id],
       builtin: true,
       unknown: false,
     }
@@ -353,6 +413,7 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
       imagePath: terrain.mode === 'image' ? terrain.imagePath : '',
       // 同上：调色模式下图片根本不参与绘制，布局一律报告为 `cell`（绘制层据此走逐格路径）
       imageLayout: terrain.mode === 'image' ? terrain.imageLayout : DEFAULT_TERRAIN_IMAGE_LAYOUT,
+      tags: terrain.tags,
       builtin: false,
       unknown: false,
     }
@@ -365,6 +426,8 @@ export function resolveTerrainStyle(id: string, custom: readonly CustomTerrain[]
     glyph: FALLBACK_TERRAIN_GLYPH,
     imagePath: '',
     imageLayout: DEFAULT_TERRAIN_IMAGE_LAYOUT,
+    // 认不出的地形**没有任何标签**（不是"猜一个"）：筛选器按标签筛时它自然不进来
+    tags: [],
     builtin: false,
     unknown: true,
   }
@@ -397,7 +460,7 @@ export function terrainCatalogSignature(custom: readonly CustomTerrain[] = []): 
   return custom
     .map(
       (terrain) =>
-        `${terrain.id}|${terrain.label}|${terrain.color}|${terrain.glyph}|${terrain.imagePath}|${terrain.mode}|${terrain.imageLayout}`,
+        `${terrain.id}|${terrain.label}|${terrain.color}|${terrain.glyph}|${terrain.imagePath}|${terrain.mode}|${terrain.imageLayout}|${terrain.tags.join(',')}`,
     )
     .join(';')
 }
@@ -411,6 +474,7 @@ export function validateCustomTerrainInput(input: {
   imagePath?: unknown
   mode?: unknown
   imageLayout?: unknown
+  tags?: unknown
 }): { ok: true; terrain: CustomTerrain } | { ok: false; problem: string } {
   const id = normalizeTerrainId(input.id)
   if (id === null) return { ok: false, problem: terrainIdProblem(input.id) ?? 'ID 不合法' }
@@ -426,6 +490,11 @@ export function validateCustomTerrainInput(input: {
       imagePath: image.path,
       mode: normalizeTerrainMode(input.mode, image.path),
       imageLayout: normalizeTerrainImageLayout(input.imageLayout),
+      // ⚠️ 与 `validateCustomBiomeInput` **有意不同**：那边不认识的标签会让整条定义被拒，
+      // 这边只丢掉那个词。理由是写入面不同 —— 地形的标签有**界面多选**（只能选出认识的那些），
+      // 于是未知标签只可能来自"别的库导出的定义文件"；为它丢掉用户整条地形（含颜色 / 图片）
+      // 是拿大代价换小正确性。字形（glyph）早就是这条口径（收下 + 换通用形状 + 记一条提示）。
+      tags: normalizeTagsFor('terrain', input.tags),
     },
   }
 }

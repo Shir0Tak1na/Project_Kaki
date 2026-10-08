@@ -30,8 +30,8 @@ import { defaultRegionTypeEntries, type RegionTypeEntry } from '../src/render/re
 import type { PathTypeEntry } from '../src/render/pathTypeCatalog.ts'
 
 const SAMPLE: CustomTerrain[] = [
-  { id: 'custom:marsh', label: '沼泽地', color: '#336655', glyph: 'swamp', imagePath: '', mode: 'color', imageLayout: 'cell' },
-  { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png', mode: 'image', imageLayout: 'region' },
+  { id: 'custom:marsh', label: '沼泽地', color: '#336655', glyph: 'swamp', imagePath: '', mode: 'color', imageLayout: 'cell', tags: [] },
+  { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: 'Assets/reef.png', mode: 'image', imageLayout: 'region', tags: ['aquatic'] },
 ]
 
 test('导出 → 序列化 → 解析：内容往返一致', () => {
@@ -153,11 +153,11 @@ test('全部条目都不可用时：报告第一条的原因（而不是返回�
 
 test('合并：同 ID 保留用户现有的定义（导入是补充，不是替换）', () => {
   const existing: CustomTerrain[] = [
-    { id: 'custom:marsh', label: '我的沼泽', color: '#000000', glyph: '', imagePath: 'Assets/mine.png', mode: 'image', imageLayout: 'cell' },
+    { id: 'custom:marsh', label: '我的沼泽', color: '#000000', glyph: '', imagePath: 'Assets/mine.png', mode: 'image', imageLayout: 'cell', tags: ['wetland'] },
   ]
   const incoming: CustomTerrain[] = [
-    { id: 'custom:marsh', label: '别人的沼泽', color: '#ffffff', glyph: 'swamp', imagePath: '', mode: 'color', imageLayout: 'cell' },
-    { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell' },
+    { id: 'custom:marsh', label: '别人的沼泽', color: '#ffffff', glyph: 'swamp', imagePath: '', mode: 'color', imageLayout: 'cell', tags: ['aquatic'] },
+    { id: 'custom:reef', label: '暗礁', color: '#2f6f8f', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell', tags: [] },
   ]
   const merged = mergeTerrains(existing, incoming)
   assert.deepEqual(merged.added, ['custom:reef'])
@@ -178,10 +178,11 @@ test('合并：respect 上限，超出的条目被跳过并说明原因', () => 
     imagePath: '',
     mode: 'color' as const,
     imageLayout: 'cell' as const,
+    tags: [] as readonly string[],
   }))
   const incoming: CustomTerrain[] = [
-    { id: 'custom:new1', label: '新一', color: '#123456', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell' },
-    { id: 'custom:new2', label: '新二', color: '#123456', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell' },
+    { id: 'custom:new1', label: '新一', color: '#123456', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell', tags: [] },
+    { id: 'custom:new2', label: '新二', color: '#123456', glyph: '', imagePath: '', mode: 'color', imageLayout: 'cell', tags: [] },
   ]
   const merged = mergeTerrains(existing, incoming)
   assert.equal(merged.terrains.length, MAX_CUSTOM_TERRAINS)

@@ -385,6 +385,14 @@ export interface EditorStatus {
   painting: boolean
   /** 当前笔画已覆盖的格数（工具栏可显示） */
   strokeCells: number
+  /**
+   * **上一笔碰过格、但一格都没改**（"值相同就不动"是刻意的，但静默是缺陷 —— ISSUE-008 同族）。
+   *
+   * 为什么是"状态"而不是弹一次提示：它要**在用户再次落笔时自己消失**。
+   * 重叠着刷同一片地形（画一片森林时几乎每次都会）会让一次性弹窗变成刷屏，
+   * 而这一行只在"刚刚白刷了一笔"之后挂着，落下一笔就没了。
+   */
+  strokeNoChange: boolean
   /** 进行中的草稿顶点数（0 = 没有草稿） */
   draftPoints: number
   /** 路径/区域的绘制模式（工具栏据此高亮） */
@@ -459,6 +467,8 @@ export class MapEditor {
   /** 当前笔画：格键 → 笔画开始前的状态 */
   private strokePrevious: Map<string, TerrainCell | null> | null = null
   private strokeCells: Axial[] = []
+  /** 上一笔"碰过格但一格都没改"（ISSUE-008 同族的静默路径；落下一笔就清掉） */
+  private strokeNoChange = false
   private strokeLastPoint: Point | null = null
   /**
    * 数值图层笔刷的状态（§E）。**字段为 `null` 时走既有的地形笔刷**（一行都不改）。
@@ -521,6 +531,7 @@ export class MapEditor {
       redo: size.redo,
       painting: this.strokePrevious !== null,
       strokeCells: this.strokeCells.length,
+      strokeNoChange: this.strokeNoChange,
       draftPoints: this.draft?.clickCount ?? 0,
       geometryMode: this.geometryMode,
       selection: this.getSelection(),
@@ -1612,6 +1623,8 @@ export class MapEditor {
   beginStroke(world: Point): void {
     const grid = this.grid()
     const document_ = this.options.getDocument()
+    // 任何一次新的尝试都先把上一条"白刷了"的提示清掉（它是"上一笔"的事，不是当前的）
+    this.strokeNoChange = false
     if (!grid || !document_ || this.mode !== 'paint') return
     // 数值图层笔刷：值没填好 / 除以 0 时**不生效**（状态条会说明原因，§E 第 2 条）
     if (this.isFieldBrush() && !this.brushReadiness().ok) return
@@ -1647,6 +1660,14 @@ export class MapEditor {
     // 逐格算新状态（而不是所有格共用一个新建的 `{ t }`）：格上的其它键要跟着走
     const previousOf = (q: number, r: number): TerrainCell | null => previous.get(cellKey(q, r)) ?? null
     const ops: MapOp[] = opsFromPreviousOf(cells, (q, r) => this.nextCellOnStroke(previousOf(q, r)), previousOf)
+    /**
+     * 碰过格、却一条 op 都没产生 ⇒ 这一笔**什么都没改**（"值相同就不动"）。
+     *
+     * 这是刻意的行为（不该为"刷同一片森林"堆一堆空历史），但**静默**是缺陷：
+     * 用户只会看到"我刷了、屏幕没变"，与 ISSUE-008（刷了隐藏层）长得一模一样。
+     * 于是把它记成状态，由浮窗的提示行说一句人话（见 `MapToolbar.hintLine`）。
+     */
+    this.strokeNoChange = cells.length > 0 && ops.length === 0
     if (ops.length > 0) {
       this.history.push({ label: this.strokeLabel(ops.length), ops })
       this.options.onSaveRequested?.()

@@ -41,6 +41,7 @@ const swamp = (over: Partial<CustomTerrain> = {}): CustomTerrain => ({
   imagePath: '',
   mode: 'color',
   imageLayout: 'cell',
+  tags: [],
   ...over,
 })
 
@@ -308,6 +309,8 @@ test('新增校验：ID 或图片路径不合法时拒绝，并且不返回半�
     mode: 'image',
     // 没给布局 → `cell`（每格一张，与升级前的行为一致）
     imageLayout: 'cell',
+    // 没给标签 → 空集（还没归类是合法的）
+    tags: [],
   })
 
   // 布局也一样：缺失 → `cell`；只有显式的 `region` 才会走整片铺图

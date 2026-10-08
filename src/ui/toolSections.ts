@@ -51,8 +51,10 @@ import {
 } from '../render/regionTypeCatalog.ts'
 import { biomeCatalogSignature, listResolvedBiomeStyles, type CustomBiome } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS, type FieldId } from '../render/overlayFields.ts'
+import { brushFieldLayerHidden, type LayerVisibility } from '../render/layerVisibility.ts'
 import { ICON_LABELS } from './PlaceMarkerModal.ts'
 import {
+  BRUSH_NOTES,
   DRAW_MODE_HINTS,
   DRAW_MODE_LABELS,
   PANEL_EMPTY_HINTS,
@@ -80,6 +82,14 @@ export interface ToolControlsHost {
    * 三节的空态文案靠这个布尔二选一（见 `PANEL_EMPTY_HINTS`）。
    */
   hasActiveCanvas: () => boolean
+  /**
+   * 这一帧的图层可见性（**当前那张地图**的那一份）。
+   *
+   * 只为一件事（ISSUE-008）：数据图层出厂是关着的，而笔刷照旧能写 —— 那时屏幕上什么都不变，
+   * 用户会认为"笔刷坏了"。于是「笔刷」一节要说一句"看不到结果"。
+   * **必填**：漏接线时宁可在编译期报错，也不要按"默认隐藏"显示一句错的话。
+   */
+  getLayers: () => LayerVisibility
   setTool: (tool: EditorTool) => void
   setTerrainType: (id: TerrainId) => void
   setMarkerIcon: (id: MarkerId) => void
@@ -560,6 +570,17 @@ export function renderBrushSection(parent: HTMLElement, host: ToolControlsHost):
     // §E 第 2 条：用户不该靠猜"为什么刷不动" —— 原因写在控件的正下方
     // （浮窗的状态行也照旧写一份，两处说的是同一件事，不是两份状态）
     hintLine(group, `笔刷尚未生效：${status.brushReady.reason}`)
+  }
+  /**
+   * ISSUE-008：**能用**但看不见（刷的是被关掉的数据图层）。
+   *
+   * 与上面两条的区别很重要：那两条是"刷不动"（拦下了），这一条**不拦** ——
+   * 数据照写，只是屏幕上什么都不变。所以它**只在这里提示**，不写进 `brushReady`
+   * （混进去会让人以为笔刷不可用，进而"修"成拦下，那是错的方向）。
+   * 与画布浮窗的提示行共读同一句（`BRUSH_NOTES`）。
+   */
+  if (usable && brushFieldLayerHidden(status.brushField, host.getLayers())) {
+    hintLine(group, `笔刷能用，但看不到结果：${BRUSH_NOTES.hiddenLayer}。`)
   }
 }
 

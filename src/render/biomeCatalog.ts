@@ -26,6 +26,7 @@
  */
 
 import { CUSTOM_TERRAIN_PREFIX } from './terrainCatalog.ts'
+import { isKnownTagFor, tagLabelOf, tagsFor, type TagDef } from './tagCatalog.ts'
 
 /** 用户自定义生物群系的 ID 前缀（与地形 / 标记 / 路径类型 / 区域类型共用同一套约定） */
 export const CUSTOM_BIOME_PREFIX = CUSTOM_TERRAIN_PREFIX
@@ -34,46 +35,19 @@ export const CUSTOM_BIOME_PREFIX = CUSTOM_TERRAIN_PREFIX
 export const MAX_CUSTOM_BIOMES = 64
 
 /**
- * 标签 ID（`BIOMES.md` §1 的 `标签` 列，四类：层位 / 气候 / 植被 / 特殊）。
+ * 生物群系用得上的那批标签 —— 从**共用词表**里取（`render/tagCatalog.ts`）。
  *
- * 一个群系**可以有多个标签**（「山地森林」既是 temperate 又是 forest 又是 mountain）——
- * 这正是"不把归类做成群系上的一个枚举字段"的落地方式。
+ * 为什么不再在本文件里写一份：地形也要标签，而"水域"在两边必须是**同一个词**
+ * （用户口径：两边共用同一批标签 ID）。词表放中立模块，两个目录都只依赖它 ——
+ * 顺带避开"地形 ← 群系 ← 地形"的循环 import。
+ *
+ * ⚠️ **这批的顺序就是下拉里的显示顺序**（层位 → 气候 → 植被 → 特殊），改动会让界面顺序变。
  */
-export const BIOME_TAGS: readonly { id: string; label: string; group: string }[] = [
-  // 层位
-  { id: 'surface', label: '地表', group: '层位' },
-  { id: 'underground', label: '地下', group: '层位' },
-  { id: 'sky', label: '高空', group: '层位' },
-  // 气候
-  { id: 'polar', label: '极地', group: '气候' },
-  { id: 'boreal', label: '寒温带', group: '气候' },
-  { id: 'temperate', label: '温带', group: '气候' },
-  { id: 'mediterranean', label: '地中海', group: '气候' },
-  { id: 'subtropical', label: '亚热带', group: '气候' },
-  { id: 'tropical', label: '热带', group: '气候' },
-  { id: 'arid', label: '干旱', group: '气候' },
-  { id: 'alpine', label: '高山', group: '气候' },
-  // 植被
-  { id: 'forest', label: '森林', group: '植被' },
-  { id: 'grassland', label: '草原', group: '植被' },
-  { id: 'shrub', label: '灌木', group: '植被' },
-  { id: 'desert', label: '荒漠', group: '植被' },
-  { id: 'wetland', label: '湿地', group: '植被' },
-  // 特殊
-  { id: 'artificial', label: '人工', group: '特殊' },
-  { id: 'aquatic', label: '水域', group: '特殊' },
-  { id: 'nether', label: '地狱', group: '特殊' },
-  { id: 'ore', label: '矿脉', group: '特殊' },
-  { id: 'mountain', label: '山地', group: '特殊' },
-  { id: 'dry', label: '干燥', group: '特殊' },
-  { id: 'wet', label: '潮湿', group: '特殊' },
-]
-
-const KNOWN_TAGS = new Set(BIOME_TAGS.map((tag) => tag.id))
+export const BIOME_TAGS: readonly TagDef[] = tagsFor('biome')
 
 /** 标签的显示名（不认识的标签原样显示 —— 别的库写的自定义标签不该变成空白） */
 export function biomeTagLabel(id: string): string {
-  return BIOME_TAGS.find((tag) => tag.id === id)?.label ?? id
+  return tagLabelOf(id)
 }
 
 /** 目录里的一个生物群系：稳定 ID + 显示名 + 标签集 + 自己的颜色 */
@@ -316,7 +290,7 @@ export function validateCustomBiomeInput(input: {
     if (typeof item !== 'string') continue
     const tag = item.trim()
     if (tag.length === 0) continue
-    if (!KNOWN_TAGS.has(tag)) return { ok: false, problem: `不认识的标签：${tag}` }
+    if (!isKnownTagFor('biome', tag)) return { ok: false, problem: `不认识的标签：${tag}` }
     if (!tags.includes(tag)) tags.push(tag)
   }
   return { ok: true, biome: { id, label, color, tags } }

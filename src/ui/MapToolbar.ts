@@ -25,8 +25,9 @@ import type { EditorStatus, EditorTool } from '../editor/MapEditor.ts'
 import { listResolvedTerrainStyles, type CustomTerrain } from '../render/terrainCatalog.ts'
 import { resolveBiomeStyle } from '../render/biomeCatalog.ts'
 import { OVERLAY_FIELDS } from '../render/overlayFields.ts'
+import { brushFieldLayerHidden, type LayerVisibility } from '../render/layerVisibility.ts'
 import { TOOL_LABELS } from './toolSections.ts'
-import { TOOLBAR_TEXT, drawModeHint, drawModeLabel, selectionModeLabel, unknownTypeLabel } from './strings.ts'
+import { BRUSH_NOTES, TOOLBAR_TEXT, drawModeHint, drawModeLabel, selectionModeLabel, unknownTypeLabel } from './strings.ts'
 
 export interface MapToolbarOptions {
   editor: MapEditorLike
@@ -42,6 +43,16 @@ export interface MapToolbarOptions {
    * 所以这条依赖不能省 —— 它与"地形调色板"无关，调色板已经搬进侧栏。
    */
   getCustomTerrains?: () => readonly CustomTerrain[]
+  /**
+   * 这一帧的图层可见性（**这张画布**的那一份）。
+   *
+   * 只为一件事：数据图层出厂是关着的，而笔刷照旧能写 —— 那时屏幕上什么都不变，
+   * 用户会认为"笔刷坏了"（ISSUE-008）。于是提示行要说一句"这一层现在隐藏着…"。
+   *
+   * **必填**而不是可选 + 兜底：漏接线时宁可在编译期报错，也不要让提示行按"默认隐藏"
+   * 显示一句**错的**话（"我一直开着它，怎么说隐藏着？"）。
+   */
+  getLayers: () => LayerVisibility
 }
 
 /** 工具条只用到编辑器的这三件事（写窄了接口，免得它又长回一个控制条） */
@@ -197,6 +208,23 @@ export class MapToolbar {
       return count > 0
         ? `已选 ${count} 格 · 左键拖动=${selectionModeLabel(status.selectionMode)} · Shift 加选 / Alt 取消 · Esc 清空`
         : '按 D 进入绘制模式 · 左键拖动框选一片格（方式在侧栏「选择方式」）· 双击路径/区域可重命名'
+    }
+    /**
+     * 提示行的**优先级阶梯**（越靠前越该被先看到；三句都只在对应状态下出现）：
+     *
+     * ① **刷的是关着的层**（ISSUE-008）—— 解释"为什么看不见"，并指路去哪打开；
+     * ② **上一笔什么都没改**（ISSUE-008 同族）—— "值相同就不动"是刻意的，但静默是缺陷；
+     * ③ 常规按键提示。
+     *
+     * ①② 都是"替换"而不是追加：常规提示里有 1-9 / [ ] 这些键，但此刻用户最需要的是
+     * "我的笔刷没坏、是我把它关着 / 是这片格子本来就是这片地形"。它们都会**自己消失**
+     * （① 打开那一层就没了；② 落下一笔就没了）—— 这正是它们适合放在提示行而不是弹窗的理由。
+     */
+    if (status.tool === 'brush' && brushFieldLayerHidden(status.brushField, this.options.getLayers())) {
+      return `${BRUSH_NOTES.hiddenLayer} · Esc 退出`
+    }
+    if (status.tool === 'brush' && status.strokeNoChange) {
+      return `${BRUSH_NOTES.noChange} · Esc 退出`
     }
     if (status.tool === 'brush') {
       return '左键描绘 · 1-9 换地形 · [ ] 调笔刷 · 刷什么/半径在侧栏「笔刷」· Esc 退出'

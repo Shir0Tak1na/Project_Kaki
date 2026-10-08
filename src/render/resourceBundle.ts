@@ -217,6 +217,9 @@ export function serializeResourceBundle(bundle: ResourceBundle): string {
       // 布局同样要带走：否则"整片一张（连通区域）"导入到别处会退回单格铺图 —— 看起来像导入失败。
       // 旧格式缺这个字段时推断为 `cell`（与升级前一致），所以也不破坏兼容。
       `"imageLayout": ${JSON.stringify(terrain.imageLayout)}`,
+      // 标签也要带走：它是"这一条地形算不算水域/森林"的归类，
+      // 不带的话导入到别处之后筛选器里就少了一组（而用户以为自己已经搬过来了）。
+      `"tags": ${JSON.stringify([...terrain.tags])}`,
     ]
     const comma = index === bundle.terrains.length - 1 ? '' : ','
     lines.push(`    { ${fields.join(', ')} }${comma}`)
@@ -424,6 +427,7 @@ function parseTerrains(
             imagePath?: unknown
             mode?: unknown
             imageLayout?: unknown
+            tags?: unknown
           })
         : ({ id: undefined } as { id: unknown })
     const result = validateCustomTerrainInput(input)

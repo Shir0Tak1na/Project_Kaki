@@ -297,12 +297,35 @@ export const BRUSH_REASONS = {
 } as const
 
 /**
+ * 「笔刷能用，但你现在看不到结果」这一类**提示**（不是"刷不动"的原因，所以另立一组）。
+ *
+ * 为什么要跟 `BRUSH_REASONS` 分开：那四条是**拦下笔刷**（`brushReadiness` 判定为不可用），
+ * 这一条**不拦** —— 数据照写（图层是"看不看"、不是"有没有"），只是屏幕上什么都不会变。
+ * 混进那一组会让人以为"笔刷不可用"，于是有人会去"修"成拦下 —— 那是错的方向
+ * （见 `layerVisibility.brushFieldLayerHidden` 的说明）。
+ *
+ * 两处共读这一句：画布浮窗的**提示行**与侧栏「笔刷」一节（两处各写一份必然分叉）。
+ * 冒烟逐字比较 ⇒ 满足 C4 判据 ①。
+ */
+export const BRUSH_NOTES = {
+  hiddenLayer: '这一层现在隐藏着 —— 刷进去的数据看不见，去侧栏「视图」里打开它',
+  /**
+   * 上一笔"碰过格、但一格都没改"（`MapEditor.strokeNoChange`）。
+   *
+   * 与上面那句同源：**数据没变、屏幕也没变**，不给一句话就与"笔刷坏了"无法区分。
+   * 写成"本来就是这片地形"而不是"值相同"：用户想的是地形，不是字段值。
+   */
+  noChange: '这一笔没有改变任何格 —— 那些格子本来就是这片地形',
+} as const
+
+/**
  * 「地图定义」弹窗里**每一行控件的名字**。
  *
  * 形状都是 `前缀 · <显示名>`：四条前缀 × 四类定义 = 十二种组合，冒烟对其中大多数
  * 逐字比较过（`外观 · 河流` / `线宽与虚线 · 河流` / `填充与边框 · 王国` / `字形 · 沼泽地`…）
  * ⇒ 判据 ①。**同一个前缀在多类定义里复用**（`名称 · …` 用于标记 / 路径 / 区域），
  * 所以这里是"一个函数一个前缀"，而不是"一类定义一张表"。
+ * （`标签 · <显示名>` 是第 13 条：只有自定义地形有标签，见 `render/tagCatalog.ts`。）
  */
 export const DEFINITION_ROW_LABELS = {
   /** 恢复内置路径 / 区域类型参数的按钮（唯一一条不带显示名的） */
@@ -311,6 +334,7 @@ export const DEFINITION_ROW_LABELS = {
   glyph: (label: string): string => `字形 · ${label}`,
   image: (label: string): string => `图片 · ${label}`,
   imageLayout: (label: string): string => `图片排版 · ${label}`,
+  tags: (label: string): string => `标签 · ${label}`,
   name: (label: string): string => `名称 · ${label}`,
   appearance: (label: string): string => `外观 · ${label}`,
   widthDash: (label: string): string => `线宽与虚线 · ${label}`,

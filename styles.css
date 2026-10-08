@@ -369,6 +369,16 @@
   border: 1px solid rgba(0, 0, 0, 0.35);
 }
 
+/* 「地图定义」弹窗里自定义地形的标签（一排 chip，点亮 = 属于这一组）。
+   宽度上限是跟着设置弹窗的窄栏来的：不给上限的话 12 个标签会把整行撑得很宽。 */
+.fc-terrain-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 320px;
+  justify-content: flex-end;
+}
+
 /* 路径 / 区域类型的选择现在在侧栏（原生 `<select>` + 当前类型的色块），
    那个自绘下拉（`ToolbarDropdown`）随之退休 —— 见 docs/DEVLOG.md。 */
 
