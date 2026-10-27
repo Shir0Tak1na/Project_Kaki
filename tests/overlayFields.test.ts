@@ -11,8 +11,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  DEFAULT_OVERLAY_BLEND,
   DEFAULT_OVERLAY_STYLES,
+  OVERLAY_BLEND_MODES,
   OVERLAY_FIELDS,
+  blendModeToCss,
   defaultOverlayStyles,
   formatFieldReading,
   isCategoryField,
@@ -122,6 +125,28 @@ test('规范化：不透明度夹在 0–1、只认布尔开关、少于两条�
     '只认登记表里的字段，不认识的键不许进设置',
   )
   assert.throws(() => overlayField('nope' as never), /未知的数值图层字段/)
+})
+
+test('混合模式：出厂是"正常"，只认登记表里的值（老设置 / 坏值一律回出厂）', () => {
+  // 出厂 = 正常（盖上去）：老设置没有这一项 ⇒ 升级后画面一字不变（与"显示方式"同一条口径）
+  for (const spec of OVERLAY_FIELDS) {
+    assert.equal(spec.defaultStyle().blend, 'source-over', `${spec.id} 出厂应当是"盖上去"`)
+  }
+  assert.equal(DEFAULT_OVERLAY_STYLES.temperature.blend, DEFAULT_OVERLAY_BLEND)
+  // 表里那几个值都收，别的（含拼错的模式名）一律回出厂
+  for (const option of OVERLAY_BLEND_MODES) {
+    assert.equal(normalizeOverlayStyles({ temperature: { blend: option.value } }).temperature.blend, option.value, option.value)
+  }
+  assert.equal(normalizeOverlayStyles({ temperature: { blend: 'darken' } }).temperature.blend, 'source-over', '表外的模式不许进来')
+  assert.equal(normalizeOverlayStyles({ temperature: {} }).temperature.blend, 'source-over', '缺项回出厂')
+})
+
+test('混合模式的画布名 → CSS 名只差一处（source-over ↔ normal）', () => {
+  assert.equal(blendModeToCss('source-over'), 'normal', '画布叫 source-over，CSS/SVG 叫 normal')
+  for (const option of OVERLAY_BLEND_MODES) {
+    if (option.value === 'source-over') continue
+    assert.equal(blendModeToCss(option.value), option.value, `${option.value} 两边应当同一个词（映射只此一处）`)
+  }
 })
 
 test('数据层的字段不许声明取值区间（色带两端不是数据的边界）', () => {

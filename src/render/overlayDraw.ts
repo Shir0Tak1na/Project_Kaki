@@ -20,6 +20,7 @@ import type { MapDocument } from '../data/mapDocument.ts'
 import type { FieldPrimitive } from './fieldPlan.ts'
 import { buildOverlayPlan, type OverlayFieldCache } from './overlayPlan.ts'
 import {
+  DEFAULT_OVERLAY_BLEND,
   OVERLAY_LABEL_BASELINE_RATIO,
   OVERLAY_LABEL_FONT,
   OVERLAY_LABEL_SCALE,
@@ -174,6 +175,10 @@ export function drawOverlayLayer(context: OverlayDrawContext): OverlayDrawResult
   const previousAlign = ctx.textAlign
   const previousBaseline = ctx.textBaseline
   const previousAlpha = ctx.globalAlpha
+  // 混合模式：**整层**统一设置（不逐个图元设 / 还原 —— 一层的合成方式是"这一层的样式"，
+  // 不是每个色块各调一次），循环结束后还原。取值就是画布的 `globalCompositeOperation` 名。
+  const previousComposite = ctx.globalCompositeOperation
+  ctx.globalCompositeOperation = style.blend ?? DEFAULT_OVERLAY_BLEND
   const previousDash = typeof ctx.getLineDash === 'function' ? ctx.getLineDash() : []
   // 位图上的格半径：世界半径 × 位图/世界的比例（与地形层的 targetRadius 同一条式子）
   const rasterRadius = document.grid.size * layer.deviceScale
@@ -279,6 +284,8 @@ export function drawOverlayLayer(context: OverlayDrawContext): OverlayDrawResult
   }
   if (typeof ctx.setLineDash === 'function') ctx.setLineDash(previousDash)
   ctx.globalAlpha = previousAlpha
+  // 混合模式必须还原：它是画布状态，留给下一层 / 下一帧会把别的层也一起改掉
+  ctx.globalCompositeOperation = previousComposite
 
   return {
     mode: stats.mode,

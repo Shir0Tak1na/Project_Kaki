@@ -16,6 +16,8 @@
 
 import { Setting } from 'obsidian'
 import {
+  DEFAULT_OVERLAY_BLEND,
+  OVERLAY_BLEND_MODES,
   OVERLAY_MODES,
   OVERLAY_OPACITY_MAX,
   OVERLAY_OPACITY_MIN,
@@ -23,6 +25,7 @@ import {
   isCategoryField,
   overlayUnitOf,
   overlayUnitTitle,
+  type BlendMode,
   type CategoryOverlayFieldSpec,
   type OverlayFieldSpec,
   type OverlayMode,
@@ -93,6 +96,33 @@ export interface OverlaySectionHost {
 /** 这一层的配色是否还是出厂值（只用来决定「恢复出厂配色」那行的说明怎么写） */
 function rampEqualsDefault(ramp: RampSpec, spec: OverlayFieldSpec): boolean {
   return JSON.stringify(ramp) === JSON.stringify(spec.defaultStyle().ramp)
+}
+
+/**
+ * 「混合模式」下拉（**数值字段与分类字段共用**，所以收成一处）。
+ *
+ * 为什么要有它：温度 / 深度 / 生物群系叠在地形之上时默认是**盖上去**的，地形的明暗会被糊住；
+ * 换成"正片叠底"就能既看数据又看地形（`BORROWED-IDEAS.md` §3.1）。
+ * 取值与画布的 `globalCompositeOperation` 同名；画布与 SVG 导出各翻译一次由
+ * `blendModeToCss` 统一（这里不碰映射，只填下拉）。
+ */
+function renderBlendSetting(
+  containerEl: HTMLElement,
+  spec: OverlayFieldSpec,
+  host: OverlaySectionHost,
+  style: OverlayStyle,
+): void {
+  new Setting(containerEl)
+    .setName(OVERLAY_CONTROL_LABELS.blend(spec.label))
+    .setDesc('这一层怎么和下面的地形合成：正片叠底能让地形明暗透出来，滤色会提亮（画布与导出同一条）。')
+    .addDropdown((dropdown) => {
+      for (const option of OVERLAY_BLEND_MODES) dropdown.addOption(option.value, option.label)
+      dropdown.setValue(style.blend ?? DEFAULT_OVERLAY_BLEND)
+      dropdown.onChange((value) => {
+        // 改混合模式不影响后续控件，所以不需要 rerender（与"显示方式 / 展示单位"不同）
+        void host.setOverlayStyle(spec.id, { blend: value as BlendMode })
+      })
+    })
 }
 
 /**
@@ -202,6 +232,8 @@ export function renderOverlayFieldSection(
         }),
     )
 
+  renderBlendSetting(containerEl, spec, host, style)
+
   // 显示方式：逐格（局限在六边形里）/ 连续场（插值 + 等值线）。
   // 连续场的参数**只在选了连续场时才出现** —— 用户抱怨过设置页太挤（§5.31/A3）。
   new Setting(containerEl)
@@ -297,6 +329,8 @@ export function renderCategoryFieldSection(
           void host.setOverlayStyle(spec.id, { opacity: value })
         }),
     )
+
+  renderBlendSetting(containerEl, spec, host, style)
 
   new Setting(containerEl)
     .setName(OVERLAY_CONTROL_LABELS.categoryColors(spec.label))

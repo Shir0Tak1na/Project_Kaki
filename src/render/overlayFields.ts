@@ -35,6 +35,18 @@ export interface OverlayStyle {
    */
   opacity: number
   /**
+   * **混合模式**：这一层的颜色怎么与下面的像素（地形 / 网格 / 更低的数值层）合成。
+   *
+   * 默认 `source-over`（照旧"盖上去"）—— 于是老设置升级后画面一字不变。
+   * 选 `multiply`（正片叠底）就能让地形的明暗**透出来**：色块仍在，但山影看得见
+   * （见 `BORROWED-IDEAS.md` §3.1）。
+   *
+   * ⚠️ 取值就是画布的 `globalCompositeOperation` 名，**与 CSS/SVG 的 `mix-blend-mode`
+   * 只差一个词**（`source-over` 对应 `normal`）—— 转换只有 `blendModeToCss` 一处，
+   * 画布与导出才不会有第二份映射（本项目已经因为"两处各写一份"出过多次真事故）。
+   */
+  blend: BlendMode
+  /**
    * 在**每个**格心画出数值。默认关：密铺时数字比颜色吵，需要读数时再打开。
    *
    * ⚠️ 它管不了**越界格**：越界格**总是**写数值（即使这一项是关的）——
@@ -97,6 +109,34 @@ export const OVERLAY_MODES: readonly { value: OverlayMode; label: string }[] = [
 ]
 
 export const DEFAULT_OVERLAY_MODE: OverlayMode = 'cell'
+
+/**
+ * 数值图层的**混合模式**（下拉选项顺序即这里的顺序）。
+ *
+ * 取值刻意与画布的 `globalCompositeOperation` 同名 —— 于是"这一层怎么合成"在代码里只有
+ * 一个词，不必在画布侧与导出侧各翻译一次。`source-over` 是默认（照旧盖上去）。
+ */
+export type BlendMode = 'source-over' | 'multiply' | 'screen' | 'overlay' | 'soft-light'
+
+export const OVERLAY_BLEND_MODES: readonly { value: BlendMode; label: string }[] = [
+  { value: 'source-over', label: '正常（盖上去）' },
+  { value: 'multiply', label: '正片叠底（透出地形明暗）' },
+  { value: 'screen', label: '滤色（提亮）' },
+  { value: 'overlay', label: '叠加（明暗对比更强）' },
+  { value: 'soft-light', label: '柔光（过渡更柔）' },
+]
+
+export const DEFAULT_OVERLAY_BLEND: BlendMode = 'source-over'
+
+/**
+ * 混合模式的画布名 → CSS / SVG 的 `mix-blend-mode` 名。
+ *
+ * 只有这一个词不同（`source-over` ↔ `normal`），其余一一对应；把这条映射收在一处，
+ * 画布与导出就不会各翻译一次（那种分叉最终表现为"导出的图与画布不一样"）。
+ */
+export function blendModeToCss(blend: BlendMode): string {
+  return blend === 'source-over' ? 'normal' : blend
+}
 
 /**
  * 数值文字的**字体栈**（画布与导出共用一条）。
@@ -251,6 +291,7 @@ const TEMPERATURE_FIELD: NumericOverlayFieldSpec = {
   read: (cell) => readFinite(cell?.temp),
   defaultStyle: () => ({
     opacity: 0.5,
+    blend: DEFAULT_OVERLAY_BLEND,
     showValues: false,
     ramp: defaultTemperatureRamp(),
     mode: 'cell',
@@ -279,6 +320,7 @@ const DEPTH_FIELD: NumericOverlayFieldSpec = {
   format: (value, style, calibration) => formatDepthReading(value, style.unit ?? 'm', calibration),
   defaultStyle: () => ({
     opacity: 0.5,
+    blend: DEFAULT_OVERLAY_BLEND,
     showValues: false,
     ramp: defaultDepthRamp(),
     unit: 'm',
@@ -325,6 +367,7 @@ const BIOME_FIELD: CategoryOverlayFieldSpec = {
   },
   defaultStyle: () => ({
     opacity: 0.5,
+    blend: DEFAULT_OVERLAY_BLEND,
     showValues: false,
     // 分类字段不用配色；这一项只为让 `OverlayStyle` 的形状统一，界面上**不显示**它的控件
     // （设置页按 `isNumericField` 筛掉配色 / 越界色 / 单位 / 显示方式那几个控件）。
@@ -447,6 +490,19 @@ function normalizeOpacity(value: unknown, fallback: number): number {
   return Math.min(OVERLAY_OPACITY_MAX, Math.max(OVERLAY_OPACITY_MIN, value))
 }
 
+/** 合法的混合模式取值（由下拉表派生 —— 加一种模式只改上面那一个数组，这里不另写清单） */
+const BLEND_VALUES: readonly string[] = OVERLAY_BLEND_MODES.map((option) => option.value)
+
+/**
+ * 把任意输入收敛成合法混合模式。
+ *
+ * 只认登记表里那几个值，其余（含老设置里的缺失、手工改坏的字符串）一律回**出厂值** ——
+ * 与"显示方式"同一条口径：拒绝无法解释的取值，而不是悄悄取一个"看起来合理"的。
+ */
+function normalizeBlend(value: unknown, fallback: BlendMode): BlendMode {
+  return typeof value === 'string' && BLEND_VALUES.includes(value) ? (value as BlendMode) : fallback
+}
+
 /**
  * 把任意输入收敛成完整的覆盖层样式表。
  *
@@ -462,6 +518,8 @@ export function normalizeOverlayStyles(raw: unknown): OverlayStyles {
     const record = entry !== null && typeof entry === 'object' ? (entry as Record<string, unknown>) : {}
     const style: OverlayStyle = {
       opacity: normalizeOpacity(record.opacity, fallback.opacity),
+      // 混合模式：只认登记表里那几个值，其余（含老设置里的缺失）回出厂（正常）
+      blend: normalizeBlend(record.blend, fallback.blend),
       showValues: typeof record.showValues === 'boolean' ? record.showValues : fallback.showValues,
       // 配色交给 colorRamp 自己的规范化：它知道"少于两条锚点就整体回退"这类规则
       ramp: normalizeRampSpec(record.ramp, fallback.ramp),

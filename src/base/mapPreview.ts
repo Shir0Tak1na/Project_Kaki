@@ -18,11 +18,13 @@ import {
   type LayerVisibility,
 } from '../render/layerVisibility.ts'
 import {
+  DEFAULT_OVERLAY_BLEND,
   DEFAULT_OVERLAY_STYLES,
   OVERLAY_FIELDS,
   OVERLAY_LABEL_BASELINE_RATIO,
   OVERLAY_LABEL_FONT,
   OVERLAY_LABEL_SCALE,
+  blendModeToCss,
   type OverlayStyles,
 } from '../render/overlayFields.ts'
 import { buildOverlayPlan } from '../render/overlayPlan.ts'
@@ -354,7 +356,12 @@ export function buildMapPreviewSvgWithReport(
       overlays.push({ label: spec.label, path, inlineChars })
       if (primitives.length === 0) continue
 
-      content.push(`<g data-fc-overlay="${spec.id}" fill="none">`)
+      // 混合模式：与画布**同一条**（画布设 `globalCompositeOperation`、SVG 用 `mix-blend-mode`，
+      // 名字只差 `source-over` ↔ `normal` 一处，由 `blendModeToCss` 统一翻译）。
+      // "正常"是默认，不写属性 —— 于是老设置导出的 SVG 一字不变。
+      const blend = style.blend ?? DEFAULT_OVERLAY_BLEND
+      const blendAttr = blend === 'source-over' ? '' : ` style="mix-blend-mode: ${blendModeToCss(blend)}"`
+      content.push(`<g data-fc-overlay="${spec.id}" fill="none"${blendAttr}>`)
       for (const primitive of primitives) {
         if (primitive.kind === 'polygon') {
           const points = primitive.points

@@ -28,7 +28,7 @@
 |---|---|---|
 | **地形标签遗留** | 笔刷"只刷水域"（按标签刷）· 图例按标签折叠 · 自定义**生物群系**仍无编辑 UI | 筛选那条路做完了，其它路没接（`BORROWED-IDEAS.md` §0.2） |
 | **选择系统依赖族** | 选区复制/粘贴（图章）+ 六角 60° 旋转 · 扩展/收缩/边界/方向推 · `//replace A B` · 魔棒容差 · 多边形/圆盘选择 · 选中内容导出表格 | 都挂在"当前选择"这一输入上（`BORROWED-IDEAS.md` §1.2/§1.3/§2.x） |
-| **渲染样式族** | 图层混合模式 · 每层总不透明度（地形/路径/标记） · 色觉友好色带预设 | `BORROWED-IDEAS.md` §3 |
+| **渲染样式族** | ~~图层混合模式~~ ✅ **已做（2026-10-09，`DEVLOG.md` §十七；只加在数据层）** · 每层总不透明度（地形/路径/标记） · 色觉友好色带预设 | `BORROWED-IDEAS.md` §3 |
 | **交互可发现性族** | 「调整上一步」浮层 · 撤销历史面板 · 调试浮层（F3 式） · 选择方式/笔刷命令化 · 统一状态提示条 | `BORROWED-IDEAS.md` §1.4/§1.5/§5 |
 | **数据格式族** | 版本迁移链（`[v1→v2,…]` 替掉散落的兼容分支） · "把默认值写进所有格"（§B.7） | 迁移链一上来就要覆盖 `dataDefaults` / `biome` |
 | **存储口径族** | "定义是否随地图文件走"待裁定 · "出厂数值类按地图分份"与"显示偏好不进地图文件"的张力待澄清 | `UI-REORG-PLAN.md` 的待裁定项 |
@@ -79,7 +79,7 @@ C4 三批改完后"界面一字未变"的 6 条人工核对 · Base 视图的多
 | 路径类型目录（含旧数据迁移）/ 区域类型目录 | 34, 35 / 37 | `pathTypeCatalog` `pathStyleSettings` / `regionTypeCatalog` | — |
 | 地图文档读写（v1/v2、`definitions`、未知字段保留） | 6, 7, 8, 51 | `mapDocument` `mapDefinitions` `unknownFields` `dataDefaults` | — |
 | 撤销·重做（含**定义修改**可撤销） | 12, 13, 38, 39, 54 | `editing` `markers` `shapes` `selection` | **定义修改可撤销只有 1 条顺带断言** |
-| 数值图层渲染（温度/深度）/ 等值线标注 | 42, 43, 44, 49 / 44, 47 | `overlayFields` `overlayPlan` `colorRamp` / `fieldPlan` | — |
+| 数值图层渲染（温度/深度）/ 等值线标注 / **混合模式** | 42, 43, 44, 49 / 44, 47 / **45** | `overlayFields` `overlayPlan` `colorRamp` `overlayDraw`（**2026-10-09 补**） / `fieldPlan` | — |
 | 每格默认值 / 海拔标定与展示单位 | 46 / 43 | `dataDefaults` `overlayPlan` / `elevationUnits` | — |
 | Base 视图与缩略图 / SVG 导出 / PNG 导出 / 按范围导出 | 19, 20 / 20, 45 / 26, 45 / 32 | `baseRows` `assetFiles` `exportStyle` `renderPlan` `pngExport` `pngEncode` `exportBounds` | — |
 | 投影与缩放（缩放漂移三道闸）/ 网格与浮层挂载 | 1, 1b, 3, 4×2, 9 / 10 | `projection` `viewport` `overlayGeometry` | — |

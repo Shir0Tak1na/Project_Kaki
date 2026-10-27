@@ -377,6 +377,12 @@ function makeRecordingContext() {
      */
     lineDash: [],
     globalAlpha: 1,
+    /**
+     * 混合模式：与真实 canvas 一样是**状态**（不随 `resetCalls` 复位 —— 漏还原会被后面的帧带走，
+     * 那正是我们要能抓到的缺陷）。每次 `fill()` 快照当刻的值，于是"色块是不是在该模式之下画的"
+     * 断言得出来（`BORROWED-IDEAS.md` §3.1 的验收口径）。
+     */
+    globalCompositeOperation: 'source-over',
     textAlign: 'start',
     textBaseline: 'alphabetic',
     /** 清空计数，用于精确测量"单帧"的绘制量 */
@@ -462,6 +468,7 @@ function makeRecordingContext() {
       fills.push({
         fillStyle: context.fillStyle,
         alpha: context.globalAlpha,
+        composite: context.globalCompositeOperation,
         points: current ? current.points.map((point) => ({ x: point.x, y: point.y })) : [],
       })
     },
@@ -11234,6 +11241,15 @@ console.log('\n场景 42：数值图层（温度覆盖层）—— 格上的值 
   const settingNamed = (fragment) =>
     FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(fragment))
   check('设置页有「温度层的不透明度」滑块', settingNamed(OVERLAY_CONTROL_LABELS.opacity('温度'))?.slider !== null)
+  // ---- 混合模式（BORROWED-IDEAS §3.1）：与地形合成的方式，默认"正常" ----
+  const blendDropdown = () => settingNamed(OVERLAY_CONTROL_LABELS.blend('温度'))?.dropdowns?.[0]
+  check(
+    '设置页有「温度层的混合模式」下拉，五个选项',
+    (blendDropdown()?.options ?? []).map((option) => option.value).join(',') ===
+      'source-over,multiply,screen,overlay,soft-light',
+    JSON.stringify(blendDropdown()?.options),
+  )
+  check('混合模式默认是「正常」（老设置升级后画面一字不变）', blendDropdown()?.value === 'source-over', String(blendDropdown()?.value))
   // ---- W2：配色改用「轴」编辑（一条轴 + 可拖动锚点 + 两端端帽）----
   // 逐行控件与「低于下限 / 高于上限」两个颜色选择器**已被轴取代**（同一件事不留两个家）
   const settingsRoot = plugin.settingTabs[0].containerEl
@@ -11864,6 +11880,32 @@ console.log('\n场景 45：导出（SVG / PNG）带上数值图层叠加层 —�
     `导出 ${JSON.stringify(exportCellFills)} / 画布 ${JSON.stringify(canvasCellFills)}`,
   )
   check('导出里默认不写数值（导出要能看清地形）', cellSvg.includes('>80<') === false && cellSvg.includes('>15<') === false)
+
+  // ---- 混合模式（BORROWED-IDEAS §3.1）：画布在该模式之下填充、画完还原；导出组带同一条 ----
+  await plugin.setOverlayStyle('temperature', { blend: 'multiply' })
+  await tick(20)
+  const blendFrame = frame()
+  check(
+    '混合模式：色块在 multiply 之下画（画布真的设了 globalCompositeOperation）',
+    blendFrame.fills.some((fill) => fill.composite === 'multiply'),
+    JSON.stringify([...new Set(blendFrame.fills.map((fill) => fill.composite))]),
+  )
+  check('画完还原成"正常"（不把画布状态留给下一层 / 下一帧）', ctx.globalCompositeOperation === 'source-over', ctx.globalCompositeOperation)
+  const blendSvg = await exportedSvg()
+  check(
+    '导出与画布同一条混合模式（mix-blend-mode: multiply 挂在温度段上）',
+    /<g data-fc-overlay="temperature"[^>]*style="mix-blend-mode: multiply"/.test(blendSvg),
+    (blendSvg.match(/<g data-fc-overlay="temperature"[^>]*>/) ?? [''])[0],
+  )
+  await plugin.setOverlayStyle('temperature', { blend: 'source-over' })
+  await tick(20)
+  const plainSvg = await exportedSvg()
+  check(
+    '切回「正常」后导出里不再写 mix-blend-mode（默认不带属性）',
+    plainSvg.includes('data-fc-overlay="temperature"') && plainSvg.includes('mix-blend-mode') === false,
+    (plainSvg.match(/<g data-fc-overlay="temperature"[^>]*>/) ?? [''])[0],
+  )
+  frame()
 
   // ---- 连续场：导出与画布的等值线数一致 ----
   await plugin.setOverlayStyle('temperature', { mode: 'field', contourInterval: 20 })

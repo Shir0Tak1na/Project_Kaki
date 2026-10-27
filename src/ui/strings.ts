@@ -75,6 +75,7 @@ export function unknownTypeLabel(id: string): string {
 export const OVERLAY_CONTROL_LABELS = {
   unit: (field: string): string => `${field}的展示单位`,
   opacity: (field: string): string => `${field}层的不透明度`,
+  blend: (field: string): string => `${field}层的混合模式`,
   mode: (field: string): string => `${field}的显示方式`,
   contourInterval: (field: string): string => `${field}的等值线间距`,
   contourLabelSpacing: (field: string): string => `${field}等值线数字的重复间隔`,
