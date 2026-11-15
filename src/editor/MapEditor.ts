@@ -39,6 +39,7 @@ import type {
 import { MAP_DOCUMENT_VERSION } from '../data/mapDocument.ts'
 import type { MapDefinitions } from '../data/mapDocument.ts'
 import { cellsAlongSegment } from './brushPath.ts'
+import { brushCellValue, type BrushOp } from './brushValue.ts'
 import { History, applyOp, opsFromPrevious, opsFromPreviousOf, type MapOp } from './history.ts'
 import type { ElevationCalibration } from '../render/elevationUnits.ts'
 import { sameCalibration } from '../render/elevationUnits.ts'
@@ -105,33 +106,7 @@ import {
 // "笔刷为什么刷不动"的四句话：状态浮窗与侧栏会各显示一次，所以只能有一份（C4 第三批）
 import { BRUSH_REASONS } from '../ui/strings.ts'
 
-/**
- * 数值图层笔刷的**逐格算法**（施工文件 §E 那张表的唯一实现）。
- *
- * 返回 `undefined` = **这一格不动**。三种"不动"：
- * - `× / ÷` 遇到没有值的格（拿"没量过"去乘没有意义）；
- * - 结果不是有限数（`÷ 0` 已在 `brushReadiness` 整笔拦下，这里是最后一道保险）；
- * - 上游已经有"值相同就不动"的判断。
- *
- * `+ / −` 的**无值格从 `fallback`（每格默认值）起算，没有就 0**：
- * 这是刻意行为（§E 写明"会把默认值固化进这一格"），所以 UI 上必须说明 —— 见 `MapPanel`/工具条。
- */
-function applyBrushOp(
-  op: BrushOp,
-  previous: number | undefined,
-  value: number,
-  fallback: number | undefined,
-): number | undefined {
-  if (op === 'set') return Number.isFinite(value) ? value : undefined
-  if (op === '×' || op === '÷') {
-    if (previous === undefined) return undefined
-    const next = op === '×' ? previous * value : previous / value
-    return Number.isFinite(next) ? next : undefined
-  }
-  const base = previous ?? fallback ?? 0
-  const next = op === '+' ? base + value : base - value
-  return Number.isFinite(next) ? next : undefined
-}
+// 数值图层笔刷的逐格算法搬到 `brushValue.ts`（纯函数，没有宿主依赖，可单独判对错）
 
 /** 地图级"每格默认值"里这个字段的兜底值（没有 / 不是有限数 → `undefined`） */
 function defaultValueOf(defaults: DataDefaults | null, key: string): number | undefined {
@@ -263,12 +238,12 @@ export type EditorTool = 'brush' | 'marker' | 'label' | 'path' | 'region'
 export type SelectionMode = 'rect' | 'brush'
 
 /**
- * 数值图层笔刷的算法（施工文件 §E）。
+ * 数值图层笔刷的算法（施工文件 §E）—— 定义与逐格实现都在 `brushValue.ts`，这里只转出。
  *
  * `set` 是给**分类字段**（生物群系）与"我想直接写这个数"用的；`+ - × ÷` 只对数值字段成立
  * （对分类 ID 做乘法是没有意义的）。
  */
-export type BrushOp = 'set' | '+' | '-' | '×' | '÷'
+export type { BrushOp }
 
 /** 这条算法要不要一个"当前值"（`set` 也要 —— 它就是"设成这个数 / 这个 ID"） */
 export const BRUSH_OPS_FOR_NUMERIC: readonly BrushOp[] = ['set', '+', '-', '×', '÷']
@@ -1743,10 +1718,9 @@ export class MapEditor {
     if (value === null) return null
     const previous = spec.read(existing ?? undefined)
     const fallback = defaultValueOf(this.options.getDocument()?.dataDefaults ?? null, spec.cellKey)
-    const next = applyBrushOp(this.brushOp, previous, value, fallback)
+    // "算不出来"与"值相同"都由 `brushCellValue` 统一判成 `undefined`（= 这一格不动）
+    const next = brushCellValue(this.brushOp, previous, value, fallback)
     if (next === undefined) return null
-    // 值相同就**不动这一格**（否则"重刷一遍温度"会产生一堆没有变化的历史）
-    if (previous !== undefined && previous === next) return null
     return { ...base, [spec.cellKey]: next }
   }
 

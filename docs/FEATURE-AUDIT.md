@@ -62,7 +62,7 @@ C4 三批改完后"界面一字未变"的 6 条人工核对 · Base 视图的多
 | 功能域 | 冒烟 | 单测 | 缺口 |
 |---|---|---|---|
 | 绘制与地形笔刷 | 12, 10, 41 | `editing` `hex` `hexGrid` | — |
-| 数据层笔刷（温度/深度/群系；含"值未确认不生效"） | 49, 42, 43 | `biomes` `overlayFields` | **深度笔刷无专测** |
+| 数据层笔刷（温度/深度/群系；含"值未确认不生效"） | 49, 42, 43 | `biomes` `overlayFields` `brushValue` | ~~深度笔刷无专测~~ ✅ **已补（2026-11-15）**：算式抽到 `src/editor/brushValue.ts`，`tests/brushValue.test.ts` 11 条（两条点名「深度笔刷」），两处破坏性验证 |
 | 刷隐藏数据图层时的提示（ISSUE-008） | 49 | `layers` | — |
 | 标记 / 文字标注 | 14, 33 / 14, 16, 18 | `markers` `markerCatalog` `baseRows` | 文字字号标定主要靠冒烟 18 |
 | 路径（5 种绘制模式）/ 区域 | 21, 15, 16 / 15, 37 | `hexEdges` `shapes` `terrainRegions` | — |

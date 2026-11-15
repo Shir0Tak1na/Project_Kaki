@@ -7,7 +7,7 @@
 
 # Project Kaki：Agent 交接说明
 
-更新时间：2026-10-06
+更新时间：2026-11-15
 
 这份文档给下一位开发 agent 使用。项目名是 **Project Kaki**（译名 Project 垣，只在第一次出现时标注即可），
 插件 ID 已改为 `project-kaki`（`scripts/deploy.mjs` 会自动迁移旧目录的旧 ID 设置与启用项）。
@@ -24,10 +24,11 @@
 - 默认测试库：`E:\ObsidianPulgins\test-vault`（插件目录为 `plugins\project-kaki`）
 - 正式库：`D:\TOS\万千旅路｜Thousands of Sands`，未经用户明确要求不要部署。
 - 代码仓库：`https://github.com/Shir0Tak1na/Project_Kaki`（Apache-2.0，`origin` / `main`）
-- 单元测试：727 个通过
+- 单元测试：738 个通过
 - 冒烟测试：55 个场景、1689 条断言全部通过
 - 类型检查必须为 0 错（`node node_modules/typescript/bin/tsc --noEmit`）
-- `git`：工作区有**未提交**改动（**图层混合模式**）；**已发版到 `1.4.2`**（tag `1.4.2`）
+- `git`：工作区**干净**、与 `origin/main` 同步（`7bd86aa` 图层混合模式已提交并推送，2026-11-15）；
+  **已发版到 `1.4.2`**（tag `1.4.2`），**图层混合模式尚未发版**
 - **最近一次部署**：图层混合模式之后跑过 `node scripts/deploy.mjs`（test-vault）
 - **开工前先读**：`docs/FEATURE-AUDIT.md`（已知问题总表 + 功能域覆盖 + **只能实机验的清单**）
 
