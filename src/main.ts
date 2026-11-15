@@ -2461,6 +2461,11 @@ export default class ProjectKakiPlugin extends Plugin {
   ): { ok: true; toId: string } | { ok: false; problem: string } {
     const trimmed = rawNewId.trim()
     if (trimmed.length === 0) return { ok: false, problem: '请输入新的 ID（留空不会改动任何东西）' }
+    // 内置群系（34 条裸 slug）不可改：它们不是自定义定义，改掉等于让所有内置群系失去身份。
+    // 界面上本来就只在自定义条目上给按钮，这里是**兜底**（命令面板 / 将来的入口都绕不过去）。
+    if (kind === 'biome' && definitionIdProblem(kind, fromId) !== null) {
+      return { ok: false, problem: '内置生物群系不能改 ID —— 只有自定义群系（custom: 开头）可以改' }
+    }
     const problem = definitionIdProblem(kind, trimmed)
     if (problem !== null) return { ok: false, problem }
     const toId = definitionIdNormalize(kind, trimmed)
@@ -2485,6 +2490,8 @@ export default class ProjectKakiPlugin extends Plugin {
         return set.pathTypes.map((item) => item.id)
       case 'region':
         return set.regionTypes.map((item) => item.id)
+      case 'biome':
+        return set.biomes.map((item) => item.id)
     }
   }
 
@@ -2868,6 +2875,8 @@ export default class ProjectKakiPlugin extends Plugin {
           return set.pathTypes.find((entry) => entry.id === id)
         case 'region':
           return set.regionTypes.find((entry) => entry.id === id)
+        case 'biome':
+          return set.biomes.find((entry) => entry.id === id)
       }
     })()
     return found?.label ?? id

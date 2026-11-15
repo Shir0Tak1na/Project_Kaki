@@ -10841,8 +10841,9 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
   )
 
   // ---------------------------------------------------------- 6c. 自定义生物群系：新增 / 删除（2026-11-15）
-  // 群系住在**格子上**（`TerrainCell.biome`），改 ID 要改写全库每一格 —— 所以这一节没有「改 ID」按钮，
-  // 本轮只做「新增 / 改名字颜色标签 / 删除」，且删除时只在真的有格子用它时才拦一下。
+  // 群系住在**格子上**（`TerrainCell.biome`），但改 ID 走的是**同一条跨文件迁移管线**
+  // （`openRenameDefinitionModal` → `previewDefinitionRename` → `renameCustomDefinition`）。
+  // 这一节钉住三件事：行上有入口、影响面按「格」说、改完格子真的换了且旧 ID 一格不剩。
   check(
     '生物群系那一节有自己的就地提示行（新增失败时说的是群系那句）',
     collectByClass(defModal.contentEl, 'fc-settings-note').some((el) => el.dataset?.fcNote === 'biome'),
@@ -10864,6 +10865,97 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
     (plugin.getSettings().customBiomes ?? []).every((biome) => biome.id !== lakeId),
     JSON.stringify(plugin.getSettings().customBiomes),
   )
+
+  // ---------------------------------------------------------- 6c-2. 群系「改 ID」并迁移已刷的格子
+  // 与地形 / 标记 / 路径 / 区域**同一条管线**：先说影响面，再逐格改写，只改当前地图的 `definitions` 段。
+  await plugin.addCustomBiome({ id: 'custom:lake', label: '咸水湖', color: '#2277aa' })
+  check(
+    '自定义群系建出来了（改 ID 的前提）',
+    (plugin.getSettings().customBiomes ?? []).some((biome) => biome.id === 'custom:lake'),
+    JSON.stringify(plugin.getSettings().customBiomes),
+  )
+  // 群系行上要有「改 ID…」（与地形那一行同构），而且那句"本版不可改"必须消失
+  FakeSetting.created.length = 0
+  const biomeModal = openDefinitionManager(plugin)
+  await tick(20)
+  const lakeRow = FakeSetting.created.find((setting) =>
+    (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.biomeNameColor('咸水湖')),
+  )
+  check(
+    '自定义群系行上有「改 ID…」按钮，顺序与地形一致（改 ID → 删除）',
+    lakeRow !== undefined &&
+      (lakeRow.buttons ?? []).map((button) => button.text).join(',') === `${MODAL_ACTIONS.renameId},${MODAL_ACTIONS.delete}`,
+    JSON.stringify((lakeRow?.buttons ?? []).map((button) => button.text)),
+  )
+  check(
+    '那句「本版不可改」已经删掉（改成说明"会把已刷的格子一起改掉"）',
+    String(lakeRow?.info?.desc ?? '').includes('本版不可改') === false &&
+      String(lakeRow?.info?.desc ?? '').includes('格子'),
+    String(lakeRow?.info?.desc),
+  )
+  check(
+    '生物群系弹窗里那条说明还在（群系是格子上的一笔数据）',
+    biomeModal !== undefined && collectByClass(biomeModal.contentEl, 'fc-settings-note').length > 0,
+  )
+
+  // 刷两格（同一张图里另一格是内置群系，用来证明"只改该改的"）
+  const lakeMap = store.listMapFiles().find((file) => file.path.endsWith('.map.md'))
+  const lakeSeed = await store.load(lakeMap)
+  lakeSeed.document.terrain['0_0'] = { t: 'forest', biome: 'custom:lake' }
+  lakeSeed.document.terrain['1_0'] = { t: 'water', biome: 'custom:lake' }
+  lakeSeed.document.terrain['2_0'] = { t: 'water', biome: 'swamp' }
+  await store.writeNow(
+    lakeMap,
+    lakeSeed.document,
+    lakeSeed.frontmatter.name ?? 'World',
+    lakeSeed.frontmatter.canvases,
+    lakeSeed.frontmatter.rest,
+  )
+  check(
+    '地图文件里已经刷进了 custom:lake（改名的前提）',
+    String(app.vault.files.get(lakeMap.path)).includes('custom:lake'),
+  )
+
+  const lakeReports = captureReports(plugin)
+  const lakePreview = await plugin.previewDefinitionRename('biome', 'custom:lake', 'custom:lake2')
+  check(
+    '群系改 ID 的影响面按「格」说（几张地图、几格），不是"处引用"',
+    lakePreview.ok === true && lakePreview.text.includes('1 张地图') && lakePreview.text.includes('共 2 格'),
+    JSON.stringify(lakePreview),
+  )
+  const builtinRename = await plugin.previewDefinitionRename('biome', 'desert', 'custom:desert2')
+  check(
+    '内置群系不可改 ID（给一句能读的理由，而不是静默）',
+    builtinRename.ok === false && String(builtinRename.problem).includes('内置'),
+    JSON.stringify(builtinRename),
+  )
+  const lakeRenamed = await plugin.renameCustomDefinition('biome', 'custom:lake', 'custom:lake2')
+  check('群系改名执行成功', lakeRenamed.ok === true, JSON.stringify(lakeRenamed))
+  const lakeText = String(app.vault.files.get(lakeMap.path))
+  const oldBiomeLeft = (lakeText.match(/"custom:lake"/g) ?? []).length
+  const newBiomeCount = (lakeText.match(/"custom:lake2"/g) ?? []).length
+  check(
+    '地图里已刷的格子真的改名了（旧 ID 一格不剩）',
+    oldBiomeLeft === 0 && newBiomeCount >= 2,
+    `旧 ${oldBiomeLeft} / 新 ${newBiomeCount}`,
+  )
+  check(
+    '别的群系与同格的地形字段一处没动（只改该改的）',
+    lakeText.includes('"biome":"swamp"') && lakeText.includes('"t":"forest"'),
+    lakeText.slice(Math.max(0, lakeText.indexOf('"biome"') - 120), lakeText.indexOf('"biome"') + 160),
+  )
+  check(
+    '定义集里那一条也改了 ID（否则群系会变成"未定义"）',
+    (plugin.getSettings().customBiomes ?? []).some((biome) => biome.id === 'custom:lake2') &&
+      !(plugin.getSettings().customBiomes ?? []).some((biome) => biome.id === 'custom:lake'),
+    JSON.stringify((plugin.getSettings().customBiomes ?? []).map((biome) => biome.id)),
+  )
+  check(
+    '结果走报告面板（多行影响面不塞进 Notice）',
+    String(lakeReports.text()).includes('custom:lake2') && String(lakeReports.text()).includes('2 格'),
+    JSON.stringify(String(lakeReports.text()).slice(0, 100)),
+  )
+  lakeReports.restore()
   check(
     // W4-1b：路径 / 区域类型的内置项**参数可改**，所以给它们开了入口 —— 做成可点开的条目，不是只读清单
     '路径 / 区域类型的内置项不是只读清单，而是可改参数的条目（内置 4 + 6 也给了入口）',

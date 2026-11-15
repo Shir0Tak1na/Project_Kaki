@@ -621,12 +621,15 @@ export class DefinitionManagerModal extends Modal {
   // ------------------------------------------------------------ 生物群系
 
   /**
-   * 自定义生物群系：**新增 / 改名字颜色标签 / 删除**。
+   * 自定义生物群系：**新增 / 改名字颜色标签 / 改 ID / 删除**。
    *
-   * 与地形那一节同构，只有一处刻意不同：**没有「改 ID」按钮**。
-   * 地形的 ID 改起来是"改写路径/区域对象上的 type 字段"，而群系住在**每一格的 `biome` 字段**里 ——
-   * 改写它要遍历全库每一格并进撤销栈，是另一件事（见 `docs/ISSUES.md` 里"改 ID 单独一轮"的口径）。
-   * 所以这里把话说清楚（"本版不可改"），而不是给一个点了会出事的按钮。
+   * 与地形那一节同构，包括「改 ID」—— 群系虽然住在**每一格的 `biome` 字段**里（不是独立对象），
+   * 但改 ID 走的是**同一条跨文件迁移管线**（`openRenameDefinitionModal('biome', …)`）：
+   * 先报影响面（几张图、几格），确认后逐格改写、只改当前地图的 `definitions` 段。
+   * 于是用户不必知道"群系是字段、地形是对象"这种内部差异。
+   *
+   * ⚠️ **内置 34 条群系没有这个按钮**（只有自定义条目才有，见 `list`）——
+   * 内置 ID 是裸 slug、被目录写死，改掉等于让所有内置群系失去身份。
    */
   private renderCustomBiomes(containerEl: HTMLElement, set: MapDefinitionSet): void {
     containerEl.createEl('div', {
@@ -643,7 +646,7 @@ export class DefinitionManagerModal extends Modal {
 
       new Setting(body)
         .setName(DEFINITION_ROW_LABELS.biomeNameColor(biome.label))
-        .setDesc(`ID ${biome.id}（本版不可改：那要把已刷过的每一格都改写一遍，单独一轮做）。`)
+        .setDesc(`ID ${biome.id}（改 ID 会把地图里已刷过的格子一起改掉）。`)
         .addText((text) =>
           text
             .setPlaceholder('显示名（例如 咸水湖）')
@@ -655,6 +658,11 @@ export class DefinitionManagerModal extends Modal {
         .addColorPicker((picker) =>
           picker.setValue(biome.color).onChange(async (value) => {
             await this.plugin.updateCustomBiome(biome.id, { color: value })
+          }),
+        )
+        .addButton((button) =>
+          button.setButtonText(MODAL_ACTIONS.renameId).setTooltip('改内部标识，并把地图里已刷的格子一起改掉').onClick(() => {
+            this.plugin.openRenameDefinitionModal('biome', biome.id, biome.label)
           }),
         )
         .addButton((button) =>

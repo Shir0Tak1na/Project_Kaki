@@ -11,6 +11,7 @@
 
 import type { MapDocument } from '../data/mapDocument.ts'
 import type { MapDefinitionSet } from '../data/mapDefinitions.ts'
+import { customBiomeIdProblem, normalizeCustomBiomeId } from './biomeCatalog.ts'
 import { markerIdProblem, normalizeMarkerId } from './markerCatalog.ts'
 import { normalizePathTypeId, pathTypeIdProblem } from './pathTypeCatalog.ts'
 import { normalizeRegionTypeId, regionTypeIdProblem } from './regionTypeCatalog.ts'
@@ -32,6 +33,9 @@ export function definitionIdProblem(kind: DefinitionKind, raw: unknown): string 
       return pathTypeIdProblem(raw)
     case 'region':
       return regionTypeIdProblem(raw)
+    case 'biome':
+      // 生物群系的自定义 ID 规则就在它的目录里（必须以 `custom:` 开头）—— 同样是转发，不另写一套
+      return customBiomeIdProblem(raw)
   }
 }
 
@@ -45,21 +49,28 @@ export function definitionIdNormalize(kind: DefinitionKind, raw: unknown): strin
       return normalizePathTypeId(raw)
     case 'region':
       return normalizeRegionTypeId(raw)
+    case 'biome':
+      return normalizeCustomBiomeId(raw)
   }
 }
 
 /**
- * 四类自定义定义（与设置里的四个数组一一对应）。
+ * 五类自定义定义（与设置里的五个数组一一对应）。
  *
- * 命名刻意与设置字段一致：`customTerrains` / `customMarkers` / `pathTypes` / `regionTypes`。
+ * 命名刻意与设置字段一致：`customTerrains` / `customMarkers` / `pathTypes` / `regionTypes` / `customBiomes`。
+ *
+ * ⚠️ **生物群系是唯一的"字段型"定义**：它不是独立对象，而是每格上的 `TerrainCell.biome`。
+ * 于是它没有"数组里的对象"可改，改 ID 就是**逐格改写**（见 `renameReferences` 的 biome 分支）——
+ * 但对外（影响面、预览、报告、写盘）与另外四类**完全同一条管线**，用户不该感觉到差别。
  */
-export type DefinitionKind = 'terrain' | 'marker' | 'path' | 'region'
+export type DefinitionKind = 'terrain' | 'marker' | 'path' | 'region' | 'biome'
 
 export const DEFINITION_KIND_LABELS: Record<DefinitionKind, string> = {
   terrain: '地形',
   marker: '标记',
   path: '路径类型',
   region: '区域类型',
+  biome: '生物群系',
 }
 
 /** 引用 ID 的字段名（报告文案里要说清"改的是哪个字段"） */
@@ -68,6 +79,7 @@ export const DEFINITION_KIND_FIELDS: Record<DefinitionKind, string> = {
   marker: 'markers[].icon',
   path: 'paths[].type',
   region: 'regions[].type',
+  biome: 'cells[].biome',
 }
 
 /** 提示文案里用的「改的是哪里」说法（例如「地图文件里的 cells[].t」） */
@@ -91,6 +103,9 @@ export function countReferences(document: MapDocument, kind: DefinitionKind, id:
       return document.paths.filter((path) => path.type === id).length
     case 'region':
       return document.regions.filter((region) => region.type === id).length
+    case 'biome':
+      // 群系是格子上的字段，数法与另外四类不同 —— 但"数引用"这件的实现只有那一份
+      return countBiomeReferences(document, id)
   }
 }
 
@@ -98,8 +113,11 @@ export function countReferences(document: MapDocument, kind: DefinitionKind, id:
  * 一份地图文档里，有多少格把 `biome` 设成了这个 ID。
  *
  * 生物群系不是"独立对象"，而是**格子上的一个字段**（`TerrainCell.biome`）——
- * 所以 `countReferences` 那四个 kind 覆盖不到它（`DefinitionKind` 描述的是"能被画在地图上的对象"）。
+ * 所以它没有 `markers` / `paths` 那样的数组可数。
  * 删除一个自定义群系之前，这个数字就是**影响面**：那几格会退回中性灰，但数据不丢。
+ *
+ * 改 ID 也走它（`countReferences(document, 'biome', id)` 直接转过来）：**数引用只有这一份实现**，
+ * 否则"删除时说的格数"与"改名时说的格数"迟早会出现两个数字。
  */
 export function countBiomeReferences(document: MapDocument, id: string): number {
   let count = 0
@@ -133,6 +151,9 @@ export function countReferencesById(document: MapDocument, kind: DefinitionKind)
       break
     case 'region':
       for (const region of document.regions) bump(region.type)
+      break
+    case 'biome':
+      for (const cell of Object.values(document.terrain)) bump(cell.biome)
       break
   }
   return out
@@ -181,6 +202,10 @@ export function renameDefinitionEntry(
     case 'region': {
       const list = rename(set.regionTypes)
       return list === null ? set : { ...set, regionTypes: list }
+    }
+    case 'biome': {
+      const list = rename(set.biomes)
+      return list === null ? set : { ...set, biomes: list }
     }
   }
 }
@@ -237,6 +262,18 @@ export function renameReferences(
       })
       return changed === 0 ? { document, changed: 0 } : { document: { ...document, regions }, changed }
     }
+    case 'biome':
+      // 群系不是独立对象，而是**每格上的一个字段**：逐格看 `biome`，改的就那一格。
+      // ⚠️ 用 `{ ...cell, biome: toId }` 而不是重建整格 —— 未知字段（别的版本写的、手工加的）
+      // 必须原样保留（§5.11），否则"改个群系 ID"会顺手抹掉用户文件里的东西。
+      for (const [key, cell] of Object.entries(document.terrain)) {
+        if (cell.biome !== fromId) continue
+        terrain[key] = { ...cell, biome: toId }
+        changed += 1
+      }
+      return changed === 0
+        ? { document, changed: 0 }
+        : { document: { ...document, terrain }, changed }
   }
 }
 
@@ -301,18 +338,32 @@ export function describeDeletionPlan(plan: DeletionPlan): string {
   return lines.join('\n')
 }
 
+/**
+ * 引用单位：群系数的是"**格**"（它住在每一格上），另外四类数的是"处（引用）"。
+ *
+ * 这不只是措辞问题：说"3 处引用"会让人以为是三个对象，而群系的真实含义是"三格数据"——
+ * 影响面报告是用户决定要不要改的依据，单位说错就等于把量级说错了一个数量级。
+ */
+function referenceUnits(kind: DefinitionKind): { total: string; perFile: string } {
+  return kind === 'biome' ? { total: ' 格', perFile: '格' } : { total: ' 处引用', perFile: '处' }
+}
+
 /** 汇总一份计划：把"逐文件的改动数"拼成人话（确认框与报告共用，文案只有一份） */
 export function describeRenamePlan(plan: RenamePlan): string {
   const label = DEFINITION_KIND_LABELS[plan.kind]
+  const units = referenceUnits(plan.kind)
   if (plan.totalChanged === 0) {
-    return `没有地图引用 ${plan.fromId}：只会把${label}定义的 ID 改成 ${plan.toId}。`
+    // 群系没有"对象"可引用，它的零影响面读作"没有任何格填了它"
+    return plan.kind === 'biome'
+      ? `没有任何格把生物群系填成 ${plan.fromId}：只会把生物群系定义的 ID 改成 ${plan.toId}。`
+      : `没有地图引用 ${plan.fromId}：只会把${label}定义的 ID 改成 ${plan.toId}。`
   }
   const lines = [
-    `将把 ${plan.files.length} 张地图里共 ${plan.totalChanged} 处引用从 ${plan.fromId} 改成 ${plan.toId}，`,
+    `将把 ${plan.files.length} 张地图里共 ${plan.totalChanged}${units.total}从 ${plan.fromId} 改成 ${plan.toId}，`,
     `并把${label}定义的 ID 一并改掉：`,
   ]
   for (const file of plan.files) {
-    lines.push(`  · ${file.path}：${file.changed} 处`)
+    lines.push(`  · ${file.path}：${file.changed} ${units.perFile}`)
   }
   return lines.join('\n')
 }
