@@ -95,6 +95,21 @@ export function countReferences(document: MapDocument, kind: DefinitionKind, id:
 }
 
 /**
+ * 一份地图文档里，有多少格把 `biome` 设成了这个 ID。
+ *
+ * 生物群系不是"独立对象"，而是**格子上的一个字段**（`TerrainCell.biome`）——
+ * 所以 `countReferences` 那四个 kind 覆盖不到它（`DefinitionKind` 描述的是"能被画在地图上的对象"）。
+ * 删除一个自定义群系之前，这个数字就是**影响面**：那几格会退回中性灰，但数据不丢。
+ */
+export function countBiomeReferences(document: MapDocument, id: string): number {
+  let count = 0
+  for (const cell of Object.values(document.terrain)) {
+    if (cell.biome === id) count += 1
+  }
+  return count
+}
+
+/**
  * 一份地图文档里出现的每一个自定义 ID → 引用次数。
  *
  * 用途是"一次把影响面说清"：用户改一个 ID 之前，我们需要告诉他这份地图里

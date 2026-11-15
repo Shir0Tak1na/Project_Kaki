@@ -125,6 +125,7 @@ export const DEFINITION_MODAL_LABELS = {
   addMarker: '新增自定义标记',
   addPathType: '新增自定义路径类型',
   addRegionType: '新增自定义区域类型',
+  addBiome: '新增自定义生物群系',
 } as const
 
 /** 文件选择 / 导入弹窗的标题与按钮（冒烟逐字比较弹窗标题与按钮文字 → 判据 ①） */
@@ -341,6 +342,8 @@ export const DEFINITION_ROW_LABELS = {
   widthDash: (label: string): string => `线宽与虚线 · ${label}`,
   fillBorder: (label: string): string => `填充与边框 · ${label}`,
   borderWidthDash: (label: string): string => `边框宽与虚线 · ${label}`,
+  biomeNameColor: (label: string): string => `名称与颜色 · ${label}`,
+  biomeTags: (label: string): string => `标签 · ${label}`,
 } as const
 
 /**

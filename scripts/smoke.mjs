@@ -10790,13 +10790,13 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
   const defModal = openDefinitionManager(plugin)
   const defGroups = collectByClass(defModal.contentEl, 'fc-defmodal-group')
   check(
-    '弹窗里四类定义各有一组（地形 / 标记 / 路径类型 / 区域类型）',
-    defGroups.map((el) => el.dataset?.fcGroup).join(',') === 'terrain,marker,pathType,regionType',
+    '弹窗里五类定义各有一组（地形 / 生物群系 / 标记 / 路径类型 / 区域类型）',
+    defGroups.map((el) => el.dataset?.fcGroup).join(',') === 'terrain,biome,marker,pathType,regionType',
     JSON.stringify(defGroups.map((el) => el.dataset?.fcGroup)),
   )
   check(
-    '四组都默认收起（首屏只有四行标题，不再是一大片输入框）',
-    defGroups.length === 4 && defGroups.every((el) => el.tagName === 'DETAILS' && el.open === false),
+    '五组都默认收起（首屏只有五行标题，不再是一大片输入框）',
+    defGroups.length === 5 && defGroups.every((el) => el.tagName === 'DETAILS' && el.open === false),
     JSON.stringify(defGroups.map((el) => [el.tagName, el.open])),
   )
   const reefRow = FakeSetting.created.find((setting) => (setting.info.name ?? '').includes(DEFINITION_ROW_LABELS.terrainNameColor('礁石')))
@@ -10823,20 +10823,46 @@ console.log('\n场景 40：A3 —— 设置页瘦身、两份「快速上手」�
   // ---------------------------------------------------------- 6b. W3-2：自带 / 自定义分区 + 每条收成一行
   // 用户口径（§5 第 3 条）：「自定义的和本身自带的混在一起，阅读量大且无用」。
   check(
-    '四节各有「自定义（N）」分区标题（四类定义各一条）',
-    collectByClass(defModal.contentEl, 'fc-defsection').filter((el) => el.dataset?.fcSection === 'custom').length === 4,
+    '五节各有「自定义（N）」分区标题（五类定义各一条）',
+    collectByClass(defModal.contentEl, 'fc-defsection').filter((el) => el.dataset?.fcSection === 'custom').length === 5,
     JSON.stringify(collectByClass(defModal.contentEl, 'fc-defsection').map((el) => [el.dataset?.fcSection, el.textContent])),
   )
   const builtinLists = collectByClass(defModal.contentEl, 'fc-defbuiltin')
   check(
-    '地形与标记各有「内置」只读清单，且都默认收起（不占首屏阅读量）',
-    builtinLists.length === 2 && builtinLists.every((el) => el.open === false),
+    '地形 / 生物群系 / 标记各有「内置」只读清单，且都默认收起（不占首屏阅读量）',
+    builtinLists.map((el) => el.dataset?.fcBuiltin).join(',') === 'terrain,biome,marker' &&
+      builtinLists.every((el) => el.open === false),
     JSON.stringify(builtinLists.map((el) => [el.dataset?.fcBuiltin, el.open])),
   )
   check(
-    '内置清单只列名字，共 9 + 9 = 18 条（与目录同源，不是手抄一份）',
-    collectByClass(defModal.contentEl, 'fc-defbuiltin-row').length === 18,
+    '内置清单只列名字，共 9 + 34 + 9 = 52 条（与目录同源，不是手抄一份）',
+    collectByClass(defModal.contentEl, 'fc-defbuiltin-row').length === 52,
     String(collectByClass(defModal.contentEl, 'fc-defbuiltin-row').length),
+  )
+
+  // ---------------------------------------------------------- 6c. 自定义生物群系：新增 / 删除（2026-11-15）
+  // 群系住在**格子上**（`TerrainCell.biome`），改 ID 要改写全库每一格 —— 所以这一节没有「改 ID」按钮，
+  // 本轮只做「新增 / 改名字颜色标签 / 删除」，且删除时只在真的有格子用它时才拦一下。
+  check(
+    '生物群系那一节有自己的就地提示行（新增失败时说的是群系那句）',
+    collectByClass(defModal.contentEl, 'fc-settings-note').some((el) => el.dataset?.fcNote === 'biome'),
+  )
+  const biomeAdded = await plugin.addCustomBiome({ label: '咸水湖', color: '#2277aa' })
+  const biomeList = plugin.getSettings().customBiomes ?? []
+  const lakeId = biomeList.find((biome) => biome.label === '咸水湖')?.id
+  check(
+    '新增自定义群系：ID 按显示名自动生成、颜色写进去',
+    biomeAdded.ok === true &&
+      typeof lakeId === 'string' &&
+      lakeId.startsWith('custom:') &&
+      biomeList.some((biome) => biome.id === lakeId && biome.color === '#2277aa'),
+    JSON.stringify(biomeList),
+  )
+  await plugin.removeCustomBiome(lakeId)
+  check(
+    '删除自定义群系：定义没了（没有格子用它时直接删，不弹确认框）',
+    (plugin.getSettings().customBiomes ?? []).every((biome) => biome.id !== lakeId),
+    JSON.stringify(plugin.getSettings().customBiomes),
   )
   check(
     // W4-1b：路径 / 区域类型的内置项**参数可改**，所以给它们开了入口 —— 做成可点开的条目，不是只读清单

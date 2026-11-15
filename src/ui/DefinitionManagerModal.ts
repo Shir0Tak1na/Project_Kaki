@@ -96,6 +96,14 @@ import {
   type CustomTerrainMode,
 } from '../render/terrainCatalog.ts'
 import { listTerrainStyles } from '../render/terrainStyle.ts'
+import {
+  BIOME_TAGS,
+  BUILTIN_BIOMES,
+  CUSTOM_BIOME_PREFIX,
+  DEFAULT_CUSTOM_BIOME_COLOR,
+  MAX_CUSTOM_BIOMES,
+  customBiomeIdProblem,
+} from '../render/biomeCatalog.ts'
 
 /** 弹窗工厂：默认用真实弹窗，测试里可注入替身（或读回默认实现自行实例化） */
 export type DefinitionModalFactory = (app: App, plugin: ProjectKakiPlugin) => { open(): void }
@@ -121,6 +129,9 @@ export class DefinitionManagerModal extends Modal {
   private readonly plugin: ProjectKakiPlugin
   /** 地形区底部那一行就地提示 */
   private terrainNoteEl: HTMLElement | null = null
+
+  /** 生物群系区那一行就地提示 */
+  private biomeNoteEl: HTMLElement | null = null
   /** 标记区底部那一行就地提示（与地形那行分开） */
   private markerNoteEl: HTMLElement | null = null
   /** 路径类型区底部那一行就地提示 */
@@ -240,6 +251,14 @@ export class DefinitionManagerModal extends Modal {
       titleCls: 'fc-defmodal-group-title',
     })
     this.renderCustomTerrains(terrainGroup, set)
+
+    const biomeGroup = createCollapsibleGroup(contentEl, {
+      title: '生物群系',
+      role: 'biome',
+      cls: 'fc-defmodal-group',
+      titleCls: 'fc-defmodal-group-title',
+    })
+    this.renderCustomBiomes(biomeGroup, set)
 
     const markerGroup = createCollapsibleGroup(contentEl, {
       title: '标记',
@@ -596,6 +615,136 @@ export class DefinitionManagerModal extends Modal {
       'terrain',
       `内置（${builtins.length}，只读）`,
       builtins.map((style) => ({ label: style.label, hint: style.type })),
+    )
+  }
+
+  // ------------------------------------------------------------ 生物群系
+
+  /**
+   * 自定义生物群系：**新增 / 改名字颜色标签 / 删除**。
+   *
+   * 与地形那一节同构，只有一处刻意不同：**没有「改 ID」按钮**。
+   * 地形的 ID 改起来是"改写路径/区域对象上的 type 字段"，而群系住在**每一格的 `biome` 字段**里 ——
+   * 改写它要遍历全库每一格并进撤销栈，是另一件事（见 `docs/ISSUES.md` 里"改 ID 单独一轮"的口径）。
+   * 所以这里把话说清楚（"本版不可改"），而不是给一个点了会出事的按钮。
+   */
+  private renderCustomBiomes(containerEl: HTMLElement, set: MapDefinitionSet): void {
+    containerEl.createEl('div', {
+      cls: 'fc-settings-note',
+      text: '自定义群系排在内置 34 条之后，出现在侧栏「笔刷」的群系下拉与筛选器里。群系是**格子上的一笔数据**，不是独立对象。',
+    })
+
+    const list = set.biomes
+    this.createSectionTitle(containerEl, `自定义（${list.length}）`, 'custom')
+    if (list.length === 0) this.renderCustomEmpty(containerEl, '还没有自定义群系 —— 用下面那一行加一个。')
+
+    list.forEach((biome, index) => {
+      const body = this.createDefinitionItem(containerEl, biome.id, `${index + 1}. ${biome.label}`)
+
+      new Setting(body)
+        .setName(DEFINITION_ROW_LABELS.biomeNameColor(biome.label))
+        .setDesc(`ID ${biome.id}（本版不可改：那要把已刷过的每一格都改写一遍，单独一轮做）。`)
+        .addText((text) =>
+          text
+            .setPlaceholder('显示名（例如 咸水湖）')
+            .setValue(biome.label)
+            .onChange(async (value) => {
+              await this.plugin.updateCustomBiome(biome.id, { label: value })
+            }),
+        )
+        .addColorPicker((picker) =>
+          picker.setValue(biome.color).onChange(async (value) => {
+            await this.plugin.updateCustomBiome(biome.id, { color: value })
+          }),
+        )
+        .addButton((button) =>
+          button.setButtonText(MODAL_ACTIONS.delete).setWarning().onClick(() => {
+            // 有格子用它 → 弹影响面确认框；没有 → 直接删（见 requestRemoveCustomBiome）
+            void this.plugin.requestRemoveCustomBiome(biome.id)
+          }),
+        )
+
+      /**
+       * 标签：与地形标签**共用同一批 ID**（`tagCatalog`），筛选器一次命中一组。
+       * 一个都没勾也是合法的（还没归类），它只是筛不到标签。
+       */
+      const tagSetting = new Setting(body)
+        .setName(DEFINITION_ROW_LABELS.biomeTags(biome.label))
+        .setDesc('筛选器按标签一次命中一组（例如「所有水域」= 勾「水域」）。标签不进地图文件。')
+      const tagRow = tagSetting.controlEl.createEl('div', { cls: 'fc-terrain-tags' })
+      for (const tag of BIOME_TAGS) {
+        const chip = tagRow.createEl('button', { cls: 'fc-ctl-button fc-terrain-tag' })
+        chip.dataset.fcBiomeTag = tag.id
+        chip.textContent = tag.label
+        chip.title = `${tag.group}·${tag.label}`
+        if (biome.tags.includes(tag.id)) chip.addClass('is-active')
+        chip.addEventListener('click', () => {
+          const next = biome.tags.includes(tag.id)
+            ? biome.tags.filter((item) => item !== tag.id)
+            : [...biome.tags, tag.id]
+          void this.plugin.updateCustomBiome(biome.id, { tags: next }).then(() => this.rerender())
+        })
+      }
+    })
+
+    const atLimit = set.biomes.length >= MAX_CUSTOM_BIOMES
+    const note = containerEl.createEl('div', { cls: 'fc-settings-note', text: '' })
+    note.dataset.fcNote = 'biome'
+    this.biomeNoteEl = note
+    const pending: { id: string; label: string; color: string } = {
+      id: '',
+      label: '',
+      color: DEFAULT_CUSTOM_BIOME_COLOR,
+    }
+
+    new Setting(containerEl)
+      .setName(DEFINITION_MODAL_LABELS.addBiome)
+      .setDesc(atLimit ? `已达上限（${MAX_CUSTOM_BIOMES} 个）` : 'ID 可以留空 —— 留空就按显示名自动生成。')
+      .addText((text) => {
+        text
+          .setPlaceholder('ID（留空 = 自动生成，例如 lake2）')
+          .setValue('')
+          .onChange((value) => {
+            pending.id = value
+            this.setBiomeNoteText(this.idNote(customBiomeIdProblem(value), value))
+          })
+        if (text.inputEl) text.inputEl.title = idRuleHint(CUSTOM_BIOME_PREFIX)
+      })
+      .addText((text) =>
+        text
+          .setPlaceholder('显示名（留空 = 用 ID）')
+          .setValue('')
+          .onChange((value) => {
+            pending.label = value
+          }),
+      )
+      .addColorPicker((picker) =>
+        picker.setValue(DEFAULT_CUSTOM_BIOME_COLOR).onChange((value) => {
+          pending.color = value
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText('新增').onClick(async () => {
+          const problem = pending.id.trim().length === 0 ? null : customBiomeIdProblem(pending.id)
+          if (problem !== null) {
+            this.setBiomeNoteText(this.noteProblem(problem))
+            return
+          }
+          const result = await this.plugin.addCustomBiome(pending)
+          if (!result.ok) {
+            this.setBiomeNoteText(this.noteProblem(result.problem))
+            return
+          }
+          this.setBiomeNoteText('')
+          this.rerender()
+        }),
+      )
+
+    this.renderBuiltinList(
+      containerEl,
+      'biome',
+      `内置（${BUILTIN_BIOMES.length}，只读）`,
+      BUILTIN_BIOMES.map((entry) => ({ label: entry.label, hint: entry.tags.join(' / ') })),
     )
   }
 
@@ -1187,6 +1336,11 @@ export class DefinitionManagerModal extends Modal {
   /** 地形区那一行就地提示 */
   private setTerrainNoteText(text: string): void {
     if (this.terrainNoteEl) this.terrainNoteEl.textContent = text
+  }
+
+  /** 生物群系区那一行就地提示 */
+  private setBiomeNoteText(text: string): void {
+    if (this.biomeNoteEl) this.biomeNoteEl.textContent = text
   }
 
   /** 标记区那一行就地提示 */

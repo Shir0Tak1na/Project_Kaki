@@ -162,6 +162,9 @@ export const BUILTIN_BIOMES: readonly BiomeEntry[] = [
  */
 export const BIOME_UNKNOWN_COLOR = '#8b8f96'
 
+/** 新增自定义群系时颜色选择器的初值（与自定义地形同一个出厂灰蓝，视觉上同族） */
+export const DEFAULT_CUSTOM_BIOME_COLOR = '#8fa3b0'
+
 const BUILTIN_BY_ID = new Map(BUILTIN_BIOMES.map((entry) => [entry.id, entry]))
 
 /** 内置目录（只读；`BIOMES.md` 就是它的来源与依据） */

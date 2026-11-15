@@ -199,6 +199,8 @@ import {
   resolveBiomeStyle,
   type CustomBiome,
 } from './render/biomeCatalog.ts'
+import { MAX_CUSTOM_BIOMES, validateCustomBiomeInput } from './render/biomeCatalog.ts'
+import { countBiomeReferences } from './render/definitionRename.ts'
 import { clauseIsUsable, type SelectionRuleContext } from './render/selectionRules.ts'
 import { applyRuleToSelection, describeCellReadings, ruleHits, summarizeSelection, type SelectionSummary } from './render/selectionSet.ts'
 import { selectionStatRows } from './render/selectionCard.ts'
@@ -1990,6 +1992,144 @@ export default class ProjectKakiPlugin extends Plugin {
       if (!set.terrains.some((terrain) => terrain.id === id)) return set
       return { ...set, terrains: set.terrains.filter((terrain) => terrain.id !== id) }
     }, `删除自定义地形 ${id}`)
+  }
+
+  // ------------------------------------------------------------ 自定义生物群系
+
+  /**
+   * 新增一个自定义生物群系。
+   *
+   * 与 `addCustomTerrain` 逐字同构：校验全在 `validateCustomBiomeInput`（纯函数），
+   * 这里只负责落盘与通知渲染层。ID 留空按显示名自动生成（纯中文显示名会退到 `custom:biomeN`）。
+   *
+   * ⚠️ **群系是格子上的一笔数据**（`TerrainCell.biome`），不是独立对象 —— 所以它的"引用数"
+   * 由 `countBiomeReferences` 数格子得到，而不是数 `markers` / `paths` 那种数组。
+   */
+  async addCustomBiome(input: {
+    id?: unknown
+    label?: unknown
+    color?: unknown
+    tags?: unknown
+  }): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const existing = this.activeDefinitions().biomes
+    const result = validateCustomBiomeInput({
+      ...input,
+      id: isBlankCustomId(input.id)
+        ? suggestCustomId(
+            typeof input.label === 'string' ? input.label : '',
+            existing.map((biome) => biome.id),
+            CUSTOM_BIOME_PREFIX,
+            'biome',
+          )
+        : input.id,
+    })
+    if (!result.ok) return result
+    if (existing.some((biome) => biome.id === result.biome.id)) {
+      return { ok: false, problem: `已经有一个群系用了 ID ${result.biome.id}` }
+    }
+    if (existing.length >= MAX_CUSTOM_BIOMES) {
+      return { ok: false, problem: `最多 ${MAX_CUSTOM_BIOMES} 个自定义群系` }
+    }
+    return this.mutateDefinitions(
+      (set) => ({ ...set, biomes: [...set.biomes, result.biome] }),
+      `新增自定义群系 ${result.biome.id}`,
+    )
+  }
+
+  /**
+   * 改一个自定义群系（按 **ID** 定位，ID 不可改）。
+   *
+   * 只接受补丁：显示名、颜色、标签。三样都**不传就原样保留** —— 漏了哪一样，
+   * 用户改个颜色就会把标签悄悄清空（地形那边踩过同一条，见 `updateCustomTerrain`）。
+   */
+  async updateCustomBiome(
+    id: string,
+    patch: { label?: unknown; color?: unknown; tags?: unknown },
+  ): Promise<void> {
+    await this.mutateDefinitions((set) => {
+      const current = set.biomes.find((biome) => biome.id === id)
+      if (!current) return set
+      const next = validateCustomBiomeInput({
+        id: current.id,
+        label: patch.label !== undefined ? patch.label : current.label,
+        color: patch.color !== undefined ? patch.color : current.color,
+        tags: patch.tags !== undefined ? patch.tags : current.tags,
+      })
+      if (!next.ok) {
+        console.warn(`[project-kaki] 自定义群系 ${current.id} 的修改被拒绝：${next.problem}`)
+        return set
+      }
+      return { ...set, biomes: set.biomes.map((biome) => (biome.id === id ? next.biome : biome)) }
+    }, `修改自定义群系 ${id}`)
+  }
+
+  /**
+   * 删除一个自定义群系。
+   *
+   * **不动地图数据**：已经刷了这个群系的格子仍然留在文件里，只是画成中性灰
+   * （`BIOME_UNKNOWN_COLOR`）。反过来做（顺手把格子清空）是不可逆的，
+   * 而用户往往只是想换个颜色而已。
+   */
+  async removeCustomBiome(id: string): Promise<void> {
+    await this.mutateDefinitions((set) => {
+      if (!set.biomes.some((biome) => biome.id === id)) return set
+      return { ...set, biomes: set.biomes.filter((biome) => biome.id !== id) }
+    }, `删除自定义群系 ${id}`)
+  }
+
+  /** 扫一遍库里所有地图文档，数出这个群系被多少格用着（删除前的影响面；只读不写） */
+  private async collectBiomeReferences(
+    id: string,
+  ): Promise<{ files: Array<{ path: string; count: number }>; total: number }> {
+    const store = this.store
+    if (store === null) return { files: [], total: 0 }
+    const files: Array<{ path: string; count: number }> = []
+    for (const file of store.listMapFiles()) {
+      const loaded = await store.load(file)
+      if (loaded.document === null || loaded.readOnly) continue
+      const count = countBiomeReferences(loaded.document, id)
+      if (count === 0) continue
+      files.push({ path: file.path, count })
+    }
+    files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    return { files, total: files.reduce((sum, item) => sum + item.count, 0) }
+  }
+
+  /**
+   * 删除一个自定义群系，**只在真的有格子用它时才拦一下**。
+   *
+   * 与 `requestRemoveCustomDefinition` 同一口径：没有引用就直接删（一条 Notice），
+   * 有引用就先把影响面说清楚（几格、哪几张图、**数据不会丢**），看清了再决定。
+   */
+  async requestRemoveCustomBiome(id: string): Promise<void> {
+    const displayName = this.activeDefinitions().biomes.find((biome) => biome.id === id)?.label ?? id
+    const collected = await this.collectBiomeReferences(id)
+    if (collected.total === 0) {
+      await this.removeCustomBiome(id)
+      new Notice(`已删除生物群系 ${displayName}（没有地图在用它）`, NOTICE_MAX_MS)
+      return
+    }
+    const text = [
+      `这个群系被 ${collected.total} 格用着，分布在 ${collected.files.length} 张地图：`,
+      ...collected.files.map((file) => `  - ${file.path}：${file.count} 格`),
+      '',
+      '删除定义**不会删掉这些格子**：它们会退回中性灰，数据仍留在文件里。',
+      '（只想改颜色或名字的话，直接在上面那一行改就行，不必删。）',
+    ].join('\n')
+    this.deleteModalFactory(this.app, {
+      kindLabel: '生物群系',
+      id,
+      displayName,
+      onPreview: async () => ({ ok: true, text }),
+      onConfirm: async () => {
+        try {
+          await this.removeCustomBiome(id)
+          return { ok: true }
+        } catch (error) {
+          return { ok: false, problem: error instanceof Error ? error.message : String(error) }
+        }
+      },
+    }).open()
   }
 
   /**
