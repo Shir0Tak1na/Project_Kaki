@@ -33,6 +33,7 @@ import { regionTypeLabelOf, type RegionTypeEntry } from '../render/regionTypeCat
 import type { OverlayStyles } from '../render/overlayFields.ts'
 import type { LayerVisibility } from '../render/layerVisibility.ts'
 import { parseNoteMapProps } from './noteCoordinates.ts'
+import { BASE_ROW_CHUNK, nextRowWindow } from './rowWindow.ts'
 import { BASE_TEXT } from '../ui/strings.ts'
 import {
   BASES_VIEW_TYPE,
@@ -320,32 +321,59 @@ export class MapBasesView extends BasesView {
     list.createEl('li', { text: '在视图选项里选择「地图文档」，即可同时列出地图上的标记 / 区域 / 路径。' })
   }
 
+  /**
+   * 画表格：**分批显示**（首屏一批，底部按钮再追加）。
+   *
+   * 为什么不是"滚动虚拟化"：Base 视图的滚动归 Obsidian 管，自己再接管一个滚动容器
+   * 要么和宿主打架、要么得假设固定行高（而名称列会换行）。
+   * 分批追加没有这些假设，首屏恒定、点一次多一批 —— 几百行的卡顿就没了。
+   */
   private renderTable(rows: readonly MapRow[]): void {
     const table = this.containerEl.createEl('table', { cls: 'fc-base-table' })
     const head = table.createEl('thead').createEl('tr')
     for (const title of ['名称', '类型', '来源', '坐标', '详情']) head.createEl('th', { text: title })
 
     const body = table.createEl('tbody')
-    for (const row of rows) {
-      const tr = body.createEl('tr', { cls: `fc-base-row fc-base-row-${row.source}` })
-      if (row.invalid) tr.addClass('is-invalid')
-      const nameCell = tr.createEl('td', { cls: 'fc-base-name' })
-      nameCell.createEl('a', { text: row.name, href: '#' })
-      nameCell.addEventListener('click', (event) => {
-        event.preventDefault()
-        this.openRow(row)
+    const moreEl = this.containerEl.createEl('div', { cls: 'fc-base-more' })
+    let shown = 0
+    const draw = (): void => {
+      const window = nextRowWindow(rows.length, shown)
+      for (let index = window.start; index < window.end; index += 1) {
+        const row = rows[index]
+        if (row !== undefined) this.appendRow(body, row)
+      }
+      shown = window.shown
+      moreEl.empty()
+      if (window.remaining === 0) return
+      const button = moreEl.createEl('button', {
+        cls: 'fc-ctl-button',
+        text: `再显示 ${Math.min(BASE_ROW_CHUNK, window.remaining)} 条（还剩 ${window.remaining} 条）`,
       })
-      tr.createEl('td', { cls: 'fc-base-kind', text: BASE_TEXT.kind[row.kind] })
-      tr.createEl('td', {
-        cls: 'fc-base-source',
-        text: row.source === 'note' ? BASE_TEXT.sourceNote : BASE_TEXT.sourceMap,
-      })
-      tr.createEl('td', {
-        cls: 'fc-base-coords',
-        text: row.point ? `${Math.round(row.point.x)}, ${Math.round(row.point.y)}` : BASE_TEXT.noCoords,
-      })
-      tr.createEl('td', { cls: 'fc-base-detail', text: row.detail })
+      button.addEventListener('click', () => draw())
     }
+    draw()
+  }
+
+  /** 画一行（从 `renderTable` 里拆出来：分批渲染要能反复调它） */
+  private appendRow(body: HTMLElement, row: MapRow): void {
+    const tr = body.createEl('tr', { cls: `fc-base-row fc-base-row-${row.source}` })
+    if (row.invalid) tr.addClass('is-invalid')
+    const nameCell = tr.createEl('td', { cls: 'fc-base-name' })
+    nameCell.createEl('a', { text: row.name, href: '#' })
+    nameCell.addEventListener('click', (event) => {
+      event.preventDefault()
+      this.openRow(row)
+    })
+    tr.createEl('td', { cls: 'fc-base-kind', text: BASE_TEXT.kind[row.kind] })
+    tr.createEl('td', {
+      cls: 'fc-base-source',
+      text: row.source === 'note' ? BASE_TEXT.sourceNote : BASE_TEXT.sourceMap,
+    })
+    tr.createEl('td', {
+      cls: 'fc-base-coords',
+      text: row.point ? `${Math.round(row.point.x)}, ${Math.round(row.point.y)}` : BASE_TEXT.noCoords,
+    })
+    tr.createEl('td', { cls: 'fc-base-detail', text: row.detail })
   }
 
   private renderWarnings(rows: readonly MapRow[]): void {

@@ -1438,6 +1438,13 @@
   color: var(--text-error);
 }
 
+/* 分批显示的「再显示 N 条」（base/rowWindow.ts）：首屏只画一批，这里放按钮 */
+.fc-base-more {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 14px;
+}
+
 .fc-base-warning,
 .fc-base-empty {
   margin-top: 10px;
