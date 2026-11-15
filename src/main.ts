@@ -34,6 +34,7 @@ import { MapEditor } from './editor/MapEditor.ts'
 import { MapLayerManager } from './render/MapLayerManager.ts'
 import { buildMapExportSvg, describeOverlayExport, type OverlayExportNote } from './base/mapPreview.ts'
 import { lucideIconFragment } from './render/lucideFragment.ts'
+import { inlineMarkerImages } from './render/markerImageInline.ts'
 import {
   EXPORT_RANGE_OPTIONS,
   exportFileNameFor,
@@ -1385,9 +1386,16 @@ export default class ProjectKakiPlugin extends Plugin {
     let overlayNotes: readonly OverlayExportNote[] = []
     // 定义**按被导出的那份文档**解析（v2 方案 B）：导出别人的图时，颜色/线宽跟的是文件里那一套
     const definitions = this.definitionsOf(document)
+    // 标记图片：先派生成"小的、有上限的" data URL 再内联 —— 导出文件要能脱离库单独打开，
+    // 又不能把用户几 MB 的原图整个塞进去（见 `markerImageInline.ts`）。取不到的那张回退字形。
+    const markerImagePaths = definitions.markers
+      .filter((marker) => marker.mode === 'image' && marker.imagePath.length > 0)
+      .map((marker) => marker.imagePath)
+    const markerImages = await inlineMarkerImages(markerImagePaths, (path) => resolveVaultResourceUrl(this.app, path))
     const svg = buildMapExportSvg(document, EXPORT_WIDTH, EXPORT_HEIGHT, definitions.terrains, resolved.bounds, {
       customMarkers: definitions.markers,
       iconSvgFor: lucideIconFragment,
+      markerImageFor: (path) => markerImages.get(path) ?? null,
       // 数值图层（温度 / 深度）与图层开关**按被导出的那张地图解析**：与画布同一条口径
       // （关掉温度层，导出里就不该有它；配色 / 显示方式也要跟画布一致）。
       // W4-2：导出"别人给的图"时不该把**本机对当前那张图**的配色套上去

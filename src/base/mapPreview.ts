@@ -61,12 +61,19 @@ export interface MapPreviewOptions {
    *
    * 为什么注入而不是直接 import：本模块是纯模块（不 import obsidian），而图标形状只能由
    * Obsidian 的 `getIcon()` 拿到。注入方（`main.ts` / Base 视图）负责"取不到就返回 null"，
-   * 于是回退链（**字形 → 兜底圆点**）留在这里、对两条链路都一样。
-   *
-   * ⚠️ 自定义标记的**图片模式不内联 base64**：导出文件要能脱离库单独打开，
-   * 内联图片会让文件巨大。所以图片模式在这里回退成它的字形（与画布"图片挂了回退字形"同一条链）。
+   * 于是回退链（**图片 → 字形 → 兜底圆点**）留在这里、对两条链路都一样。
    */
   iconSvgFor?: (iconName: string) => string | null
+  /**
+   * 把一条**库内图片路径**变成已经派生好的 **data URL**（取不到就返回 `null`）。
+   *
+   * 只给导出用：`markerImageInline.ts` 先把原图等比缩到 ≤64px、编码成 PNG，并对体积封顶，
+   * 于是导出文件既有真实图片、又能脱离库单独打开。超出上限 / 解不开的图返回 `null`，
+   * 这里照旧回退字形（与画布"图片加载失败回退字形"同一条链）。
+   *
+   * Base 缩略图是**同步**渲染的，不传这一项 —— 它仍用字形，文档里如实写明这条差异。
+   */
+  markerImageFor?: (imagePath: string) => string | null
   /**
    * 数值图层（温度 / 深度）的样式表（配色 / 不透明度 / 显示方式）。缺省 = 出厂样式。
    *
@@ -295,6 +302,7 @@ export function buildMapPreviewSvgWithReport(
   const customTerrains = options.customTerrains ?? []
   const customMarkers = options.customMarkers ?? []
   const iconSvgFor = options.iconSvgFor
+  const markerImageFor = options.markerImageFor
   // 显式范围优先：导出"某个区域/当前视口"时，那个范围就是这次输出的全部视野
   const bounds = options.bounds ?? contentBounds(rows, document)
   // 世界 → SVG 的投影**算一次**：区域的边框宽度与虚线要按它换算（点坐标仍走 pointToSvgPoint）
@@ -493,7 +501,21 @@ export function buildMapPreviewSvgWithReport(
       const [x, y] = point.split(',')
       // 形状走**与画布同一份解析**（`resolveMarkerStyle` 把内置 / 自定义 / 未知抹平成同一个字形名），
       // 再由注入的 `iconSvgFor` 换成 SVG 片段；拿不到就退回旧的小圆点 —— 对象**绝不消失**。
-      const glyphName = resolveMarkerStyle(marker.icon, customMarkers).iconName
+      const style = resolveMarkerStyle(marker.icon, customMarkers)
+      // 图片模式优先：`imagePath` 只有 mode === 'image' 时才非空（解析层判过一次，这里不重复判）。
+      // 内联进来的是**派生过的小图**（≤64px / 有体积上限），所以导出文件仍然自足。
+      const imageHref = markerImageFor === undefined || style.imagePath.length === 0 ? null : markerImageFor(style.imagePath)
+      if (imageHref !== null && imageHref.length > 0) {
+        // 与画布同尺寸、同"contain"口径：18×18 的框里等比缩放并居中（`meet` = `object-fit: contain`）
+        const half = MARKER_ICON_SIZE / 2
+        content.push(
+          `<image data-row-id="map:marker:${marker.id}" x="${(Number(x) - half).toFixed(2)}" y="${(Number(y) - half).toFixed(2)}"` +
+            ` width="${MARKER_ICON_SIZE}" height="${MARKER_ICON_SIZE}" preserveAspectRatio="xMidYMid meet"` +
+            ` href="${escapeSvgText(imageHref)}" style="cursor:pointer" />`,
+        )
+        continue
+      }
+      const glyphName = style.iconName
       const fragment = iconSvgFor === undefined ? null : iconSvgFor(glyphName)
       if (fragment !== null && fragment.length > 0) {
         // 与画布同尺寸（`MARKER_ICON_SIZE`），并把 Lucide 的 24×24 坐标盒缩到那个尺寸
@@ -552,6 +574,8 @@ export function buildMapExportSvg(
   extras: {
     customMarkers?: readonly CustomMarker[]
     iconSvgFor?: (iconName: string) => string | null
+    /** 派生好的标记图片（data URL）；缺省不内联，回退字形 */
+    markerImageFor?: (imagePath: string) => string | null
     /** 数值图层样式（配色 / 不透明度 / 显示方式）；缺省 = 出厂 */
     overlayStyles?: OverlayStyles
     /** 图层可见性；缺省 = 出厂（数值图层默认隐藏 → 导出里不出现叠加层） */
@@ -573,6 +597,7 @@ export function buildMapExportSvg(
     ...(bounds ? { bounds } : {}),
     ...(extras.customMarkers ? { customMarkers: extras.customMarkers } : {}),
     ...(extras.iconSvgFor ? { iconSvgFor: extras.iconSvgFor } : {}),
+    ...(extras.markerImageFor ? { markerImageFor: extras.markerImageFor } : {}),
     ...(extras.overlayStyles ? { overlayStyles: extras.overlayStyles } : {}),
     ...(extras.layers ? { layers: extras.layers } : {}),
   })

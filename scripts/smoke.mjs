@@ -843,6 +843,9 @@ const fakeDocument = {
       // 离屏画布（地形图集、导出用的位图）也要能被检查：它们是内部对象，
       // 不从任何公开 API 暴露出来，但"图集里那一格到底画了什么"正是这个功能要验证的东西。
       createdCanvasContexts.push(el._ctx)
+      // 真实浏览器都有 `toDataURL`：标记图片内联要把派生图编码成 PNG data URL。
+      // 返回固定串即可 —— 断言只关心"有没有内联、前缀对不对"，像素由真实画布负责。
+      el.toDataURL = () => 'data:image/png;base64,FAKE'
       // 刻意**不**提供 `toBlob`：这就是 PNG 导出在受限环境下的降级分支
       // （真实浏览器都有，缺它的情况出现在部分移动端 WebView 上）。
     }
@@ -4264,6 +4267,15 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
   loaded.document.terrain['0_0'] = { t: 'forest' }
   loaded.document.terrain['1_0'] = { t: 'water' }
   loaded.document.markers.push({ id: 'm1', label: '龙脊城', p: [100, 50], icon: 'city' })
+  // 图片模式：一张能加载（导出应内联派生图）、一张解不开（应回退字形）。
+  // 真实浏览器里"文件在库里 → 图片能解码"，这里用 `loadableImageUrls` 保持同一条因果。
+  app.vault.files.set('Assets/lighthouse.png', '<png-bytes>')
+  loadableImageUrls.add(resourceUrlFor('Assets/lighthouse.png'))
+  app.vault.files.set('Assets/gone.png', 'this-is-not-an-image')
+  await plugin.addCustomMarker({ id: 'lighthouse', label: '灯塔', icon: 'port', imagePath: 'Assets/lighthouse.png', mode: 'image' })
+  await plugin.addCustomMarker({ id: 'gone', label: '失图', icon: 'tower', imagePath: 'Assets/gone.png', mode: 'image' })
+  loaded.document.markers.push({ id: 'm-img', label: '灯塔', p: [-100, 50], icon: 'custom:lighthouse' })
+  loaded.document.markers.push({ id: 'm-gone', label: '失图', p: [-100, -50], icon: 'custom:gone' })
   loaded.document.labels.push({ id: 'l1', text: '迷雾海', p: [-200, -100] })
   loaded.document.paths.push({ id: 'p1', type: 'river', pts: [[0, 0], [200, 120]], width: 8, color: '#4a9fd8', label: '北境商路' })
   loaded.document.regions.push({ id: 'r1', label: '北境领', pts: [[0, 0], [200, 0], [200, 200], [0, 200]], color: '#44cf6e', opacity: 0.22 })
@@ -4307,6 +4319,25 @@ console.log('\n场景 20：SVG 导出与 Base 缩略图（新功能端到端 + �
     '导出里的标记按字形画（与缩略图共用同一份实现）',
     (svg ?? '').includes('data-fc-icon='),
     String(svg).slice(0, 240),
+  )
+  // 图片模式：派生（≤64px、有体积上限）后内联，导出文件仍然能脱离库单独打开
+  check(
+    '图片模式的标记内联了派生的小图（不再是一律固定圆点）',
+    (svg ?? '').includes('<image data-row-id="map:marker:m-img"') &&
+      (svg ?? '').includes('href="data:image/png;base64,'),
+    String(svg).slice(0, 320),
+  )
+  check(
+    '图片解不开的标记回退字形（对象不消失，也不是固定圆点）',
+    /data-row-id="map:marker:m-gone"[^>]*transform=/.test(svg ?? '') &&
+      (svg ?? '').includes('map:marker:m-gone') &&
+      (svg ?? '').includes('<circle data-row-id="map:marker:m-gone"') === false,
+    String(svg).slice(0, 320),
+  )
+  check(
+    '内联图片之后导出仍然自包含（不出现库内资源地址）',
+    (svg ?? '').includes('app://') === false,
+    String(svg).slice(0, 200),
   )
   check('导出后打开了文件', openedLinks.some((entry) => entry.link === 'Maps/World.svg'), JSON.stringify(openedLinks))
   check('命令报告了导出路径', noticeLog.some((line) => line.includes('Maps/World.svg')), noticeLog.join(' | '))

@@ -41,7 +41,13 @@ function makeDocument(): MapDocument {
  */
 const SCALE = 9.36
 
-function render(options: { iconSvgFor?: (name: string) => string | null } = {}): string {
+function render(
+  options: {
+    iconSvgFor?: (name: string) => string | null
+    customMarkers?: Array<{ id: string; label: string; icon: string; imagePath: string; mode: 'glyph' | 'image' }>
+    markerImageFor?: (imagePath: string) => string | null
+  } = {},
+): string {
   return buildMapPreviewSvg(makeDocument(), [], {
     width: 1600,
     height: 1000,
@@ -121,6 +127,47 @@ test('未知图标名也走同一份解析：注入拿到的是目录给出的�
   assert.equal(calls.length, 1)
   assert.notEqual(calls[0], 'not-a-real-icon', '不该把认不出的 ID 直接丢给图标集')
   assert.ok(calls[0]!.length > 0, '必须给一个可用的回退字形名')
+})
+
+test('标记图片优先：给了派生好的 data URL 就画 <image>，不再走字形', () => {
+  const document = makeDocument()
+  document.markers[0]!.icon = 'custom:lighthouse'
+  const glyphCalls: string[] = []
+  const svg = buildMapPreviewSvg(document, [], {
+    width: 1600,
+    height: 1000,
+    padding: 32,
+    customMarkers: [
+      { id: 'custom:lighthouse', label: '灯塔', icon: 'port', imagePath: 'Assets/lighthouse.png', mode: 'image' },
+    ],
+    iconSvgFor: (name) => {
+      glyphCalls.push(name)
+      return '<path d="M0 0"/>'
+    },
+    markerImageFor: (path) => (path === 'Assets/lighthouse.png' ? 'data:image/png;base64,AAAA' : null),
+  })
+  assert.match(svg, /<image data-row-id="map:marker:m1"/)
+  assert.match(svg, /href="data:image\/png;base64,AAAA"/)
+  assert.match(svg, /width="18" height="18" preserveAspectRatio="xMidYMid meet"/)
+  assert.equal(glyphCalls.length, 0, '有图片就不该再问字形')
+  assert.equal(svg.includes('<circle data-row-id="map:marker:m1"'), false)
+})
+
+test('图片取不到（返回 null）时回退字形 —— 不是直接掉到兜底圆点', () => {
+  const document = makeDocument()
+  document.markers[0]!.icon = 'custom:lighthouse'
+  const svg = buildMapPreviewSvg(document, [], {
+    width: 1600,
+    height: 1000,
+    padding: 32,
+    customMarkers: [
+      { id: 'custom:lighthouse', label: '灯塔', icon: 'port', imagePath: 'Assets/gone.png', mode: 'image' },
+    ],
+    iconSvgFor: () => '<path data-fc-icon="fallback"/>',
+    markerImageFor: () => null,
+  })
+  assert.match(svg, /<path data-fc-icon="fallback"/)
+  assert.equal(svg.includes('<image'), false)
 })
 
 test('导出的 SVG 自包含：不出现指向库内文件或外部的引用', () => {
